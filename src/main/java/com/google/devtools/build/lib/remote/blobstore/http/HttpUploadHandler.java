@@ -53,20 +53,31 @@ final class HttpUploadHandler extends AbstractHttpHandler<FullHttpResponse> {
           && !response.status().equals(HttpResponseStatus.CREATED)
           && !response.status().equals(HttpResponseStatus.NO_CONTENT)) {
         // Supporting more than OK status to be compatible with nginx webdav.
-        String errorMsg = response.status().toString();
+        String errorMsgBuilder = response.status().toString();
         if (response.content().readableBytes() > 0) {
           byte[] data = new byte[response.content().readableBytes()];
           response.content().readBytes(data);
-          errorMsg += "\n" + new String(data, HttpUtil.getCharset(response));
+          errorMsgBuilder += "\n" + new String(data, HttpUtil.getCharset(response));
         }
-        failAndResetUserPromise(new HttpException(response, errorMsg, null));
+        String errorMsg = errorMsgBuilder;
+        if (!HttpUtil.isKeepAlive(response)) {
+          ctx.close()
+              .addListener(
+                  (f) -> failAndResetUserPromise(new HttpException(response, errorMsg, null)));
+        } else {
+          failAndResetUserPromise(new HttpException(response, errorMsg, null));
+        }
       } else {
-        succeedAndResetUserPromise();
+        if (!HttpUtil.isKeepAlive(response)) {
+          ctx.close()
+              .addListener((f) -> succeedAndResetUserPromise());
+        } else {
+          succeedAndResetUserPromise();
+        }
       }
-    } finally {
-      if (!HttpUtil.isKeepAlive(response)) {
-        ctx.close();
-      }
+    } catch (RuntimeException e) {
+      ctx.close();
+      throw e;
     }
   }
 
@@ -122,10 +133,6 @@ final class HttpUploadHandler extends AbstractHttpHandler<FullHttpResponse> {
 
   @SuppressWarnings("FutureReturnValueIgnored")
   private void failAndClose(Throwable t, ChannelHandlerContext ctx) {
-    try {
-      failAndResetUserPromise(t);
-    } finally {
-      ctx.close();
-    }
+    ctx.close().addListener((f) -> failAndResetUserPromise(t));
   }
 }

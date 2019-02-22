@@ -17,6 +17,7 @@ import static com.google.common.base.Preconditions.checkState;
 
 import com.google.auth.Credentials;
 import io.netty.buffer.ByteBuf;
+import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelPromise;
 import io.netty.handler.codec.http.DefaultFullHttpRequest;
@@ -164,41 +165,32 @@ final class HttpDownloadHandler extends AbstractHttpHandler<HttpObject> {
   }
 
   private void succeedAndReset(ChannelHandlerContext ctx) {
-    try {
+    if (keepAlive) {
+      resetState();
       succeedAndResetUserPromise();
-    } finally {
-      reset(ctx);
+    } else {
+      ctx.close().addListener((f) -> succeedAndResetUserPromise());
     }
   }
 
   @SuppressWarnings("FutureReturnValueIgnored")
   private void failAndClose(Throwable t, ChannelHandlerContext ctx) {
-    try {
-      failAndResetUserPromise(t);
-    } finally {
-      ctx.close();
-    }
+    ctx.close().addListener((f) -> failAndResetUserPromise(t));
   }
 
   private void failAndReset(Throwable t, ChannelHandlerContext ctx) {
-    try {
+    if (keepAlive) {
+      resetState();
       failAndResetUserPromise(t);
-    } finally {
-      reset(ctx);
+    } else {
+      ctx.close().addListener((f) -> failAndResetUserPromise(t));
     }
   }
 
-  @SuppressWarnings("FutureReturnValueIgnored")
-  private void reset(ChannelHandlerContext ctx) {
-    try {
-      if (!keepAlive) {
-        ctx.close();
-      }
-    } finally {
-      out = null;
-      keepAlive = HttpVersion.HTTP_1_1.isKeepAliveDefault();
-      downloadSucceeded = false;
-      response = null;
-    }
+  private void resetState() {
+    out = null;
+    keepAlive = HttpVersion.HTTP_1_1.isKeepAliveDefault();
+    downloadSucceeded = false;
+    response = null;
   }
 }

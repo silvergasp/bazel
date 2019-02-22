@@ -99,8 +99,8 @@ abstract class AbstractHttpHandler<T extends HttpObject> extends SimpleChannelIn
 
   @Override
   public void exceptionCaught(ChannelHandlerContext ctx, Throwable t) {
-    failAndResetUserPromise(t);
     ctx.fireExceptionCaught(t);
+    failAndResetUserPromise(t);
   }
 
   @SuppressWarnings("FutureReturnValueIgnored")
@@ -119,25 +119,22 @@ abstract class AbstractHttpHandler<T extends HttpObject> extends SimpleChannelIn
     ctx.connect(remoteAddress, localAddress, promise);
   }
 
-  @SuppressWarnings("FutureReturnValueIgnored")
   @Override
   public void disconnect(ChannelHandlerContext ctx, ChannelPromise promise) {
-    failAndResetUserPromise(new ClosedChannelException());
-    ctx.disconnect(promise);
+    ctx.disconnect(promise)
+        .addListener((f) -> failAndResetUserPromise(new ClosedChannelException()));
   }
 
-  @SuppressWarnings("FutureReturnValueIgnored")
   @Override
   public void close(ChannelHandlerContext ctx, ChannelPromise promise) {
-    failAndResetUserPromise(new ClosedChannelException());
-    ctx.close(promise);
+    ctx.close(promise)
+        .addListener((f) -> failAndResetUserPromise(new ClosedChannelException()));
   }
 
-  @SuppressWarnings("FutureReturnValueIgnored")
   @Override
   public void deregister(ChannelHandlerContext ctx, ChannelPromise promise) {
-    failAndResetUserPromise(new ClosedChannelException());
-    ctx.deregister(promise);
+    ctx.deregister(promise)
+        .addListener((f) -> failAndResetUserPromise(new ClosedChannelException()));
   }
 
   @SuppressWarnings("FutureReturnValueIgnored")
@@ -154,8 +151,8 @@ abstract class AbstractHttpHandler<T extends HttpObject> extends SimpleChannelIn
 
   @Override
   public void channelInactive(ChannelHandlerContext ctx) {
-    failAndResetUserPromise(new ClosedChannelException());
     ctx.fireChannelInactive();
+    failAndResetUserPromise(new ClosedChannelException());
   }
 
   @Override
@@ -165,7 +162,7 @@ abstract class AbstractHttpHandler<T extends HttpObject> extends SimpleChannelIn
 
   @Override
   public void channelUnregistered(ChannelHandlerContext ctx) {
-    failAndResetUserPromise(new ClosedChannelException());
     ctx.fireChannelUnregistered();
+    failAndResetUserPromise(new ClosedChannelException());
   }
 }
