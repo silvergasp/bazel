@@ -700,7 +700,7 @@ public class CppOptions extends FragmentOptions {
   @Option(
       name = "incompatible_disable_legacy_crosstool_fields",
       oldName = "experimental_disable_legacy_crosstool_fields",
-      defaultValue = "false",
+      defaultValue = "true",
       documentationCategory = OptionDocumentationCategory.TOOLCHAIN,
       effectTags = {OptionEffectTag.LOADING_AND_ANALYSIS},
       metadataTags = {
