@@ -276,7 +276,7 @@ using an older release of Bazel, look for the "Configuring CROSSTOOL" tutorial.
             ),
             tool_path(
                 name = "strip",
-                path: "/bin/false",
+                path = "/bin/false",
             ),
         ]
         return cc_common.create_cc_toolchain_config_info(
