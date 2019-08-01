@@ -44,10 +44,10 @@ import javax.annotation.Nullable;
 /** An implementation of the {@code android_instrumentation_test} rule. */
 public class AndroidInstrumentationTestBase implements RuleConfiguredTargetFactory {
 
-  private final AndroidMigrationSemantics androidMigrationSemantics;
+  private final AndroidSemantics androidSemantics;
 
-  public AndroidInstrumentationTestBase(AndroidMigrationSemantics androidMigrationSemantics) {
-    this.androidMigrationSemantics = androidMigrationSemantics;
+  protected AndroidInstrumentationTestBase(AndroidSemantics androidSemantics) {
+    this.androidSemantics = androidSemantics;
   }
 
   private static final Template ANDROID_INSTRUMENTATION_TEST_STUB_SCRIPT =
@@ -71,8 +71,8 @@ public class AndroidInstrumentationTestBase implements RuleConfiguredTargetFacto
   @Override
   public ConfiguredTarget create(RuleContext ruleContext)
       throws InterruptedException, RuleErrorException, ActionConflictException {
+    androidSemantics.checkForMigrationTag(ruleContext);
     validateRuleContext(ruleContext);
-    androidMigrationSemantics.validateRuleContext(ruleContext);
 
     // The wrapper script that invokes the test entry point.
     Artifact testExecutable = createTestExecutable(ruleContext);
@@ -207,10 +207,15 @@ public class AndroidInstrumentationTestBase implements RuleConfiguredTargetFacto
         "test_app", Mode.TARGET, AndroidInstrumentationInfo.PROVIDER);
   }
 
+  @Nullable
+  private static ApkInfo getApkProvider(RuleContext ruleContext) {
+    return ruleContext.getPrerequisite("test_app", Mode.TARGET, ApkInfo.PROVIDER);
+  }
+
   /** The target APK from the {@code android_binary} in the {@code instrumentation} attribute. */
   @Nullable
   private static Artifact getTargetApk(RuleContext ruleContext) {
-    return getInstrumentationProvider(ruleContext).getTargetApk();
+    return getInstrumentationProvider(ruleContext).getTarget().getApk();
   }
 
   /**
@@ -219,7 +224,7 @@ public class AndroidInstrumentationTestBase implements RuleConfiguredTargetFacto
    */
   @Nullable
   private static Artifact getInstrumentationApk(RuleContext ruleContext) {
-    return getInstrumentationProvider(ruleContext).getInstrumentationApk();
+    return getApkProvider(ruleContext).getApk();
   }
 
   /** The support APKs from the {@code support_apks} and {@code fixtures} attributes. */

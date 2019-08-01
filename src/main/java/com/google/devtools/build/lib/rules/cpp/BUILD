@@ -19,6 +19,7 @@ java_library(
             "*.java",
             "transitions/*.java",
         ],
+        allow_empty = True,
         exclude = INTERFACE_SOURCES,
     ),
     deps = [
@@ -37,6 +38,7 @@ java_library(
         "//src/main/java/com/google/devtools/build/lib/analysis/platform",
         "//src/main/java/com/google/devtools/build/lib/analysis/skylark/annotations",
         "//src/main/java/com/google/devtools/build/lib/collect",
+        "//src/main/java/com/google/devtools/build/lib/collect/compacthashset",
         "//src/main/java/com/google/devtools/build/lib/collect/nestedset",
         "//src/main/java/com/google/devtools/build/lib/concurrent",
         "//src/main/java/com/google/devtools/build/lib/profiler",
@@ -45,6 +47,7 @@ java_library(
         "//src/main/java/com/google/devtools/build/lib/skyframe/serialization/autocodec",
         "//src/main/java/com/google/devtools/build/lib/skylarkbuildapi",
         "//src/main/java/com/google/devtools/build/lib/skylarkbuildapi/cpp",
+        "//src/main/java/com/google/devtools/build/lib/skylarkbuildapi/go",
         "//src/main/java/com/google/devtools/build/lib/vfs",
         "//src/main/java/com/google/devtools/build/skyframe",
         "//src/main/java/com/google/devtools/build/skyframe:skyframe-objects",

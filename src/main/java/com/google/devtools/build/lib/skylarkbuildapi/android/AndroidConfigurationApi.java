@@ -108,7 +108,7 @@ public interface AndroidConfigurationApi {
   @SkylarkCallable(name = "desugar_java8", structField = true, doc = "", documented = false)
   boolean desugarJava8();
 
-  @SkylarkCallable(name = "get_output_driecot", structField = true, doc = "", documented = false)
+  @SkylarkCallable(name = "desugar_java8_libs", structField = true, doc = "", documented = false)
   boolean desugarJava8Libs();
 
   @SkylarkCallable(name = "check_desugar_deps", structField = true, doc = "", documented = false)
@@ -166,6 +166,10 @@ public interface AndroidConfigurationApi {
       documented = false)
   boolean useAapt2ForRobolectric();
 
+  /**
+   * @deprecated control resource conflicts with the <code>allow_resource_conflicts</code> whitelist
+   */
+  @Deprecated
   @SkylarkCallable(
       name = "throw_on_resource_conflict",
       structField = true,
@@ -173,8 +177,12 @@ public interface AndroidConfigurationApi {
       documented = false)
   boolean throwOnResourceConflict();
 
-  @SkylarkCallable(name = "skip_parsing_action", structField = true, doc = "", documented = false)
-  boolean skipParsingAction();
+  @SkylarkCallable(
+      name = "omit_resources_info_provider_from_android_binary",
+      structField = true,
+      doc = "",
+      documented = false)
+  boolean omitResourcesInfoProviderFromAndroidBinary();
 
   @SkylarkCallable(
       name = "fixed_resource_neverlinking",

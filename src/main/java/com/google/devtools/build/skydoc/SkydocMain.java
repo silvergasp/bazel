@@ -14,6 +14,7 @@
 
 package com.google.devtools.build.skydoc;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Functions;
 import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableList;
@@ -45,13 +46,14 @@ import com.google.devtools.build.lib.skylarkbuildapi.android.UsesDataBindingProv
 import com.google.devtools.build.lib.skylarkbuildapi.apple.AppleBootstrap;
 import com.google.devtools.build.lib.skylarkbuildapi.config.ConfigBootstrap;
 import com.google.devtools.build.lib.skylarkbuildapi.cpp.CcBootstrap;
-import com.google.devtools.build.lib.skylarkbuildapi.cpp.CcInfoApi;
 import com.google.devtools.build.lib.skylarkbuildapi.java.GeneratedExtensionRegistryProviderApi;
 import com.google.devtools.build.lib.skylarkbuildapi.java.JavaBootstrap;
 import com.google.devtools.build.lib.skylarkbuildapi.platform.PlatformBootstrap;
 import com.google.devtools.build.lib.skylarkbuildapi.proto.ProtoBootstrap;
 import com.google.devtools.build.lib.skylarkbuildapi.python.PyBootstrap;
 import com.google.devtools.build.lib.skylarkbuildapi.repository.RepositoryBootstrap;
+import com.google.devtools.build.lib.skylarkbuildapi.stubs.ProviderStub;
+import com.google.devtools.build.lib.skylarkbuildapi.stubs.SkylarkAspectStub;
 import com.google.devtools.build.lib.skylarkbuildapi.test.TestingBootstrap;
 import com.google.devtools.build.lib.syntax.BaseFunction;
 import com.google.devtools.build.lib.syntax.BuildFileAST;
@@ -66,6 +68,7 @@ import com.google.devtools.build.lib.syntax.Runtime;
 import com.google.devtools.build.lib.syntax.SkylarkImport;
 import com.google.devtools.build.lib.syntax.StarlarkSemantics;
 import com.google.devtools.build.lib.syntax.UserDefinedFunction;
+import com.google.devtools.build.skydoc.SkydocOptions.OutputFormat;
 import com.google.devtools.build.skydoc.fakebuildapi.FakeActionsInfoProvider;
 import com.google.devtools.build.skydoc.fakebuildapi.FakeBuildApiGlobals;
 import com.google.devtools.build.skydoc.fakebuildapi.FakeConfigApi;
@@ -86,13 +89,20 @@ import com.google.devtools.build.skydoc.fakebuildapi.android.FakeApkInfo.FakeApk
 import com.google.devtools.build.skydoc.fakebuildapi.apple.FakeAppleCommon;
 import com.google.devtools.build.skydoc.fakebuildapi.config.FakeConfigGlobalLibrary;
 import com.google.devtools.build.skydoc.fakebuildapi.config.FakeConfigSkylarkCommon;
+import com.google.devtools.build.skydoc.fakebuildapi.cpp.FakeCcInfo;
 import com.google.devtools.build.skydoc.fakebuildapi.cpp.FakeCcModule;
+import com.google.devtools.build.skydoc.fakebuildapi.cpp.FakeCcToolchainConfigInfo;
+import com.google.devtools.build.skydoc.fakebuildapi.cpp.FakeGoWrapCcHelper;
+import com.google.devtools.build.skydoc.fakebuildapi.cpp.FakePyCcLinkParamsProvider;
+import com.google.devtools.build.skydoc.fakebuildapi.cpp.FakePyWrapCcHelper;
+import com.google.devtools.build.skydoc.fakebuildapi.cpp.FakePyWrapCcInfo;
 import com.google.devtools.build.skydoc.fakebuildapi.java.FakeJavaCcLinkParamsProvider;
 import com.google.devtools.build.skydoc.fakebuildapi.java.FakeJavaCommon;
 import com.google.devtools.build.skydoc.fakebuildapi.java.FakeJavaInfo.FakeJavaInfoProvider;
 import com.google.devtools.build.skydoc.fakebuildapi.java.FakeJavaProtoCommon;
 import com.google.devtools.build.skydoc.fakebuildapi.platform.FakePlatformCommon;
 import com.google.devtools.build.skydoc.fakebuildapi.proto.FakeProtoInfoApiProvider;
+import com.google.devtools.build.skydoc.fakebuildapi.proto.FakeProtoModule;
 import com.google.devtools.build.skydoc.fakebuildapi.python.FakePyInfo.FakePyInfoProvider;
 import com.google.devtools.build.skydoc.fakebuildapi.python.FakePyRuntimeInfo.FakePyRuntimeInfoProvider;
 import com.google.devtools.build.skydoc.fakebuildapi.repository.FakeRepositoryModule;
@@ -100,14 +110,18 @@ import com.google.devtools.build.skydoc.fakebuildapi.test.FakeAnalysisFailureInf
 import com.google.devtools.build.skydoc.fakebuildapi.test.FakeAnalysisTestResultInfoProvider;
 import com.google.devtools.build.skydoc.fakebuildapi.test.FakeCoverageCommon;
 import com.google.devtools.build.skydoc.fakebuildapi.test.FakeTestingModule;
-import com.google.devtools.build.skydoc.rendering.MarkdownRenderer;
-import com.google.devtools.build.skydoc.rendering.ProviderInfo;
-import com.google.devtools.build.skydoc.rendering.RuleInfo;
-import com.google.devtools.build.skydoc.rendering.UserDefinedFunctionInfo;
-import com.google.devtools.build.skydoc.rendering.UserDefinedFunctionInfo.DocstringParseException;
+import com.google.devtools.build.skydoc.rendering.AspectInfoWrapper;
+import com.google.devtools.build.skydoc.rendering.DocstringParseException;
+import com.google.devtools.build.skydoc.rendering.ProtoRenderer;
+import com.google.devtools.build.skydoc.rendering.ProviderInfoWrapper;
+import com.google.devtools.build.skydoc.rendering.RuleInfoWrapper;
+import com.google.devtools.build.skydoc.rendering.proto.StardocOutputProtos.AspectInfo;
+import com.google.devtools.build.skydoc.rendering.proto.StardocOutputProtos.ProviderInfo;
+import com.google.devtools.build.skydoc.rendering.proto.StardocOutputProtos.RuleInfo;
 import com.google.devtools.common.options.OptionsParser;
+import java.io.BufferedOutputStream;
+import java.io.FileOutputStream;
 import java.io.IOException;
-import java.io.PrintWriter;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -123,21 +137,21 @@ import java.util.stream.Collectors;
 /**
  * Main entry point for the Skydoc binary.
  *
- * <p>Skydoc generates human-readable documentation for relevant details of skylark files by
- * running a skylark interpreter with a fake implementation of the build API.</p>
+ * <p>Skydoc generates human-readable documentation for relevant details of skylark files by running
+ * a skylark interpreter with a fake implementation of the build API.
  *
  * <p>Currently, Skydoc generates documentation for skylark rule definitions (discovered by
- * invocations of the build API function {@code rule()}.</p>
+ * invocations of the build API function {@code rule()}.
  *
- * <p>Usage:</p>
+ * <p>Usage:
+ *
  * <pre>
  *   skydoc {target_skylark_file_label} {output_file} [symbol_name]...
  * </pre>
- * <p>
- *   Generates documentation for all exported symbols of the target skylark file that are
- *   specified in the list of symbol names. If no symbol names are supplied, outputs documentation
- *   for all exported symbols in the target skylark file.
- * </p>
+ *
+ * <p>Generates documentation for all exported symbols of the target skylark file that are specified
+ * in the list of symbol names. If no symbol names are supplied, outputs documentation for all
+ * exported symbols in the target skylark file.
  */
 public class SkydocMain {
 
@@ -146,9 +160,11 @@ public class SkydocMain {
   private final Map<Path, Environment> loaded = new HashMap<>();
   private final SkylarkFileAccessor fileAccessor;
   private final List<String> depRoots;
+  private final String workspaceName;
 
-  public SkydocMain(SkylarkFileAccessor fileAccessor, List<String> depRoots) {
+  public SkydocMain(SkylarkFileAccessor fileAccessor, String workspaceName, List<String> depRoots) {
     this.fileAccessor = fileAccessor;
+    this.workspaceName = workspaceName;
     if (depRoots.isEmpty()) {
       // For backwards compatibility, if no dep_roots are specified, use the current
       // directory as the only root.
@@ -159,11 +175,17 @@ public class SkydocMain {
   }
 
   public static void main(String[] args)
-      throws IOException, InterruptedException, LabelSyntaxException, EvalException {
+      throws IOException, InterruptedException, LabelSyntaxException, EvalException,
+          DocstringParseException {
     OptionsParser parser =
-        OptionsParser.newOptionsParser(StarlarkSemanticsOptions.class, SkydocOptions.class);
+        OptionsParser.builder()
+            .optionsClasses(StarlarkSemanticsOptions.class, SkydocOptions.class)
+            .build();
     parser.parseAndExitUponError(args);
     StarlarkSemanticsOptions semanticsOptions = parser.getOptions(StarlarkSemanticsOptions.class);
+    semanticsOptions.incompatibleDepsetUnion = false;
+    semanticsOptions.incompatibleDisableDeprecatedAttrParams = false;
+    semanticsOptions.incompatibleNewActionsApi = false;
     SkydocOptions skydocOptions = parser.getOptions(SkydocOptions.class);
 
     String targetFileLabelString;
@@ -171,45 +193,36 @@ public class SkydocMain {
     ImmutableSet<String> symbolNames;
     ImmutableList<String> depRoots;
 
-    // TODO(cparsons): Remove optional positional arg parsing.
-    List<String> residualArgs = parser.getResidue();
     if (Strings.isNullOrEmpty(skydocOptions.targetFileLabel)
         || Strings.isNullOrEmpty(skydocOptions.outputFilePath)) {
-      if (residualArgs.size() < 2) {
-        throw new IllegalArgumentException(
-            "Expected two or more arguments. Usage:\n"
-                + "{skydoc_bin} {target_skylark_file_label} {output_file} [symbol_names]...");
-      }
-
-      targetFileLabelString = residualArgs.get(0);
-      outputPath = residualArgs.get(1);
-      symbolNames = getSymbolNames(residualArgs);
-      depRoots = ImmutableList.of();
-    } else {
-      targetFileLabelString = skydocOptions.targetFileLabel;
-      outputPath = skydocOptions.outputFilePath;
-      symbolNames = ImmutableSet.copyOf(skydocOptions.symbolNames);
-      depRoots = ImmutableList.copyOf(skydocOptions.depRoots);
+      throw new IllegalArgumentException("Expected a target file label and an output file path.");
     }
 
-    Label targetFileLabel =
-        Label.parseAbsolute(targetFileLabelString, ImmutableMap.of());
+    targetFileLabelString = skydocOptions.targetFileLabel;
+    outputPath = skydocOptions.outputFilePath;
+    symbolNames = ImmutableSet.copyOf(skydocOptions.symbolNames);
+    depRoots = ImmutableList.copyOf(skydocOptions.depRoots);
+
+    Label targetFileLabel = Label.parseAbsolute(targetFileLabelString, ImmutableMap.of());
 
     ImmutableMap.Builder<String, RuleInfo> ruleInfoMap = ImmutableMap.builder();
     ImmutableMap.Builder<String, ProviderInfo> providerInfoMap = ImmutableMap.builder();
-    ImmutableList.Builder<RuleInfo> unknownNamedRules = ImmutableList.builder();
     ImmutableMap.Builder<String, UserDefinedFunction> userDefinedFunctions = ImmutableMap.builder();
+    ImmutableMap.Builder<String, AspectInfo> aspectInfoMap = ImmutableMap.builder();
 
-    new SkydocMain(new FilesystemFileAccessor(), depRoots)
-        .eval(
-            semanticsOptions.toSkylarkSemantics(),
-            targetFileLabel,
-            ruleInfoMap,
-            unknownNamedRules,
-            providerInfoMap,
-            userDefinedFunctions);
-
-    MarkdownRenderer renderer = new MarkdownRenderer();
+    try {
+      new SkydocMain(new FilesystemFileAccessor(), skydocOptions.workspaceName, depRoots)
+          .eval(
+              semanticsOptions.toSkylarkSemantics(),
+              targetFileLabel,
+              ruleInfoMap,
+              providerInfoMap,
+              userDefinedFunctions,
+              aspectInfoMap);
+    } catch (StarlarkEvaluationException exception) {
+      System.err.println("Stardoc documentation generation failed: " + exception.getMessage());
+      System.exit(1);
+    }
 
     Map<String, RuleInfo> filteredRuleInfos =
         ruleInfoMap.build().entrySet().stream()
@@ -223,10 +236,22 @@ public class SkydocMain {
         userDefinedFunctions.build().entrySet().stream()
             .filter(entry -> validSymbolName(symbolNames, entry.getKey()))
             .collect(ImmutableMap.toImmutableMap(Entry::getKey, Entry::getValue));
-    try (PrintWriter printWriter = new PrintWriter(outputPath, "UTF-8")) {
-      printRuleInfos(printWriter, renderer, filteredRuleInfos, ImmutableList.of());
-      printProviderInfos(printWriter, renderer, filteredProviderInfos);
-      printUserDefinedFunctions(printWriter, renderer, filteredUserDefinedFunctions);
+    Map<String, AspectInfo> filteredAspectInfos =
+        aspectInfoMap.build().entrySet().stream()
+            .filter(entry -> validSymbolName(symbolNames, entry.getKey()))
+            .collect(ImmutableMap.toImmutableMap(Entry::getKey, Entry::getValue));
+
+    if (skydocOptions.outputFormat == OutputFormat.PROTO) {
+      try (BufferedOutputStream out = new BufferedOutputStream(new FileOutputStream(outputPath))) {
+        new ProtoRenderer()
+            .appendRuleInfos(filteredRuleInfos.values())
+            .appendProviderInfos(filteredProviderInfos.values())
+            .appendUserDefinedFunctionInfos(filteredUserDefinedFunctions)
+            .appendAspectInfos(filteredAspectInfos.values())
+            .writeModuleInfo(out);
+      }
+    } else if (skydocOptions.outputFormat == OutputFormat.MARKDOWN) {
+      throw new IllegalArgumentException("Skydoc Binary only outputs raw proto format.");
     }
   }
 
@@ -243,74 +268,6 @@ public class SkydocMain {
     return false;
   }
 
-  private static ImmutableSet<String> getSymbolNames(List<String> args) {
-    ImmutableSet.Builder<String> symbolNameSet = ImmutableSet.builder();
-    for (int argi = 2; argi < args.size(); argi++) {
-      symbolNameSet.add(args.get(argi));
-    }
-    return symbolNameSet.build();
-  }
-
-  private static void printRuleInfos(
-      PrintWriter printWriter,
-      MarkdownRenderer renderer,
-      Map<String, RuleInfo> ruleInfos,
-      List<RuleInfo> unknownNamedRules) throws IOException {
-    for (Entry<String, RuleInfo> ruleInfoEntry : ruleInfos.entrySet()) {
-      printRuleInfo(printWriter, renderer, ruleInfoEntry.getKey(), ruleInfoEntry.getValue());
-      printWriter.println();
-    }
-    for (RuleInfo unknownNamedRule : unknownNamedRules) {
-      printRuleInfo(printWriter, renderer, "<unknown name>", unknownNamedRule);
-      printWriter.println();
-    }
-  }
-
-  private static void printProviderInfos(
-      PrintWriter printWriter,
-      MarkdownRenderer renderer,
-      Map<String, ProviderInfo> providerInfos) throws IOException {
-    for (Entry<String, ProviderInfo> entry : providerInfos.entrySet()) {
-      printProviderInfo(printWriter, renderer, entry.getKey(), entry.getValue());
-      printWriter.println();
-    }
-  }
-
-  private static void printUserDefinedFunctions(
-      PrintWriter printWriter,
-      MarkdownRenderer renderer,
-      Map<String, UserDefinedFunction> userDefinedFunctions)
-      throws IOException {
-    for (Entry<String, UserDefinedFunction> entry : userDefinedFunctions.entrySet()) {
-      try {
-        UserDefinedFunctionInfo functionInfo =
-            UserDefinedFunctionInfo.fromNameAndFunction(entry.getKey(), entry.getValue());
-        printUserDefinedFunctionInfo(printWriter, renderer, functionInfo);
-        printWriter.println();
-      } catch (DocstringParseException exception) {
-        System.err.println(exception.getMessage());
-        System.err.println();
-      }
-    }
-  }
-
-  private static void printRuleInfo(
-      PrintWriter printWriter, MarkdownRenderer renderer,
-      String exportedName, RuleInfo ruleInfo) throws IOException {
-    printWriter.println(renderer.render(exportedName, ruleInfo));
-  }
-
-  private static void printProviderInfo(
-      PrintWriter printWriter, MarkdownRenderer renderer,
-      String exportedName, ProviderInfo providerInfo) throws IOException {
-    printWriter.println(renderer.render(exportedName, providerInfo));
-  }
-
-  private static void printUserDefinedFunctionInfo(
-      PrintWriter printWriter, MarkdownRenderer renderer, UserDefinedFunctionInfo functionInfo)
-      throws IOException {
-    printWriter.println(renderer.render(functionInfo));
-  }
 
   /**
    * Evaluates/interprets the skylark file at a given path and its transitive skylark dependencies
@@ -321,8 +278,6 @@ public class SkydocMain {
    * @param ruleInfoMap a map builder to be populated with rule definition information for named
    *     rules. Keys are exported names of rules, and values are their {@link RuleInfo} rule
    *     descriptions. For example, 'my_rule = rule(...)' has key 'my_rule'
-   * @param unknownNamedRules a list builder to be populated with rule definition information for
-   *     rules which were not exported as top level symbols
    * @param providerInfoMap a map builder to be populated with provider definition information for
    *     named providers. Keys are exported names of providers, and values are their {@link
    *     ProviderInfo} descriptions. For example, 'my_provider = provider(...)' has key
@@ -330,43 +285,57 @@ public class SkydocMain {
    * @param userDefinedFunctionMap a map builder to be populated with user-defined functions. Keys
    *     are exported names of functions, and values are the {@link UserDefinedFunction} objects.
    *     For example, 'def my_function(foo):' is a function with key 'my_function'.
+   * @param aspectInfoMap a map builder to be populated with aspect definition information for named
+   *     aspects. Keys are exported names of aspects, and values are the {@link AspectInfo} asepct
+   *     descriptions. For example, 'my_aspect = aspect(...)' has key 'my_aspect'
    * @throws InterruptedException if evaluation is interrupted
    */
   public Environment eval(
       StarlarkSemantics semantics,
       Label label,
       ImmutableMap.Builder<String, RuleInfo> ruleInfoMap,
-      ImmutableList.Builder<RuleInfo> unknownNamedRules,
       ImmutableMap.Builder<String, ProviderInfo> providerInfoMap,
-      ImmutableMap.Builder<String, UserDefinedFunction> userDefinedFunctionMap)
-      throws InterruptedException, IOException, LabelSyntaxException, EvalException {
+      ImmutableMap.Builder<String, UserDefinedFunction> userDefinedFunctionMap,
+      ImmutableMap.Builder<String, AspectInfo> aspectInfoMap)
+      throws InterruptedException, IOException, LabelSyntaxException, EvalException,
+          StarlarkEvaluationException {
 
-    List<RuleInfo> ruleInfoList = new ArrayList<>();
-    List<ProviderInfo> providerInfoList = new ArrayList<>();
-    Environment env = recursiveEval(semantics, label, ruleInfoList, providerInfoList);
+    List<RuleInfoWrapper> ruleInfoList = new ArrayList<>();
 
-    Map<BaseFunction, RuleInfo> ruleFunctions = ruleInfoList.stream()
-        .collect(Collectors.toMap(
-            RuleInfo::getIdentifierFunction,
-            Functions.identity()));
-    Map<BaseFunction, ProviderInfo> providerInfos = providerInfoList.stream()
-        .collect(Collectors.toMap(
-            ProviderInfo::getIdentifier,
-            Functions.identity()));
+    List<ProviderInfoWrapper> providerInfoList = new ArrayList<>();
 
-    ImmutableSet.Builder<RuleInfo> handledRuleDefinitions = ImmutableSet.builder();
+    List<AspectInfoWrapper> aspectInfoList = new ArrayList<>();
+
+    Environment env =
+        recursiveEval(semantics, label, ruleInfoList, providerInfoList, aspectInfoList);
+
+    Map<BaseFunction, RuleInfoWrapper> ruleFunctions =
+        ruleInfoList.stream()
+            .collect(
+                Collectors.toMap(RuleInfoWrapper::getIdentifierFunction, Functions.identity()));
+
+    Map<BaseFunction, ProviderInfoWrapper> providerInfos =
+        providerInfoList.stream()
+            .collect(Collectors.toMap(ProviderInfoWrapper::getIdentifier, Functions.identity()));
+
+    Map<BaseFunction, AspectInfoWrapper> aspectFunctions =
+        aspectInfoList.stream()
+            .collect(
+                Collectors.toMap(AspectInfoWrapper::getIdentifierFunction, Functions.identity()));
 
     // Sort the bindings so their ordering is deterministic.
     TreeMap<String, Object> sortedBindings = new TreeMap<>(env.getGlobals().getExportedBindings());
 
     for (Entry<String, Object> envEntry : sortedBindings.entrySet()) {
       if (ruleFunctions.containsKey(envEntry.getValue())) {
-        RuleInfo ruleInfo = ruleFunctions.get(envEntry.getValue());
+        RuleInfo.Builder ruleInfoBuild = ruleFunctions.get(envEntry.getValue()).getRuleInfo();
+        RuleInfo ruleInfo = ruleInfoBuild.setRuleName(envEntry.getKey()).build();
         ruleInfoMap.put(envEntry.getKey(), ruleInfo);
-        handledRuleDefinitions.add(ruleInfo);
       }
       if (providerInfos.containsKey(envEntry.getValue())) {
-        ProviderInfo providerInfo = providerInfos.get(envEntry.getValue());
+        ProviderInfo.Builder providerInfoBuild =
+            providerInfos.get(envEntry.getValue()).getProviderInfo();
+        ProviderInfo providerInfo = providerInfoBuild.setProviderName(envEntry.getKey()).build();
         providerInfoMap.put(envEntry.getKey(), providerInfo);
       }
       if (envEntry.getValue() instanceof UserDefinedFunction) {
@@ -374,20 +343,44 @@ public class SkydocMain {
         userDefinedFunctionMap.put(envEntry.getKey(), userDefinedFunction);
       }
       if (envEntry.getValue() instanceof FakeStructApi) {
-        FakeStructApi struct = (FakeStructApi) envEntry.getValue();
-        for (String field : struct.getFieldNames()) {
-          if (struct.getValue(field) instanceof UserDefinedFunction) {
-            UserDefinedFunction userDefinedFunction = (UserDefinedFunction) struct.getValue(field);
-            userDefinedFunctionMap.put(envEntry.getKey() + "." + field, userDefinedFunction);
-          }
-        }
+        String namespaceName = envEntry.getKey();
+        FakeStructApi namespace = (FakeStructApi) envEntry.getValue();
+        putStructFields(namespaceName, namespace, userDefinedFunctionMap);
+      }
+      if (aspectFunctions.containsKey(envEntry.getValue())) {
+        AspectInfo.Builder aspectInfoBuild =
+            aspectFunctions.get(envEntry.getValue()).getAspectInfo();
+        AspectInfo aspectInfo = aspectInfoBuild.setAspectName(envEntry.getKey()).build();
+        aspectInfoMap.put(envEntry.getKey(), aspectInfo);
       }
     }
 
-    unknownNamedRules.addAll(ruleFunctions.values().stream()
-        .filter(ruleInfo -> !handledRuleDefinitions.build().contains(ruleInfo)).iterator());
-
     return env;
+  }
+
+  /**
+   * Recursively adds functions defined in {@code namespace}, and in its nested namespaces, to
+   * {@code userDefinedFunctionMap}.
+   *
+   * <p>Each entry's key is the fully qualified function name, e.g. {@code
+   * "outernamespace.innernamespace.func"}. {@code namespaceName} is the fully qualified name of
+   * {@code namespace} itself.
+   */
+  private static void putStructFields(
+      String namespaceName,
+      FakeStructApi namespace,
+      ImmutableMap.Builder<String, UserDefinedFunction> userDefinedFunctionMap)
+      throws EvalException {
+    for (String field : namespace.getFieldNames()) {
+      String qualifiedFieldName = namespaceName + "." + field;
+      if (namespace.getValue(field) instanceof UserDefinedFunction) {
+        UserDefinedFunction userDefinedFunction = (UserDefinedFunction) namespace.getValue(field);
+        userDefinedFunctionMap.put(qualifiedFieldName, userDefinedFunction);
+      } else if (namespace.getValue(field) instanceof FakeStructApi) {
+        FakeStructApi innerNamespace = (FakeStructApi) namespace.getValue(field);
+        putStructFields(qualifiedFieldName, innerNamespace, userDefinedFunctionMap);
+      }
+    }
   }
 
   /**
@@ -403,13 +396,14 @@ public class SkydocMain {
   private Environment recursiveEval(
       StarlarkSemantics semantics,
       Label label,
-      List<RuleInfo> ruleInfoList,
-      List<ProviderInfo> providerInfoList)
-      throws InterruptedException, IOException, LabelSyntaxException {
+      List<RuleInfoWrapper> ruleInfoList,
+      List<ProviderInfoWrapper> providerInfoList,
+      List<AspectInfoWrapper> aspectInfoList)
+      throws InterruptedException, IOException, LabelSyntaxException, StarlarkEvaluationException {
     Path path = pathOfLabel(label);
 
     if (pending.contains(path)) {
-      throw new IllegalStateException("cycle with " + path);
+      throw new StarlarkEvaluationException("cycle with " + path);
     } else if (loaded.containsKey(path)) {
       return loaded.get(path);
     }
@@ -427,19 +421,19 @@ public class SkydocMain {
 
       try {
         Environment importEnv =
-            recursiveEval(semantics, relativeLabel, ruleInfoList, providerInfoList);
+            recursiveEval(semantics, relativeLabel, ruleInfoList, providerInfoList, aspectInfoList);
         imports.put(anImport.getImportString(), new Extension(importEnv));
       } catch (NoSuchFileException noSuchFileException) {
-        throw new IllegalStateException(
+        throw new StarlarkEvaluationException(
             String.format(
                 "File %s imported '%s', yet %s was not found, even at roots %s.",
-                path, anImport.getImportString(), pathOfLabel(relativeLabel), depRoots),
-            noSuchFileException);
+                path, anImport.getImportString(), pathOfLabel(relativeLabel), depRoots));
       }
     }
 
     Environment env =
-        evalSkylarkBody(semantics, buildFileAST, imports, ruleInfoList, providerInfoList);
+        evalSkylarkBody(
+            semantics, buildFileAST, imports, ruleInfoList, providerInfoList, aspectInfoList);
 
     pending.remove(path);
     env.mutability().freeze();
@@ -448,9 +442,10 @@ public class SkydocMain {
   }
 
   private Path pathOfLabel(Label label) {
-    String workspacePrefix = label.getWorkspaceRoot().isEmpty()
-        ? ""
-        : label.getWorkspaceRoot() + "/";
+    String workspacePrefix = "";
+    if (!label.getWorkspaceRoot().isEmpty() && !label.getWorkspaceName().equals(workspaceName)) {
+      workspacePrefix = label.getWorkspaceRoot() + "/";
+    }
 
     return Paths.get(workspacePrefix + label.toPathFragment());
   }
@@ -471,16 +466,20 @@ public class SkydocMain {
       StarlarkSemantics semantics,
       BuildFileAST buildFileAST,
       Map<String, Extension> imports,
-      List<RuleInfo> ruleInfoList,
-      List<ProviderInfo> providerInfoList)
-      throws InterruptedException {
+      List<RuleInfoWrapper> ruleInfoList,
+      List<ProviderInfoWrapper> providerInfoList,
+      List<AspectInfoWrapper> aspectInfoList)
+      throws InterruptedException, StarlarkEvaluationException {
 
     Environment env =
         createEnvironment(
-            semantics, eventHandler, globalFrame(ruleInfoList, providerInfoList), imports);
+            semantics,
+            eventHandler,
+            globalFrame(ruleInfoList, providerInfoList, aspectInfoList),
+            imports);
 
     if (!buildFileAST.exec(env, eventHandler)) {
-      throw new RuntimeException("Error loading file");
+      throw new StarlarkEvaluationException("Starlark evaluation error");
     }
 
     env.mutability().freeze();
@@ -496,29 +495,42 @@ public class SkydocMain {
    * @param providerInfoList the list of {@link ProviderInfo} objects, to which provider()
    *     invocation information will be added
    */
-  private static GlobalFrame globalFrame(List<RuleInfo> ruleInfoList,
-      List<ProviderInfo> providerInfoList) {
+  private static GlobalFrame globalFrame(
+      List<RuleInfoWrapper> ruleInfoList,
+      List<ProviderInfoWrapper> providerInfoList,
+      List<AspectInfoWrapper> aspectInfoList) {
     TopLevelBootstrap topLevelBootstrap =
-        new TopLevelBootstrap(new FakeBuildApiGlobals(),
+        new TopLevelBootstrap(
+            new FakeBuildApiGlobals(),
             new FakeSkylarkAttrApi(),
             new FakeSkylarkCommandLineApi(),
             new FakeSkylarkNativeModuleApi(),
-            new FakeSkylarkRuleFunctionsApi(ruleInfoList, providerInfoList),
+            new FakeSkylarkRuleFunctionsApi(ruleInfoList, providerInfoList, aspectInfoList),
             new FakeStructProviderApi(),
             new FakeOutputGroupInfoProvider(),
             new FakeActionsInfoProvider(),
             new FakeDefaultInfoProvider());
-    AndroidBootstrap androidBootstrap = new AndroidBootstrap(new FakeAndroidSkylarkCommon(),
-        new FakeApkInfoProvider(),
-        new FakeAndroidInstrumentationInfoProvider(),
-        new FakeAndroidDeviceBrokerInfoProvider(),
-        new FakeAndroidResourcesInfoProvider(),
-        new FakeAndroidNativeLibsInfoProvider());
+    AndroidBootstrap androidBootstrap =
+        new AndroidBootstrap(
+            new FakeAndroidSkylarkCommon(),
+            new FakeApkInfoProvider(),
+            new FakeAndroidInstrumentationInfoProvider(),
+            new FakeAndroidDeviceBrokerInfoProvider(),
+            new FakeAndroidResourcesInfoProvider(),
+            new FakeAndroidNativeLibsInfoProvider());
     AppleBootstrap appleBootstrap = new AppleBootstrap(new FakeAppleCommon());
     ConfigBootstrap configBootstrap =
-        new ConfigBootstrap(new FakeConfigSkylarkCommon(), new FakeConfigApi(),
-            new FakeConfigGlobalLibrary());
-    CcBootstrap ccBootstrap = new CcBootstrap(new FakeCcModule());
+        new ConfigBootstrap(
+            new FakeConfigSkylarkCommon(), new FakeConfigApi(), new FakeConfigGlobalLibrary());
+    CcBootstrap ccBootstrap =
+        new CcBootstrap(
+            new FakeCcModule(),
+            new FakeCcInfo.Provider(),
+            new FakeCcToolchainConfigInfo.Provider(),
+            new FakePyWrapCcHelper(),
+            new FakeGoWrapCcHelper(),
+            new FakePyWrapCcInfo.Provider(),
+            new FakePyCcLinkParamsProvider.Provider());
     JavaBootstrap javaBootstrap =
         new JavaBootstrap(
             new FakeJavaCommon(),
@@ -526,10 +538,16 @@ public class SkydocMain {
             new FakeJavaProtoCommon(),
             new FakeJavaCcLinkParamsProvider.Provider());
     PlatformBootstrap platformBootstrap = new PlatformBootstrap(new FakePlatformCommon());
-    ProtoBootstrap protoBootstrap = new ProtoBootstrap(new FakeProtoInfoApiProvider());
+    ProtoBootstrap protoBootstrap =
+        new ProtoBootstrap(
+            new FakeProtoInfoApiProvider(),
+            new FakeProtoModule(),
+            new SkylarkAspectStub(),
+            new ProviderStub());
     PyBootstrap pyBootstrap =
         new PyBootstrap(new FakePyInfoProvider(), new FakePyRuntimeInfoProvider());
-    RepositoryBootstrap repositoryBootstrap = new RepositoryBootstrap(new FakeRepositoryModule());
+    RepositoryBootstrap repositoryBootstrap =
+        new RepositoryBootstrap(new FakeRepositoryModule(ruleInfoList));
     TestingBootstrap testingBootstrap =
         new TestingBootstrap(
             new FakeTestingModule(),
@@ -576,8 +594,6 @@ public class SkydocMain {
     ProguardMappingProviderApi.NAME,
     GeneratedExtensionRegistryProviderApi.NAME,
     AndroidBinaryDataInfoApi.NAME,
-    "ProtoRegistryAspect",
-    CcInfoApi.NAME
   };
 
   /**
@@ -602,5 +618,13 @@ public class SkydocMain {
         .setImportedExtensions(imports)
         .setEventHandler(eventHandler)
         .build();
+  }
+
+  /** Exception thrown when Starlark evaluation fails (due to malformed Starlark). */
+  @VisibleForTesting
+  static class StarlarkEvaluationException extends Exception {
+    public StarlarkEvaluationException(String message) {
+      super(message);
+    }
   }
 }

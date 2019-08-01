@@ -20,7 +20,6 @@ import com.google.auto.value.AutoValue;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ConcurrentHashMultiset;
-import com.google.common.collect.HashMultimap;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
@@ -40,12 +39,15 @@ import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.LostInputsExecException;
 import com.google.devtools.build.lib.actions.LostInputsExecException.LostInputsActionExecutionException;
 import com.google.devtools.build.lib.bugreport.BugReport;
+import com.google.devtools.build.lib.events.ExtendedEventHandler;
 import com.google.devtools.build.skyframe.SkyFunction.Environment;
 import com.google.devtools.build.skyframe.SkyFunction.Restart;
 import com.google.devtools.build.skyframe.SkyKey;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.logging.Logger;
@@ -106,22 +108,17 @@ public class ActionRewindStrategy {
     // failedAction, which the caller of getRewindPlan already knows must be restarted).
     ImmutableList.Builder<Action> additionalActionsToRestart = ImmutableList.builder();
 
-    HashMultimap<Artifact, ActionInput> lostInputsByDepOwners =
+    Set<Artifact.DerivedArtifact> lostArtifacts =
         getLostInputsByDepOwners(
             lostInputs,
             lostInputsException.getInputOwners(),
             runfilesDepOwners,
             ImmutableSet.copyOf(failedActionDeps),
-            failedAction);
+            failedAction,
+            lostInputsException);
 
-    for (Map.Entry<Artifact, Collection<ActionInput>> entry :
-        lostInputsByDepOwners.asMap().entrySet()) {
-      Artifact lostArtifact = entry.getKey();
-      checkIfLostArtifactIsSource(
-          lostArtifact, failedAction, lostInputsException, entry.getValue());
-
-      // Note that this artifact must be restarted.
-      rewindGraph.putEdge(actionLookupData, lostArtifact);
+    for (Artifact.DerivedArtifact lostArtifact : lostArtifacts) {
+      SkyKey artifactKey = Artifact.key(lostArtifact);
 
       Map<ActionLookupData, Action> actionMap = getActionsForLostArtifact(lostArtifact, env);
       if (actionMap == null) {
@@ -131,6 +128,10 @@ public class ActionRewindStrategy {
       }
       ImmutableList<ActionAndLookupData> newlyVisitedActions =
           addArtifactDepsAndGetNewlyVisitedActions(rewindGraph, lostArtifact, actionMap);
+      // Note that artifactKey must be restarted. We do this after
+      // addArtifactDepsAndGetNewlyVisitedActions so that it can track if actions are already known
+      // to be in the graph.
+      rewindGraph.putEdge(actionLookupData, artifactKey);
       additionalActionsToRestart.addAll(actions(newlyVisitedActions));
       checkActions(newlyVisitedActions, env, rewindGraph, additionalActionsToRestart);
     }
@@ -140,7 +141,8 @@ public class ActionRewindStrategy {
   }
 
   /** Clear the history of failed actions' lost inputs. */
-  void reset() {
+  void reset(ExtendedEventHandler eventHandler) {
+    eventHandler.post(new ActionRewindingStats(lostInputRecords.size()));
     lostInputRecords = ConcurrentHashMultiset.create();
   }
 
@@ -186,72 +188,78 @@ public class ActionRewindStrategy {
     }
   }
 
-  private void checkIfLostArtifactIsSource(
-      Artifact lostArtifact,
-      Action failedAction,
-      LostInputsActionExecutionException lostInputsException,
-      Collection<ActionInput> associatedLostInputs)
-      throws ActionExecutionException {
-    if (lostArtifact.isSourceArtifact()) {
-      // Rewinding source artifacts is not possible. They should not be losable, but we tolerate
-      // their loss--by failing the build instead of crashing--in case some kind of infrastructure
-      // failure results in their apparent loss.
-      logger.info(
-          String.format(
-              "lostArtifact unexpectedly source. lostArtifact: %s, lostInputs for artifact: %s, "
-                  + "failedAction: %.10000s",
-              lostArtifact, associatedLostInputs, failedAction));
-      // Launder the LostInputs exception as a plain ActionExecutionException so that it may be
-      // processed by SkyframeActionExecutor without short-circuiting.
-      throw new ActionExecutionException(lostInputsException, failedAction, /*catastrophe=*/ false);
-    }
-  }
-
-  private HashMultimap<Artifact, ActionInput> getLostInputsByDepOwners(
+  private static Set<Artifact.DerivedArtifact> getLostInputsByDepOwners(
       ImmutableList<ActionInput> lostInputs,
       LostInputsExecException.InputOwners inputOwners,
       ActionInputDepOwners runfilesDepOwners,
       ImmutableSet<SkyKey> failedActionDeps,
-      Action failedActionForLogging) {
+      Action failedAction,
+      LostInputsActionExecutionException lostInputsException)
+      throws ActionExecutionException {
 
-    HashMultimap<Artifact, ActionInput> lostInputsByDepOwners = HashMultimap.create();
+    Set<Artifact.DerivedArtifact> lostArtifacts = new HashSet<>();
     for (ActionInput lostInput : lostInputs) {
-      if (failedActionDeps.contains(lostInput)) {
-        Preconditions.checkState(
-            lostInput instanceof Artifact,
-            "unexpected non-artifact lostInput which is a dep of the current action. "
-                + "lostInput: %s, failedAction: %.10000s",
-            lostInput,
-            failedActionForLogging);
-        lostInputsByDepOwners.put((Artifact) lostInput, lostInput);
-        continue;
+      boolean foundLostInputDepOwner = false;
+      Artifact owner = inputOwners.getOwner(lostInput);
+
+      if (owner != null && owner.isSourceArtifact()) {
+        // TODO(mschaller): tighten signatures for InputMappingsSink to make this impossible.
+        BugReport.sendBugReport(
+            new IllegalStateException(
+                "Unexpected source artifact as input owner: " + owner + " " + failedAction));
+        throw new ActionExecutionException(
+            lostInputsException, failedAction, /*catastrophe=*/ false);
+      }
+      // Rewinding must invalidate all Skyframe paths from the failed action to the action which
+      // generates the lost input. Intermediate nodes not on the shortest path to that action may
+      // have values that depend on the output of that action. If these intermediate nodes are not
+      // invalidated, then their values may become stale.
+
+      Collection<Artifact> runfilesTransitiveOwners = null;
+      if (owner != null) {
+        runfilesTransitiveOwners = runfilesDepOwners.getDepOwners(owner);
+        for (Artifact runfilesTransitiveOwner : runfilesTransitiveOwners) {
+          if (failedActionDeps.contains(Artifact.key(runfilesTransitiveOwner))) {
+            lostArtifacts.add((Artifact.DerivedArtifact) runfilesTransitiveOwner);
+            foundLostInputDepOwner = true;
+          }
+        }
       }
 
-      Artifact owner = inputOwners.getOwner(lostInput);
-      if (owner != null && failedActionDeps.contains(owner)) {
+      Collection<Artifact> runfilesOwners = runfilesDepOwners.getDepOwners(lostInput);
+      for (Artifact runfilesOwner : runfilesOwners) {
+        if (runfilesOwner.isSourceArtifact()) {
+          // TODO(mschaller): tighten signatures for ActionInputMapSink to make this impossible.
+          BugReport.sendBugReport(
+              new IllegalStateException(
+                  "Unexpected source artifact as runfile owner: "
+                      + runfilesOwner
+                      + " "
+                      + failedAction));
+          throw new ActionExecutionException(
+              lostInputsException, failedAction, /*catastrophe=*/ false);
+        }
+        if (failedActionDeps.contains(Artifact.key(runfilesOwner))) {
+          lostArtifacts.add((Artifact.DerivedArtifact) runfilesOwner);
+          foundLostInputDepOwner = true;
+        }
+      }
+
+      if (owner != null && failedActionDeps.contains(Artifact.key(owner))) {
         // The lost input is included in a tree artifact or fileset that the action directly depends
         // on.
-        lostInputsByDepOwners.put(owner, lostInput);
-        continue;
+        lostArtifacts.add((Artifact.DerivedArtifact) owner);
+        foundLostInputDepOwner = true;
       }
 
-      Artifact runfilesDepOwner = runfilesDepOwners.getDepOwner(lostInput);
-      if (runfilesDepOwner != null && failedActionDeps.contains(runfilesDepOwner)) {
-        // The lost input is included in a runfiles middleman that the action directly depends on.
-        lostInputsByDepOwners.put(runfilesDepOwner, lostInput);
-        continue;
+      if (lostInput instanceof Artifact
+          && failedActionDeps.contains(Artifact.key((Artifact) lostInput))) {
+        lostArtifacts.add((Artifact.DerivedArtifact) lostInput);
+        foundLostInputDepOwner = true;
       }
 
-      Artifact runfilesDepTransitiveOwner = null;
-      if (owner != null) {
-        runfilesDepTransitiveOwner = runfilesDepOwners.getDepOwner(owner);
-        if (runfilesDepTransitiveOwner != null
-            && failedActionDeps.contains(runfilesDepTransitiveOwner)) {
-          // The lost input is included in a tree artifact or fileset which is included in a
-          // runfiles middleman that the action directly depends on.
-          lostInputsByDepOwners.put(runfilesDepTransitiveOwner, lostInput);
-          continue;
-        }
+      if (foundLostInputDepOwner) {
+        continue;
       }
 
       // Rewinding can't do anything about a lost input that can't be associated with a direct dep
@@ -260,20 +268,16 @@ public class ActionRewindStrategy {
       // case, reevaluating the failed action (and no other deps) may help, because doing so may
       // rerun the generating spawn.
       //
-      // In other cases, such as with bugs, the second time the action fails will cause a crash in
-      // checkIfActionLostInputTwice. We log that this has occurred.
-      logger.info(
+      // In other cases, such as with bugs, when the action fails enough it will cause a crash in
+      // checkIfActionLostInputTooManyTimes. We log that this has occurred.
+      logger.warning(
           String.format(
               "lostInput not a dep of the failed action, and can't be associated with such a dep. "
-                  + "lostInput: %s, owner: %s, runfilesDepOwner: %s, runfilesDepTransitiveOwner: %s"
-                  + ", failedAction: %.10000s",
-              lostInput,
-              owner,
-              runfilesDepOwner,
-              runfilesDepTransitiveOwner,
-              failedActionForLogging));
+                  + "lostInput: %s, owner: %s, runfilesOwners: %s, runfilesTransitiveOwners:"
+                  + " %s, failedAction: %.10000s",
+              lostInput, owner, runfilesOwners, runfilesTransitiveOwners, failedAction));
     }
-    return lostInputsByDepOwners;
+    return lostArtifacts;
   }
 
   /**
@@ -293,24 +297,37 @@ public class ActionRewindStrategy {
       ActionAndLookupData actionAndLookupData = uncheckedActions.removeFirst();
       ActionLookupData actionKey = actionAndLookupData.lookupData();
       Action action = actionAndLookupData.action();
-      HashSet<Artifact> artifactsToCheck = new HashSet<>();
+      ArrayList<Artifact.DerivedArtifact> artifactsToCheck = new ArrayList<>();
+      ArrayList<ActionLookupData> newlyDiscoveredActions = new ArrayList<>();
 
       if (action instanceof SkyframeAwareAction) {
         // This action depends on more than just its input artifact values. We need to also restart
-        // the Skyframe subgraph it depends on, up to and including any artifacts.
-        artifactsToCheck.addAll(
-            addSkyframeAwareDepsAndGetNewlyVisitedArtifacts(
-                rewindGraph, actionKey, (SkyframeAwareAction) action));
+        // the Skyframe subgraph it depends on, up to and including any artifacts, which may
+        // aggregate multiple actions.
+        addSkyframeAwareDepsAndGetNewlyVisitedArtifactsAndActions(
+            rewindGraph,
+            actionKey,
+            (SkyframeAwareAction) action,
+            artifactsToCheck,
+            newlyDiscoveredActions);
       }
 
       if (action.mayInsensitivelyPropagateInputs()) {
         // Restarting this action won't recreate the missing input. We need to also restart this
         // action's non-source inputs and the actions which created those inputs.
-        artifactsToCheck.addAll(
-            addPropagatingActionDepsAndGetNewlyVisitedArtifacts(rewindGraph, actionKey, action));
+        addPropagatingActionDepsAndGetNewlyVisitedArtifactsAndActions(
+            rewindGraph, actionKey, action, artifactsToCheck, newlyDiscoveredActions);
       }
 
-      for (Artifact artifact : artifactsToCheck) {
+      for (ActionLookupData actionLookupData : newlyDiscoveredActions) {
+        Action additionalAction =
+            Preconditions.checkNotNull(
+                ActionExecutionFunction.getActionForLookupData(env, actionLookupData),
+                actionLookupData);
+        additionalActionsToRestart.add(additionalAction);
+        uncheckedActions.add(ActionAndLookupData.create(actionLookupData, additionalAction));
+      }
+      for (Artifact.DerivedArtifact artifact : artifactsToCheck) {
         Map<ActionLookupData, Action> actionMap = getActionsForLostArtifact(artifact, env);
         if (actionMap == null) {
           continue;
@@ -325,53 +342,67 @@ public class ActionRewindStrategy {
 
   /**
    * For a {@link SkyframeAwareAction} {@code action} with key {@code actionKey}, add its Skyframe
-   * subgraph to {@code rewindGraph}.
-   *
-   * <p>Returns a list of artifacts which were newly added to the graph.
+   * subgraph to {@code rewindGraph}, any {@link Artifact}s to {@code newlyVisitedArtifacts}, and
+   * any {@link ActionLookupData}s to {@code newlyVisitedActions}.
    */
-  private ImmutableList<Artifact> addSkyframeAwareDepsAndGetNewlyVisitedArtifacts(
-      MutableGraph<SkyKey> rewindGraph, ActionLookupData actionKey, SkyframeAwareAction action) {
+  private static void addSkyframeAwareDepsAndGetNewlyVisitedArtifactsAndActions(
+      MutableGraph<SkyKey> rewindGraph,
+      ActionLookupData actionKey,
+      SkyframeAwareAction<?> action,
+      ArrayList<Artifact.DerivedArtifact> newlyVisitedArtifacts,
+      ArrayList<ActionLookupData> newlyVisitedActions) {
 
     ImmutableGraph<SkyKey> graph = action.getSkyframeDependenciesForRewinding(actionKey);
+    if (graph.nodes().isEmpty()) {
+      return;
+    }
     assertSkyframeAwareRewindingGraph(graph, actionKey);
 
-    ImmutableList.Builder<Artifact> newlyVisitedArtifacts = ImmutableList.builder();
     Set<EndpointPair<SkyKey>> edges = graph.edges();
     for (EndpointPair<SkyKey> edge : edges) {
       SkyKey target = edge.target();
       if (target instanceof Artifact && rewindGraph.addNode(target)) {
-        newlyVisitedArtifacts.add(((Artifact) target));
+        newlyVisitedArtifacts.add(((Artifact.DerivedArtifact) target));
+      }
+      if (target instanceof ActionLookupData && rewindGraph.addNode(target)) {
+        newlyVisitedActions.add(((ActionLookupData) target));
       }
       rewindGraph.putEdge(edge.source(), edge.target());
     }
-    return newlyVisitedArtifacts.build();
   }
 
   /**
    * For a propagating {@code action} with key {@code actionKey}, add its generated inputs' keys to
-   * {@code rewindGraph} and add edges from {@code actionKey} to those keys.
-   *
-   * <p>Returns a list of artifacts which were newly added to the graph.
+   * {@code rewindGraph}, add edges from {@code actionKey} to those keys, add any {@link Artifact}s
+   * to {@code newlyVisitedArtifacts}, and add any {@link ActionLookupData}s to {@code
+   * newlyVisitedActions}.
    */
-  private ImmutableList<Artifact> addPropagatingActionDepsAndGetNewlyVisitedArtifacts(
-      MutableGraph<SkyKey> rewindGraph, ActionLookupData actionKey, Action action) {
+  private static void addPropagatingActionDepsAndGetNewlyVisitedArtifactsAndActions(
+      MutableGraph<SkyKey> rewindGraph,
+      ActionLookupData actionKey,
+      Action action,
+      ArrayList<Artifact.DerivedArtifact> newlyVisitedArtifacts,
+      ArrayList<ActionLookupData> newlyVisitedActions) {
 
-    ImmutableList.Builder<Artifact> newlyVisitedArtifacts = ImmutableList.builder();
     for (Artifact input : action.getInputs()) {
       if (input.isSourceArtifact()) {
         continue;
       }
+      SkyKey artifactKey = Artifact.key(input);
       // Restarting all derived inputs of propagating actions is overkill. Preferably, we'd want
       // to only restart the inputs which correspond to the known lost outputs. The information
-      // to do this is probably present in the ActionInputs contained in getRewindPlan's
-      // lostInputsByOwners.
+      // to do this is probably present in the data available to #getRewindPlan.
       //
       // Rewinding is expected to be rare, so refining this may not be necessary.
-      if (!rewindGraph.addNode(input)) {
-        continue;
+      boolean newlyVisited = rewindGraph.addNode(artifactKey);
+      if (newlyVisited) {
+        if (artifactKey instanceof Artifact) {
+          newlyVisitedArtifacts.add((Artifact.DerivedArtifact) artifactKey);
+        } else if (artifactKey instanceof ActionLookupData) {
+          newlyVisitedActions.add((ActionLookupData) artifactKey);
+        }
       }
-      newlyVisitedArtifacts.add(input);
-      rewindGraph.putEdge(actionKey, input);
+      rewindGraph.putEdge(actionKey, artifactKey);
     }
 
     // Rewinding ignores artifacts returned by Action#getAllowedDerivedInputs because:
@@ -386,8 +417,6 @@ public class ActionRewindStrategy {
                       + "%.10000s",
                   actionKey, action)));
     }
-
-    return newlyVisitedArtifacts.build();
   }
 
   /**
@@ -404,12 +433,15 @@ public class ActionRewindStrategy {
 
     ImmutableList.Builder<ActionAndLookupData> newlyVisitedActions =
         ImmutableList.builderWithExpectedSize(actionMap.size());
+    SkyKey artifactKey = Artifact.key(artifact);
     for (Map.Entry<ActionLookupData, Action> actionEntry : actionMap.entrySet()) {
       ActionLookupData actionKey = actionEntry.getKey();
       if (rewindGraph.addNode(actionKey)) {
         newlyVisitedActions.add(ActionAndLookupData.create(actionKey, actionEntry.getValue()));
       }
-      rewindGraph.putEdge(artifact, actionKey);
+      if (!artifactKey.equals(actionKey)) {
+        rewindGraph.putEdge(artifactKey, actionKey);
+      }
     }
     return newlyVisitedActions.build();
   }
@@ -421,7 +453,7 @@ public class ActionRewindStrategy {
    */
   @Nullable
   private Map<ActionLookupData, Action> getActionsForLostArtifact(
-      Artifact lostInput, Environment env) throws InterruptedException {
+      Artifact.DerivedArtifact lostInput, Environment env) throws InterruptedException {
     Set<ActionLookupData> actionExecutionDeps = getActionExecutionDeps(lostInput, env);
     if (actionExecutionDeps == null) {
       return null;
@@ -430,7 +462,9 @@ public class ActionRewindStrategy {
     Map<ActionLookupData, Action> actions =
         Maps.newHashMapWithExpectedSize(actionExecutionDeps.size());
     for (ActionLookupData dep : actionExecutionDeps) {
-      actions.put(dep, ActionExecutionFunction.getActionForLookupData(env, dep));
+      actions.put(
+          dep,
+          Preconditions.checkNotNull(ActionExecutionFunction.getActionForLookupData(env, dep)));
     }
     return actions;
   }
@@ -440,26 +474,28 @@ public class ActionRewindStrategy {
    * or {@code null} if any of those dependencies are not done.
    */
   @Nullable
-  private Set<ActionLookupData> getActionExecutionDeps(Artifact lostInput, Environment env)
-      throws InterruptedException {
+  private Set<ActionLookupData> getActionExecutionDeps(
+      Artifact.DerivedArtifact lostInput, Environment env) throws InterruptedException {
+    if (!lostInput.isTreeArtifact()) {
+      return ImmutableSet.of(lostInput.getGeneratingActionKey());
+    }
     ArtifactFunction.ArtifactDependencies artifactDependencies =
         ArtifactFunction.ArtifactDependencies.discoverDependencies(lostInput, env);
     if (artifactDependencies == null) {
       return null;
     }
 
-    if (artifactDependencies.isTemplateActionForTreeArtifact()) {
-      ArtifactFunction.ActionTemplateExpansion actionTemplateExpansion =
-          artifactDependencies.getActionTemplateExpansion(env);
-      if (actionTemplateExpansion == null) {
-        return null;
-      }
-      // This ignores the ActionTemplateExpansionKey dependency of the template artifact because we
-      // expect to never need to rewind that.
-      return ImmutableSet.copyOf(actionTemplateExpansion.getExpandedActionExecutionKeys());
+    if (!artifactDependencies.isTemplateActionForTreeArtifact()) {
+      return ImmutableSet.of(lostInput.getGeneratingActionKey());
     }
-
-    return ImmutableSet.of(artifactDependencies.getNontemplateActionExecutionKey());
+    ArtifactFunction.ActionTemplateExpansion actionTemplateExpansion =
+        artifactDependencies.getActionTemplateExpansion(env);
+    if (actionTemplateExpansion == null) {
+      return null;
+    }
+    // This ignores the ActionTemplateExpansionKey dependency of the template artifact because we
+    // expect to never need to rewind that.
+    return ImmutableSet.copyOf(actionTemplateExpansion.getExpandedActionExecutionKeys());
   }
 
   private static void assertSkyframeAwareRewindingGraph(
@@ -475,6 +511,12 @@ public class ActionRewindStrategy {
         graph,
         actionKey);
     Preconditions.checkArgument(
+        graph.nodes().contains(actionKey),
+        "SkyframeAwareAction's rewinding graph does not contain its action root. graph: %s, "
+            + "actionKey: %s",
+        graph,
+        actionKey);
+    Preconditions.checkArgument(
         Iterables.size(Traverser.forGraph(graph).breadthFirst(actionKey)) == graph.nodes().size(),
         "SkyframeAwareAction's rewinding graph has nodes unreachable from its action root. "
             + "graph: %s, actionKey: %s",
@@ -483,22 +525,17 @@ public class ActionRewindStrategy {
 
     for (EndpointPair<SkyKey> edge : graph.edges()) {
       SkyKey target = edge.target();
-
-      // Action rewinding could be changed to support finding other actions in a
-      // SkyframeAwareAction's rewinding graph. For now, fail if any are found, because it's
-      // currently impossible and unsupported.
-      Preconditions.checkArgument(
-          !(target instanceof ActionLookupData),
-          "SkyframeAwareAction's rewinding graph contains non-root action node. graph: %s, "
-              + "rootActionNode: %s, unexpectedActionNode: %s",
-          graph,
-          actionKey,
-          target);
-
       Preconditions.checkArgument(
           !(target instanceof Artifact && ((Artifact) target).isSourceArtifact()),
           "SkyframeAwareAction's rewinding graph contains source artifact. graph: %s, "
               + "rootActionNode: %s, sourceArtifact: %s",
+          graph,
+          actionKey,
+          target);
+      Preconditions.checkState(
+          !(target instanceof Artifact) || target instanceof Artifact.DerivedArtifact,
+          "A non-source artifact must be derived. graph: %s, rootActionNode: %s, sourceArtifact:"
+              + " %s",
           graph,
           actionKey,
           target);
@@ -552,8 +589,7 @@ public class ActionRewindStrategy {
     }
   }
 
-  private static ImmutableList<Action> actions(
-      ImmutableList<ActionAndLookupData> newlyVisitedActions) {
+  private static ImmutableList<Action> actions(List<ActionAndLookupData> newlyVisitedActions) {
     return newlyVisitedActions.stream().map(ActionAndLookupData::action).collect(toImmutableList());
   }
 }

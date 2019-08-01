@@ -13,8 +13,6 @@
 // limitations under the License.
 package com.google.devtools.build.lib.rules.java;
 
-import static com.google.common.collect.ImmutableList.toImmutableList;
-
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
@@ -353,6 +351,32 @@ public class JavaCommon {
     }
   }
 
+  public static void checkRuleLoadedThroughMacro(RuleContext ruleContext) {
+    if (!ruleContext.getFragment(JavaConfiguration.class).loadJavaRulesFromBzl()) {
+      return;
+    }
+
+    if (!hasValidTag(ruleContext) || !ruleContext.getRule().wasCreatedByMacro()) {
+      registerMigrationRuleError(ruleContext);
+    }
+  }
+
+  private static boolean hasValidTag(RuleContext ruleContext) {
+    return ruleContext
+        .attributes()
+        .get("tags", Type.STRING_LIST)
+        .contains("__JAVA_RULES_MIGRATION_DO_NOT_USE_WILL_BREAK__");
+  }
+
+  private static void registerMigrationRuleError(RuleContext ruleContext) {
+    ruleContext.ruleError(
+        "The native Java rules are deprecated. Please load "
+            + ruleContext.getRule().getRuleClass()
+            + " from the rules_java repository. See http://github.com/bazelbuild/rules_java and "
+            + "https://github.com/bazelbuild/bazel/issues/8741. You can temporarily bypass this "
+            + "error by setting --incompatible_load_java_rules_from_bzl=false.");
+  }
+
   /**
    * Returns transitive Java native libraries.
    *
@@ -424,7 +448,7 @@ public class JavaCommon {
   /** Computes javacopts for the current rule. */
   private ImmutableList<String> computeJavacOpts(Collection<String> extraRuleJavacOpts) {
     return ImmutableList.<String>builder()
-        .addAll(javaToolchain.getJavacOptions())
+        .addAll(javaToolchain.getJavacOptions(ruleContext))
         .addAll(extraRuleJavacOpts)
         .addAll(computePerPackageJavacOpts(ruleContext, javaToolchain))
         .addAll(ruleContext.getExpander().withDataLocations().tokenized("javacopts"))
@@ -434,26 +458,27 @@ public class JavaCommon {
   /** Returns the per-package configured javacopts. */
   public static ImmutableList<String> computePerPackageJavacOpts(
       RuleContext ruleContext, JavaToolchainProvider toolchain) {
-    return computePerPackageConfiguration(ruleContext, toolchain).stream()
-        .flatMap(p -> p.javacopts().stream())
-        .collect(toImmutableList());
+    // Do not use streams here as they create excessive garbage.
+    ImmutableList.Builder<String> result = ImmutableList.builder();
+    for (JavaPackageConfigurationProvider provider : toolchain.packageConfiguration()) {
+      if (provider.matches(ruleContext.getLabel())) {
+        result.addAll(provider.javacopts());
+      }
+    }
+    return result.build();
   }
 
   /** Returns the per-package configured runfiles. */
   public static NestedSet<Artifact> computePerPackageData(
       RuleContext ruleContext, JavaToolchainProvider toolchain) {
+    // Do not use streams here as they create excessive garbage.
     NestedSetBuilder<Artifact> data = NestedSetBuilder.naiveLinkOrder();
-    computePerPackageConfiguration(ruleContext, toolchain).stream()
-        .map(JavaPackageConfigurationProvider::data)
-        .forEach(data::addTransitive);
+    for (JavaPackageConfigurationProvider provider : toolchain.packageConfiguration()) {
+      if (provider.matches(ruleContext.getLabel())) {
+        data.addTransitive(provider.data());
+      }
+    }
     return data.build();
-  }
-
-  private static ImmutableList<JavaPackageConfigurationProvider> computePerPackageConfiguration(
-      RuleContext ruleContext, JavaToolchainProvider toolchain) {
-    return toolchain.packageConfiguration().stream()
-        .filter(p -> p.matches(ruleContext.getLabel()))
-        .collect(toImmutableList());
   }
 
   public static PathFragment getHostJavaExecutable(RuleContext ruleContext) {
@@ -798,7 +823,6 @@ public class JavaCommon {
         JavaCompilationArgsProvider.legacyFromTargets(
             runtimeDepInfo, semantics.isJavaProtoLibraryStrictDeps(ruleContext));
     attributes.addRuntimeClassPathEntries(provider.getRuntimeJars());
-    attributes.addInstrumentationMetadataEntries(provider.getInstrumentationMetadata());
   }
 
   /**

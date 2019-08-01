@@ -14,7 +14,11 @@ Full, authorative list of incompatible changes is [GitHub issues with
 
 General Starlark
 
+*   [Dictionary lookup of unhashable types](#dictionary-lookup-of-unhashable-types)
 *   [Dictionary concatenation](#dictionary-concatenation)
+*   [String escapes](#string-escapes)
+*   [String.split empty separator](#stringsplit-empty-separator)
+*   [Disable default parameter of String.partition/rpartition](#disable-default-parameter-of-stringpartitionrpartition)
 *   [Load must appear at top of file](#load-must-appear-at-top-of-file)
 *   [Depset is no longer iterable](#depset-is-no-longer-iterable)
 *   [Depset union](#depset-union)
@@ -23,6 +27,7 @@ General Starlark
 *   [Package name is a function](#package-name-is-a-function)
 *   [FileType is deprecated](#filetype-is-deprecated)
 *   [Static Name Resolution](#static-name-resolution)
+*   [Assignment LHS identifiers have local scope](#assignment-lhs-identifiers-have-local-scope)
 *   [Load label cannot cross package boundaries](#load-label-cannot-cross-package-boundaries)
 
 Starlark Rules
@@ -64,6 +69,17 @@ C++
 *   [Disable legacy C++ toolchain API](#disable-legacy-c-toolchain-api)
 
 
+### Dictionary lookup of unhashable types
+
+We are restricting the lookup of keys in dictionaries to hashable
+types only. Trying to search or retrieve a key (for example by
+using the `in` operator or `dict.get`) of an unhashable type from
+a dict will fail.
+
+*   Flag: `--incompatible_disallow_dict_lookup_unhashable_keys`
+*   Default: `false`
+*   Tracking issue: [#8730](https://github.com/bazelbuild/bazel/issues/8730)
+
 ### Dictionary concatenation
 
 We are removing the `+` operator on dictionaries. This includes the `+=` form
@@ -74,6 +90,34 @@ with Python. A possible workaround is to use the `.update` method instead.
 *   Default: `true`
 *   Tracking issue: [#6461](https://github.com/bazelbuild/bazel/issues/6461)
 
+### String escapes
+
+We are restricting unrecognized escape sequences. Trying to include escape
+sequences like `\a`, `\b` or any other escape sequence that is unknown to
+Starlark will result in a syntax error.
+
+*   Flag: `--incompatible_restrict_escape_sequences`
+*   Default: `false`
+*   Tracking issue: [#8380](https://github.com/bazelbuild/bazel/issues/8380)
+
+### String.split empty separator
+
+We are disallowing empty strings as separators to `string.split`. If `sep` is
+the empty string, `split` will fail.
+
+*   Flag: `--incompatible_disallow_split_empty_separator`
+*   Default: `false`
+*   Tracking issue: [#7355](https://github.com/bazelbuild/bazel/issues/7355)
+
+### Disable default parameter of String.partition/rpartition
+
+This flag disables the default value `' '` for `sep` parameter of `String.parition`
+and `String.rpartition`.
+
+*   Flag: `--incompatible_disable_partition_default_parameter`
+*   Default: `false`
+*   Tracking issue: [#8725](https://github.com/bazelbuild/bazel/issues/8725)
+
 ### Load must appear at top of file
 
 Previously, the `load` statement could appear anywhere in a `.bzl` file so long
@@ -81,7 +125,7 @@ as it was at the top level. With this change, for `.bzl` files, `load` must
 appear at the beginning of the file, i.e. before any other non-`load` statement.
 
 *   Flag: `--incompatible_bzl_disallow_load_after_statement`
-*   Default: `false`
+*   Default: `true`
 *   Tracking issue: [#5815](https://github.com/bazelbuild/bazel/issues/5815)
 
 
@@ -108,7 +152,7 @@ sorted(deps.to_list())  # recommended
 ```
 
 *   Flag: `--incompatible_depset_is_not_iterable`
-*   Default: `false`
+*   Default: `true`
 *   Tracking issue: [#5816](https://github.com/bazelbuild/bazel/issues/5816)
 
 
@@ -556,6 +600,30 @@ The proposal is not fully implemented yet.
 *   Default: `true`
 *   Tracking issue: [#5637](https://github.com/bazelbuild/bazel/issues/5637)
 
+### Assignment LHS identifiers have local scope
+
+When the flag is set, LHS identifiers in assignment statements (`x = y`, `x += y`)
+get the local scope of the lexical block containing the statement.
+
+Previously assignment statements did not set a new local scope for identifiers,
+for example:
+
+```python
+# Before
+a = []
+def f(): a += [1]
+f()
+print(a) # [1]
+
+# After
+a = []
+def f(): a += [1]
+f()      # local variable 'a' is referenced before assignment
+```
+
+*   Flag: `--incompatible_assignment_identifiers_have_local_scope`
+*   Default: `false`
+*   Tracking issue: [#8956](https://github.com/bazelbuild/bazel/issues/8956)
 
 ### Disallow transitive loads
 
@@ -574,7 +642,7 @@ y = 1
 ```
 
 *   Flag: `--incompatible_no_transitive_loads`
-*   Default: `false`
+*   Default: `true`
 *   Introduced in: `0.19.0`
 *   Tracking issue: [#5636](https://github.com/bazelbuild/bazel/issues/5636)
 

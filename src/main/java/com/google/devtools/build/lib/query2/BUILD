@@ -9,17 +9,19 @@ filegroup(
 java_library(
     name = "query2",
     srcs = glob(
-        ["*.java"],
+        [
+            "*.java",
+            "aquery/*.java",
+            "cquery/*.java",
+            "query/*.java",
+        ],
         exclude = [
             "AbstractBlazeQueryEnvironment.java",
             "FakeLoadTarget.java",
-            "AqueryUtils.java",
-            "AqueryActionFilter.java",
         ],
     ),
     deps = [
         ":abstract-blaze-query-env",
-        ":aquery-utils",
         ":aspect-resolver",
         ":fake-load-target",
         ":query-engine",
@@ -38,6 +40,7 @@ java_library(
         "//src/main/java/com/google/devtools/build/lib/concurrent",
         "//src/main/java/com/google/devtools/build/lib/graph",
         "//src/main/java/com/google/devtools/build/lib/profiler",
+        "//src/main/java/com/google/devtools/build/lib/supplier",
         "//src/main/java/com/google/devtools/build/lib/vfs",
         "//src/main/java/com/google/devtools/build/skyframe",
         "//src/main/java/com/google/devtools/build/skyframe:skyframe-objects",
@@ -53,13 +56,7 @@ java_library(
 java_library(
     name = "query-output",
     srcs = glob(
-        ["output/*.java"],
-        exclude = [
-            "output/AspectResolver.java",
-            "output/PresciseAspectResolver.java",
-            "output/ConservativeAspectResolver.java",
-            "output/NullAspectResolver.java",
-        ],
+        ["query/output/*.java"],
     ),
     deps = [
         ":abstract-blaze-query-env",
@@ -72,10 +69,12 @@ java_library(
         "//src/main/java/com/google/devtools/build/lib/collect",
         "//src/main/java/com/google/devtools/build/lib/collect/compacthashset",
         "//src/main/java/com/google/devtools/build/lib/graph",
+        "//src/main/java/com/google/devtools/build/lib/profiler",
         "//src/main/java/com/google/devtools/common/options",
         "//src/main/protobuf:build_java_proto",
         "//third_party:guava",
         "//third_party:jsr305",
+        "//third_party/protobuf:protobuf_java",
     ],
 )
 
@@ -88,6 +87,7 @@ java_library(
         ":query-engine",
         "//src/main/java/com/google/devtools/build/lib:events",
         "//src/main/java/com/google/devtools/build/lib:packages-internal",
+        "//src/main/java/com/google/devtools/build/lib/profiler",
         "//third_party:guava",
     ],
 )
@@ -108,12 +108,7 @@ java_library(
 
 java_library(
     name = "aspect-resolver",
-    srcs = [
-        "output/AspectResolver.java",
-        "output/ConservativeAspectResolver.java",
-        "output/NullAspectResolver.java",
-        "output/PreciseAspectResolver.java",
-    ],
+    srcs = glob(["query/aspectresolvers/*.java"]),
     deps = [
         "//src/main/java/com/google/devtools/build/lib:events",
         "//src/main/java/com/google/devtools/build/lib:packages-internal",
@@ -142,6 +137,7 @@ java_library(
         "//src/main/java/com/google/devtools/build/lib/collect/compacthashset",
         "//src/main/java/com/google/devtools/build/lib/concurrent",
         "//src/main/java/com/google/devtools/build/lib/graph",
+        "//src/main/java/com/google/devtools/build/lib/profiler",
         "//third_party:guava",
         "//third_party:jsr305",
     ],
@@ -150,8 +146,8 @@ java_library(
 java_library(
     name = "aquery-utils",
     srcs = [
-        "AqueryActionFilter.java",
-        "AqueryUtils.java",
+        "aquery/AqueryActionFilter.java",
+        "aquery/AqueryUtils.java",
     ],
     deps = [
         ":query-engine",

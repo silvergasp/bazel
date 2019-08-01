@@ -15,6 +15,7 @@
 package com.google.devtools.build.lib.analysis.test;
 
 import com.google.common.collect.ImmutableList;
+import com.google.devtools.build.lib.actions.ActionInput;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.analysis.FilesToRunProvider;
 import com.google.devtools.build.lib.analysis.TransitiveInfoCollection;
@@ -58,7 +59,8 @@ public final class TestProvider implements TransitiveInfoProvider {
    * @param target the configured target. Should belong to a test rule.
    * @return the test status artifacts
    */
-  public static ImmutableList<Artifact> getTestStatusArtifacts(TransitiveInfoCollection target) {
+  public static ImmutableList<Artifact.DerivedArtifact> getTestStatusArtifacts(
+      TransitiveInfoCollection target) {
     return target.getProvider(TestProvider.class).getTestParams().getTestStatusArtifacts();
   }
 
@@ -70,18 +72,24 @@ public final class TestProvider implements TransitiveInfoProvider {
     private final int shards;
     private final TestTimeout timeout;
     private final String testRuleClass;
-    private final ImmutableList<Artifact> testStatusArtifacts;
+    private final ImmutableList<Artifact.DerivedArtifact> testStatusArtifacts;
     private final ImmutableList<Artifact> coverageArtifacts;
     private final FilesToRunProvider coverageReportGenerator;
+    private final ImmutableList<ActionInput> outputs;
 
     /**
-     * Don't call this directly. Instead use
-     * {@link com.google.devtools.build.lib.analysis.test.TestActionBuilder}.
+     * Don't call this directly. Instead use {@link
+     * com.google.devtools.build.lib.analysis.test.TestActionBuilder}.
      */
-    TestParams(int runs, int shards, TestTimeout timeout, String testRuleClass,
-        ImmutableList<Artifact> testStatusArtifacts,
+    TestParams(
+        int runs,
+        int shards,
+        TestTimeout timeout,
+        String testRuleClass,
+        ImmutableList<Artifact.DerivedArtifact> testStatusArtifacts,
         ImmutableList<Artifact> coverageArtifacts,
-        FilesToRunProvider coverageReportGenerator) {
+        FilesToRunProvider coverageReportGenerator,
+        ImmutableList<ActionInput> outputs) {
       this.runs = runs;
       this.shards = shards;
       this.timeout = timeout;
@@ -89,6 +97,7 @@ public final class TestProvider implements TransitiveInfoProvider {
       this.testStatusArtifacts = testStatusArtifacts;
       this.coverageArtifacts = coverageArtifacts;
       this.coverageReportGenerator = coverageReportGenerator;
+      this.outputs = outputs;
     }
 
     /**
@@ -123,7 +132,7 @@ public final class TestProvider implements TransitiveInfoProvider {
      * Returns a list of test status artifacts that represent serialized test status protobuffers
      * produced by testing this target.
      */
-    public ImmutableList<Artifact> getTestStatusArtifacts() {
+    public ImmutableList<Artifact.DerivedArtifact> getTestStatusArtifacts() {
       return testStatusArtifacts;
     }
 
@@ -139,6 +148,11 @@ public final class TestProvider implements TransitiveInfoProvider {
      */
     public FilesToRunProvider getCoverageReportGenerator() {
       return coverageReportGenerator;
+    }
+
+    /** Returns the list of mandatory and optional test outputs. */
+    public ImmutableList<ActionInput> getOutputs() {
+      return outputs;
     }
   }
 }

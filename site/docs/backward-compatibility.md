@@ -14,6 +14,7 @@ incompatible and require some changes from Bazel users.
 * Expected breaking change in release X.Y: label **breaking-change-X.Y** (for example: [**breaking-change-0.21**](https://github.com/bazelbuild/bazel/issues?utf8=%E2%9C%93&q=is%3Aissue+label%3Abreaking-change-0.21))
 * Release X.Y is in a migration window: label **migration-X.Y** (for example: [**migration-0.21**](https://github.com/bazelbuild/bazel/issues?utf8=%E2%9C%93&q=is%3Aissue+label%3Amigration-0.21))
 
+
 ## At a glance
 
 1. Every breaking change is guarded with an `--incompatible_*` flag.
@@ -21,9 +22,17 @@ incompatible and require some changes from Bazel users.
 1. For every `--incompatible_*` flag we have a GitHub issue that explains
    the change in behavior and provides a migration recipe.
 1. The migration window is at least one release long and is set by the author of the incompatible change.
-1. We announce what set of flags we indend to flip with the next release one release in advance.
+1. We announce what set of flags we intend to flip with the next release one release in advance.
 1. APIs and behavior guarded by an `--experimental_*` flag can change at any time.
 1. Users should never run their production builds with `--experimental_*`  or `--incompatible_*` flags.
+
+### How to follow this policy
+
+* [For Bazel Users - how to update
+  Bazel](updating-bazel.html)
+* [For contributors - best practices for incompatible changes](https://bazel.build/breaking-changes-guide.html)
+* <a href='https://github.com/bazelbuild/continuous-integration/tree/master/docs/release-playbook.%6D%64'>For release managers - how to update issue labels and release</a>
+
 
 ## What is stable functionality?
 
@@ -77,12 +86,13 @@ For every incompatible change, the issue specifies the following:
 The incompatible change issue is closed when the incompatible flag is flipped at
 HEAD.
 
-All the incompatible changes for which a Bazel releaze X.Y is part of a
+All the incompatible changes for which a Bazel release X.Y is part of a
 migration window are marked with a label "migration-X.Y" label (for example
 [migration-0.21](https://github.com/bazelbuild/bazel/issues?utf8=%E2%9C%93&q=is%3Aissue+label%3Amigration-0.21)).
 
 All the incompatible changes that are expected to happen in release X.Y
 are marked with a label "breaking-change-X.Y" (for example
 [breaking-change-0.21](https://github.com/bazelbuild/bazel/issues?utf8=%E2%9C%93&q=is%3Aissue+label%3Abreaking-change-0.21)).
+
 
 

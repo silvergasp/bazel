@@ -16,7 +16,6 @@ package com.google.devtools.build.lib.query2.engine;
 import static com.google.common.truth.Truth.assertThat;
 import static com.google.devtools.build.lib.packages.Attribute.attr;
 import static com.google.devtools.build.lib.packages.BuildType.LABEL;
-import static com.google.devtools.build.lib.testutil.TestConstants.GENRULE_SETUP;
 import static com.google.devtools.build.lib.testutil.TestConstants.PLATFORM_LABEL;
 
 import com.google.common.collect.Iterables;
@@ -46,13 +45,7 @@ import org.junit.Test;
 /** Tests for {@link PostAnalysisQueryEnvironment}. */
 public abstract class PostAnalysisQueryTest<T> extends AbstractQueryTest<T> {
 
-  /** Partial query to filter out implicit dependencies of GenRule rules. */
-  @Override
-  protected String getDependencyCorrectionWithGen() {
-    return getDependencyCorrection() + " - deps(" + GENRULE_SETUP + ")";
-  }
-
-  /** Partial query to filter out the platform labels. */
+  // Also filter out platform dependencies.
   @Override
   protected String getDependencyCorrection() {
     return " - deps(" + PLATFORM_LABEL + ")";
@@ -203,14 +196,65 @@ public abstract class PostAnalysisQueryTest<T> extends AbstractQueryTest<T> {
 
     // Check for implicit dependencies (late bound attributes, implicit attributes, platforms)
     assertThat(evalToListOfStrings("deps(//test:my_rule)"))
-        .containsAllIn(evalToListOfStrings(explicits + " + " + implicits + " + " + PLATFORM_LABEL));
+        .containsAtLeastElementsIn(
+            evalToListOfStrings(explicits + " + " + implicits + " + " + PLATFORM_LABEL));
 
     helper.setQuerySettings(Setting.NO_IMPLICIT_DEPS);
     assertThat(evalToListOfStrings("deps(//test:my_rule)"))
-        .containsExactlyElementsIn(evalToListOfStrings(explicits));
+        .containsAtLeastElementsIn(evalToListOfStrings(explicits));
+    assertThat(evalToListOfStrings("deps(//test:my_rule)"))
+        .doesNotContain(evalToListOfStrings(implicits));
   }
 
-  @Override
+  @Test
+  public void testNoImplicitDeps_toolchains() throws Exception {
+    MockRule ruleWithImplicitDeps =
+        () ->
+            MockRule.define(
+                "implicit_toolchain_deps_rule",
+                (builder, env) ->
+                    builder.addRequiredToolchains(
+                        Label.parseAbsoluteUnchecked("//test:toolchain_type")));
+    helper.useRuleClassProvider(setRuleClassProviders(ruleWithImplicitDeps).build());
+
+    writeFile(
+        "test/toolchain.bzl",
+        "def _impl(ctx):",
+        "  toolchain = platform_common.ToolchainInfo()",
+        "  return [toolchain]",
+        "test_toolchain = rule(",
+        "    implementation = _impl,",
+        ")");
+    writeFile(
+        "test/BUILD",
+        "load(':toolchain.bzl', 'test_toolchain')",
+        "implicit_toolchain_deps_rule(",
+        "    name = 'my_rule',",
+        ")",
+        "toolchain_type(name = 'toolchain_type')",
+        "toolchain(",
+        "    name = 'toolchain',",
+        "    toolchain_type = ':toolchain_type',",
+        "    toolchain = ':toolchain_impl',",
+        ")",
+        "test_toolchain(name = 'toolchain_impl')");
+    ((PostAnalysisQueryHelper<T>) helper).useConfiguration("--extra_toolchains=//test:toolchain");
+
+    String implicits = "//test:toolchain_impl";
+    String explicits = "//test:my_rule";
+
+    // Check for implicit toolchain dependencies
+    assertThat(evalToListOfStrings("deps(//test:my_rule)"))
+        .containsAtLeastElementsIn(
+            evalToListOfStrings(explicits + " + " + implicits + " + " + PLATFORM_LABEL));
+
+    helper.setQuerySettings(Setting.NO_IMPLICIT_DEPS);
+    assertThat(evalToListOfStrings("deps(//test:my_rule)"))
+        .containsAtLeastElementsIn(evalToListOfStrings(explicits));
+    assertThat(evalToListOfStrings("deps(//test:my_rule)"))
+        .doesNotContain(evalToListOfStrings(implicits));
+  }
+
   @Test
   public void testNoImplicitDeps_computedDefault() throws Exception {
     MockRule computedDefaultRule =
@@ -517,6 +561,9 @@ public abstract class PostAnalysisQueryTest<T> extends AbstractQueryTest<T> {
   public void testSiblings_SamePackageRdeps() {}
 
   @Override
+  public void testSiblings_MatchesTargetNamedAll() {}
+
+  @Override
   public void testSiblings_Simple() {}
 
   @Override
@@ -560,4 +607,13 @@ public abstract class PostAnalysisQueryTest<T> extends AbstractQueryTest<T> {
   @Override
   @Test
   public void testVisibleWithPackageGroupWithNonPackageGroupIncludes() throws Exception {}
+
+  // We don't support --nodep_deps=false.
+  @Override
+  @Test
+  public void testNodepDeps_False() throws Exception {}
+
+  // package_group instances have a null configuration and are filtered out by --host_deps=false.
+  @Test
+  public void testDefaultVisibilityReturnedInDeps_NonEmptyDependencyFilter() throws Exception {}
 }

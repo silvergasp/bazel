@@ -22,8 +22,11 @@ import com.google.common.collect.Multimap;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
 import com.google.devtools.build.lib.analysis.config.BuildConfigurationCollection;
 import com.google.devtools.build.lib.analysis.config.ConfigurationResolver;
+import com.google.devtools.build.lib.analysis.config.ConfigurationResolver.TopLevelTargetsAndConfigsResult;
+import com.google.devtools.build.lib.analysis.config.InvalidConfigurationException;
 import com.google.devtools.build.lib.analysis.config.TransitionResolver;
-import com.google.devtools.build.lib.analysis.skylark.StarlarkTransition.TransitionException;
+import com.google.devtools.build.lib.analysis.config.transitions.ConfigurationTransition;
+import com.google.devtools.build.lib.analysis.config.transitions.NoTransition;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.events.ExtendedEventHandler;
 import com.google.devtools.build.lib.packages.BuildType;
@@ -36,7 +39,6 @@ import com.google.devtools.build.lib.skyframe.SkyframeExecutor;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import java.util.Collection;
 import java.util.LinkedHashSet;
-import java.util.List;
 
 /**
  * Utility functions for use during analysis.
@@ -134,6 +136,11 @@ public final class AnalysisUtils {
     return Iterables.filter(prerequisites, target -> target.get(provider) != null);
   }
 
+  /** Returns the iterable of collections that have the specified provider. */
+  public static <S extends TransitiveInfoCollection, C extends InfoInterface>
+      Iterable<S> filterByProvider(Iterable<S> prerequisites, final BuiltinProvider<C> provider) {
+    return Iterables.filter(prerequisites, target -> target.get(provider) != null);
+  }
 
   /**
    * Returns the path of the associated manifest file for the path of a Fileset. Works for both
@@ -175,23 +182,21 @@ public final class AnalysisUtils {
    * each target.
    *
    * <p>Preserves the original input ordering.
-   *
-   * @throws TransitionException if there was a problem applying top level transitions.
    */
   // Keep this in sync with PrepareAnalysisPhaseFunction.
-  public static List<TargetAndConfiguration> getTargetsWithConfigs(
+  public static TopLevelTargetsAndConfigsResult getTargetsWithConfigs(
       BuildConfigurationCollection configurations,
       Collection<Target> targets,
       ExtendedEventHandler eventHandler,
       ConfiguredRuleClassProvider ruleClassProvider,
       SkyframeExecutor skyframeExecutor)
-      throws TransitionException {
+      throws InvalidConfigurationException {
     // We use a hash set here to remove duplicate nodes; this can happen for input files and package
     // groups.
     LinkedHashSet<TargetAndConfiguration> nodes = new LinkedHashSet<>(targets.size());
     for (BuildConfiguration config : configurations.getTargetConfigurations()) {
       for (Target target : targets) {
-        nodes.add(new TargetAndConfiguration(target, target.isConfigurable() ? config : null));
+        nodes.add(new TargetAndConfiguration(target, config));
       }
     }
 
@@ -201,9 +206,8 @@ public final class AnalysisUtils {
     Multimap<BuildConfiguration, Dependency> asDeps =
         AnalysisUtils.targetsToDeps(nodes, ruleClassProvider);
 
-    return ImmutableList.copyOf(
-        ConfigurationResolver.getConfigurationsFromExecutor(
-            nodes, asDeps, eventHandler, skyframeExecutor));
+    return ConfigurationResolver.getConfigurationsFromExecutor(
+        nodes, asDeps, eventHandler, skyframeExecutor);
   }
 
   @VisibleForTesting
@@ -212,13 +216,18 @@ public final class AnalysisUtils {
     Multimap<BuildConfiguration, Dependency> asDeps =
         ArrayListMultimap.<BuildConfiguration, Dependency>create();
     for (TargetAndConfiguration targetAndConfig : nodes) {
+      ConfigurationTransition transition =
+          TransitionResolver.evaluateTransition(
+              targetAndConfig.getConfiguration(),
+              NoTransition.INSTANCE,
+              targetAndConfig.getTarget(),
+              ruleClassProvider.getTrimmingTransitionFactory());
       if (targetAndConfig.getConfiguration() != null) {
         asDeps.put(
             targetAndConfig.getConfiguration(),
             Dependency.withTransitionAndAspects(
                 targetAndConfig.getLabel(),
-                TransitionResolver.evaluateTopLevelTransition(
-                    targetAndConfig, ruleClassProvider.getTrimmingTransitionFactory()),
+                transition,
                 // TODO(bazel-team): support top-level aspects
                 AspectCollection.EMPTY));
       }

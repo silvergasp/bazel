@@ -21,25 +21,37 @@ import static java.nio.charset.StandardCharsets.ISO_8859_1;
 import static java.util.stream.Collectors.joining;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Iterables;
+import com.google.devtools.build.lib.actions.ActionExecutionContext;
 import com.google.devtools.build.lib.actions.Artifact;
+import com.google.devtools.build.lib.actions.ExecutionRequirements;
 import com.google.devtools.build.lib.actions.ParamFileInfo;
 import com.google.devtools.build.lib.actions.ParameterFile.ParameterFileType;
+import com.google.devtools.build.lib.actions.SpawnResult;
 import com.google.devtools.build.lib.analysis.FilesToRunProvider;
 import com.google.devtools.build.lib.analysis.RuleContext;
 import com.google.devtools.build.lib.analysis.actions.CustomCommandLine;
 import com.google.devtools.build.lib.analysis.actions.SpawnAction;
-import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
+import com.google.devtools.build.lib.analysis.config.CoreOptionConverters.StrictDepsMode;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.collect.nestedset.Order;
+import com.google.devtools.build.lib.rules.java.JavaConfiguration.JavaClasspathMode;
 import com.google.devtools.build.lib.rules.java.JavaPluginInfoProvider.JavaPluginInfo;
 import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
 import com.google.devtools.build.lib.util.LazyString;
+import com.google.devtools.build.lib.util.Pair;
 import com.google.devtools.build.lib.vfs.PathFragment;
+import com.google.devtools.build.lib.view.proto.Deps;
+import java.io.IOException;
+import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.List;
+import java.util.function.Consumer;
 import javax.annotation.Nullable;
 
 /**
@@ -67,7 +79,7 @@ public class JavaHeaderCompileActionBuilder {
   @Nullable private Label targetLabel;
   @Nullable private String injectingRuleKind;
   private PathFragment tempDirectory;
-  private BuildConfiguration.StrictDepsMode strictJavaDeps = BuildConfiguration.StrictDepsMode.OFF;
+  private StrictDepsMode strictJavaDeps = StrictDepsMode.OFF;
   private boolean reduceClasspath = true;
   private NestedSet<Artifact> directJars = NestedSetBuilder.emptySet(Order.NAIVE_LINK_ORDER);
   private NestedSet<Artifact> compileTimeDependencyArtifacts =
@@ -76,7 +88,6 @@ public class JavaHeaderCompileActionBuilder {
   private JavaPluginInfo plugins = JavaPluginInfo.empty();
 
   private NestedSet<Artifact> additionalInputs = NestedSetBuilder.emptySet(Order.STABLE_ORDER);
-  private Artifact javacJar;
   private NestedSet<Artifact> toolsJars = NestedSetBuilder.emptySet(Order.NAIVE_LINK_ORDER);
 
   public JavaHeaderCompileActionBuilder(RuleContext ruleContext) {
@@ -178,8 +189,7 @@ public class JavaHeaderCompileActionBuilder {
   }
 
   /** Sets the Strict Java Deps mode. */
-  public JavaHeaderCompileActionBuilder setStrictJavaDeps(
-      BuildConfiguration.StrictDepsMode strictJavaDeps) {
+  public JavaHeaderCompileActionBuilder setStrictJavaDeps(StrictDepsMode strictJavaDeps) {
     checkNotNull(strictJavaDeps, "strictJavaDeps must not be null");
     this.strictJavaDeps = strictJavaDeps;
     return this;
@@ -195,13 +205,6 @@ public class JavaHeaderCompileActionBuilder {
   public JavaHeaderCompileActionBuilder setAdditionalInputs(NestedSet<Artifact> additionalInputs) {
     checkNotNull(additionalInputs, "additionalInputs must not be null");
     this.additionalInputs = additionalInputs;
-    return this;
-  }
-
-  /** Sets the javac jar. */
-  public JavaHeaderCompileActionBuilder setJavacJar(Artifact javacJar) {
-    checkNotNull(javacJar, "javacJar must not be null");
-    this.javacJar = javacJar;
     return this;
   }
 
@@ -227,14 +230,18 @@ public class JavaHeaderCompileActionBuilder {
 
     // Invariant: if strictJavaDeps is OFF, then directJars and
     // dependencyArtifacts are ignored
-    if (strictJavaDeps == BuildConfiguration.StrictDepsMode.OFF) {
+    if (strictJavaDeps == StrictDepsMode.OFF) {
       directJars = NestedSetBuilder.emptySet(Order.NAIVE_LINK_ORDER);
       compileTimeDependencyArtifacts = NestedSetBuilder.emptySet(Order.STABLE_ORDER);
     }
 
     // The compilation uses API-generating annotation processors and has to fall back to
     // javac-turbine.
-    boolean requiresAnnotationProcessing = !plugins.isEmpty();
+    // N.B. we only check if the processor classes are empty, we don't care if there is plugin
+    // data or dependencies if there are no annotation processors to run. This differs from
+    // javac where java_plugin may be used with processor_class unset to declare Error Prone
+    // plugins.
+    boolean requiresAnnotationProcessing = !plugins.processorClasses().isEmpty();
 
     SpawnAction.Builder builder = new SpawnAction.Builder();
 
@@ -245,7 +252,6 @@ public class JavaHeaderCompileActionBuilder {
         new ProgressMessage(
             this.outputJar, sourceFiles.size() + sourceJars.size(), plugins.processorClasses()));
 
-    builder.addTool(javacJar);
     builder.addTransitiveTools(toolsJars);
 
     builder.addOutput(outputJar);
@@ -300,6 +306,18 @@ public class JavaHeaderCompileActionBuilder {
       }
     }
 
+    JavaConfiguration javaConfiguration =
+        ruleContext.getConfiguration().getFragment(JavaConfiguration.class);
+    if (javaConfiguration.getReduceJavaClasspath() == JavaClasspathMode.BAZEL) {
+      if (javaConfiguration.inmemoryJdepsFiles()) {
+        builder.setExecutionInfo(
+            ImmutableMap.of(
+                ExecutionRequirements.REMOTE_EXECUTION_INLINE_OUTPUTS,
+                outputDepsProto.getExecPathString()));
+      }
+      builder.addResultConsumer(createResultConsumer(outputDepsProto));
+    }
+
     // The action doesn't require annotation processing, so use the non-javac-based turbine
     // implementation.
     if (!requiresAnnotationProcessing) {
@@ -335,13 +353,13 @@ public class JavaHeaderCompileActionBuilder {
     commandLine.addExecPaths("--classpath", classpathEntries);
     commandLine.addAll("--processors", plugins.processorClasses());
     commandLine.addExecPaths("--processorpath", plugins.processorClasspath());
-    if (strictJavaDeps != BuildConfiguration.StrictDepsMode.OFF) {
+    if (strictJavaDeps != StrictDepsMode.OFF) {
       commandLine.addExecPaths("--direct_dependencies", directJars);
       if (!compileTimeDependencyArtifacts.isEmpty()) {
         commandLine.addExecPaths("--deps_artifacts", compileTimeDependencyArtifacts);
       }
     }
-    if (reduceClasspath && strictJavaDeps != BuildConfiguration.StrictDepsMode.OFF) {
+    if (reduceClasspath && strictJavaDeps != StrictDepsMode.OFF) {
       commandLine.add("--reduce_classpath");
     } else {
       commandLine.add("--noreduce_classpath");
@@ -354,6 +372,34 @@ public class JavaHeaderCompileActionBuilder {
                 ParamFileInfo.builder(ParameterFileType.UNQUOTED).setCharset(ISO_8859_1).build())
             .setMnemonic("JavacTurbine")
             .build(ruleContext));
+  }
+
+  /**
+   * Creates a consumer that reads the produced .jdeps file into memory. Pulled out into a separate
+   * function to avoid capturing a data member, which would keep the entire builder instance alive.
+   */
+  private static Consumer<Pair<ActionExecutionContext, List<SpawnResult>>> createResultConsumer(
+      Artifact outputDepsProto) {
+    return contextAndResults -> {
+      ActionExecutionContext context = contextAndResults.getFirst();
+      JavaCompileActionContext javaContext = context.getContext(JavaCompileActionContext.class);
+      if (javaContext == null) {
+        return;
+      }
+      SpawnResult spawnResult = Iterables.getOnlyElement(contextAndResults.getSecond());
+      try {
+        InputStream inMemoryOutput = spawnResult.getInMemoryOutput(outputDepsProto);
+        try (InputStream input =
+            inMemoryOutput == null
+                ? context.getInputPath(outputDepsProto).getInputStream()
+                : inMemoryOutput) {
+          javaContext.insertDependencies(outputDepsProto, Deps.Dependencies.parseFrom(input));
+        }
+      } catch (IOException e) {
+        // Left empty. If we cannot read the .jdeps file now, we will read it later or throw
+        // an appropriate error then.
+      }
+    };
   }
 
   /** Static class to avoid keeping a reference to this builder after build() is called. */
@@ -379,7 +425,7 @@ public class JavaHeaderCompileActionBuilder {
           fileCount,
           processorClasses.isEmpty()
               ? ""
-              : processorClasses.toCollection().stream()
+              : processorClasses.toList().stream()
                   .map(name -> name.substring(name.lastIndexOf('.') + 1))
                   .collect(joining(", ", " and running annotation processors (", ")")));
     }

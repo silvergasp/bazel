@@ -216,7 +216,7 @@ public final class UnixGlob {
    */
   private static Pattern makePatternFromWildcard(String pattern) {
     StringBuilder regexp = new StringBuilder();
-    for(int i = 0, len = pattern.length(); i < len; i++) {
+    for (int i = 0, len = pattern.length(); i < len; i++) {
       char c = pattern.charAt(i);
       switch(c) {
         case '*':
@@ -258,28 +258,49 @@ public final class UnixGlob {
    * Filesystem calls required for glob().
    */
   public interface FilesystemCalls {
-    /**
-     * Get directory entries and their types.
-     */
-    Collection<Dirent> readdir(Path path, Symlinks symlinks) throws IOException;
+    /** Get directory entries and their types. Does not follow symlinks. */
+    Collection<Dirent> readdir(Path path) throws IOException;
+
+    /** Return the stat() for the given path, or null. */
+    FileStatus statIfFound(Path path, Symlinks symlinks) throws IOException;
 
     /**
-     * Return the stat() for the given path, or null.
+     * Return the type of a specific file. This may be answered using stat() or readdir(). Returns
+     * null if the path does not exist.
      */
-    FileStatus statIfFound(Path path, Symlinks symlinks) throws IOException;
+    Dirent.Type getType(Path path, Symlinks symlinks) throws IOException;
   }
 
-  public static FilesystemCalls DEFAULT_SYSCALLS = new FilesystemCalls() {
-    @Override
-    public Collection<Dirent> readdir(Path path, Symlinks symlinks) throws IOException {
-      return path.readdir(symlinks);
-    }
+  public static final FilesystemCalls DEFAULT_SYSCALLS =
+      new FilesystemCalls() {
+        @Override
+        public Collection<Dirent> readdir(Path path) throws IOException {
+          return path.readdir(Symlinks.NOFOLLOW);
+        }
 
-    @Override
-    public FileStatus statIfFound(Path path, Symlinks symlinks) throws IOException {
-      return path.statIfFound(symlinks);
+        @Override
+        public FileStatus statIfFound(Path path, Symlinks symlinks) throws IOException {
+          return path.statIfFound(symlinks);
+        }
+
+        @Override
+        public Dirent.Type getType(Path path, Symlinks symlinks) throws IOException {
+          return statusToDirentType(statIfFound(path, symlinks));
+        }
+      };
+
+  public static Dirent.Type statusToDirentType(FileStatus status) {
+    if (status == null) {
+      return null;
+    } else if (status.isFile()) {
+      return Dirent.Type.FILE;
+    } else if (status.isDirectory()) {
+      return Dirent.Type.DIRECTORY;
+    } else if (status.isSymbolicLink()) {
+      return Dirent.Type.SYMLINK;
     }
-  };
+    return Dirent.Type.UNKNOWN;
+  }
 
   public static final AtomicReference<FilesystemCalls> DEFAULT_SYSCALLS_REF =
       new AtomicReference<>(DEFAULT_SYSCALLS);
@@ -792,7 +813,7 @@ public final class UnixGlob {
         return;
       }
 
-      Collection<Dirent> dents = context.syscalls.readdir(base, Symlinks.NOFOLLOW);
+      Collection<Dirent> dents = context.syscalls.readdir(base);
       for (Dirent dent : dents) {
         Dirent.Type childType = dent.getType();
         if (childType == Dirent.Type.UNKNOWN) {
@@ -849,19 +870,35 @@ public final class UnixGlob {
    */
   public static void removeExcludes(Set<String> paths, Collection<String> excludes) {
     ArrayList<String> complexPatterns = new ArrayList<>(excludes.size());
+    Map<String, List<String>> starstarSlashStarHeadTailPairs = new HashMap<>();
     for (String exclude : excludes) {
       if (isWildcardFree(exclude)) {
         paths.remove(exclude);
         continue;
       }
-      if (exclude.startsWith("**/*")) {
-        String tail = exclude.substring(4);
-        if (isWildcardFree(tail)) {
-          paths.removeIf(path -> path.endsWith(tail));
+      int patternPos = exclude.indexOf("**/*");
+      if (patternPos != -1) {
+        String head = exclude.substring(0, patternPos);
+        String tail = exclude.substring(patternPos + 4);
+        if (isWildcardFree(head) && isWildcardFree(tail)) {
+          starstarSlashStarHeadTailPairs.computeIfAbsent(head, h -> new ArrayList<>()).add(tail);
           continue;
         }
       }
       complexPatterns.add(exclude);
+    }
+    for (Map.Entry<String, List<String>> headTailPair : starstarSlashStarHeadTailPairs.entrySet()) {
+      paths.removeIf(
+          path -> {
+            if (path.startsWith(headTailPair.getKey())) {
+              for (String tail : headTailPair.getValue()) {
+                if (path.endsWith(tail)) {
+                  return true;
+                }
+              }
+            }
+            return false;
+          });
     }
     if (complexPatterns.isEmpty()) {
       return;

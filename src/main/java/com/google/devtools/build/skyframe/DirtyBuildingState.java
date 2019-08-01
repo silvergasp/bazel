@@ -20,7 +20,6 @@ import com.google.devtools.build.lib.util.GroupedList;
 import com.google.devtools.build.skyframe.NodeEntry.DirtyState;
 import com.google.devtools.build.skyframe.ThinNodeEntry.DirtyType;
 import java.util.List;
-import java.util.Set;
 import javax.annotation.Nullable;
 
 /**
@@ -141,7 +140,7 @@ public abstract class DirtyBuildingState {
   }
 
   final void markForceRebuild() {
-    if (dirtyState == DirtyState.CHECK_DEPENDENCIES || dirtyState == DirtyState.NEEDS_REBUILDING) {
+    if (dirtyState == DirtyState.CHECK_DEPENDENCIES) {
       dirtyState = DirtyState.NEEDS_REBUILDING;
     }
   }
@@ -271,7 +270,8 @@ public abstract class DirtyBuildingState {
    * true, this method is non-mutating. If {@code preservePosition} is false, the caller must
    * process the returned set, and so subsequent calls to this method will return the empty set.
    */
-  Set<SkyKey> getAllRemainingDirtyDirectDeps(boolean preservePosition) throws InterruptedException {
+  ImmutableSet<SkyKey> getAllRemainingDirtyDirectDeps(boolean preservePosition)
+      throws InterruptedException {
     if (getLastBuildDirectDeps() == null) {
       return ImmutableSet.of();
     }
@@ -285,10 +285,16 @@ public abstract class DirtyBuildingState {
     return result.build();
   }
 
+  /**
+   * Resets counters that track evaluation state. May only be called when its corresponding node has
+   * no outstanding unsignaled deps, because otherwise this resetting and that signalling would
+   * race.
+   */
   final void resetForRestartFromScratch() {
     Preconditions.checkState(
         dirtyState == DirtyState.REBUILDING || dirtyState == DirtyState.FORCED_REBUILDING, this);
     signaledDeps = 0;
+    externalDeps = 0;
     dirtyDirectDepIndex = 0;
   }
 
@@ -312,12 +318,11 @@ public abstract class DirtyBuildingState {
 
   /** Returns whether all known children of this node have signaled that they are done. */
   boolean isReady(int numDirectDeps) {
-    Preconditions.checkState(
-        signaledDeps <= numDirectDeps + externalDeps,
-        "%s %s %s",
-        numDirectDeps,
-        externalDeps,
-        this);
+    // Avoids calling Preconditions.checkState because it showed up in garbage profiles due to
+    // boxing of the int format args.
+    if (signaledDeps > numDirectDeps + externalDeps) {
+      throw new IllegalStateException(String.format("%s %s %s", numDirectDeps, externalDeps, this));
+    }
     return signaledDeps == numDirectDeps + externalDeps;
   }
 

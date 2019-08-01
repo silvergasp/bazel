@@ -1,11 +1,12 @@
 # Packaging
 
+load("//tools/python:private/defs.bzl", "py_library", "py_binary")
 load(":embedded_tools.bzl", "srcsfile")
 load(":rule_size_test.bzl", "rule_size_test")
 
 exports_files(["jdeps_modules.golden"])
 
-md5_cmd = "set -e -o pipefail && cat $(SRCS) | sort | %s | awk '{ print $$1; }' > $@"
+md5_cmd = "set -e -o pipefail && echo $(SRCS) | sort | xargs cat | %s | awk '{ print $$1; }' > $@"
 
 # TODO(bazel-team): find a better way to handle dylib extensions.
 filegroup(
@@ -61,11 +62,6 @@ genquery(
 # Create dummy tools so we can do select to prevent building iOS target on
 # Linux.
 OSX_DUMMY_TARGETS = [
-    "src/tools/xcode/actoolwrapper/actoolwrapper",
-    "src/tools/xcode/ibtoolwrapper/ibtoolwrapper",
-    "src/tools/xcode/momcwrapper/momcwrapper",
-    "src/objc_tools/bundlemerge/bundlemerge_deploy.jar",
-    "src/objc_tools/plmerge/plmerge_deploy.jar",
     "src/tools/xcode/realpath/realpath",
     "src/tools/xcode/stdredirect/StdRedirect.dylib",
 ]
@@ -83,11 +79,6 @@ OSX_DUMMY_TARGETS = [
 filegroup(
     name = "darwin_tools",
     srcs = [
-        "//src/tools/xcode/actoolwrapper:actoolwrapper",
-        "//src/tools/xcode/ibtoolwrapper:ibtoolwrapper",
-        "//src/tools/xcode/momcwrapper:momcwrapper",
-        "//src/objc_tools/bundlemerge:bundlemerge_deploy.jar",
-        "//src/objc_tools/plmerge:plmerge_deploy.jar",
         "//src/tools/xcode/realpath:realpath",
         "//tools/osx:xcode_locator.m",
     ] + select({
@@ -119,20 +110,10 @@ py_binary(
 # The tools Bazel uses to compile Java.
 # TODO(#6316): Gradually remove the targets here.
 JAVA_TOOLS = [
-    "//third_party/java/proguard:embedded_tools",
     "//src/java_tools/buildjar/java/com/google/devtools/build/buildjar/jarhelper:srcs",
-    "//src/tools/singlejar:embedded_tools",
     "//src/java_tools/import_deps_checker/java/com/google/devtools/build/importdeps:embedded_tools",
-    "//third_party/ijar",
-    "//third_party/ijar:zipper",
-    "//third_party/ijar:embedded_tools",
-    "//third_party/java/jacoco:srcs",
-] + select({
-    "//src/conditions:arm": [],
-    "//conditions:default": [
-        "//src/tools/singlejar:singlejar_local",
-    ],
-})
+    "//third_party/jarjar:embedded_build_and_license",
+]
 
 # TODO(philwo): Clean this up, once a Bazel that can run py_binary and sh_binary
 # in Skylark rules on Windows has been released.
@@ -142,7 +123,8 @@ JAVA_TOOLS = [
                "BUILD.tools",
                "//tools:embedded_tools_srcs",
                "//third_party:gpl-srcs",
-               "//third_party/java/java_tools:bazel_embedded_java_tools",
+               "//third_party/ijar:embedded_zipper_sources",
+               "//third_party/ijar:zipper",
                "//third_party/java/j2objc:embedded_tools_srcs",
                "//third_party/py/concurrent:srcs",
                "//third_party/py/gflags:srcs",
@@ -189,7 +171,7 @@ rule_size_test(
     # WARNING: Only adjust the number in `expect` if you are intentionally
     # adding or removing embedded tools. Know that the more embedded tools there
     # are in Bazel, the bigger the binary becomes and the slower Bazel starts.
-    expect = 503,
+    expect = 470,
     margin = 5,  # percentage
 )
 
@@ -226,6 +208,9 @@ filegroup(
         ],
         "//src/conditions:windows": [
             "@openjdk_win_minimal//file",
+        ],
+        "//src/conditions:linux_aarch64": [
+            "@openjdk_linux_aarch64_minimal//file",
         ],
         "//conditions:default": [
             "@openjdk_linux_minimal//file",
@@ -347,10 +332,11 @@ filegroup(
     name = "package-zip" + suffix,
     srcs = ([":embedded_tools" + suffix + ".zip"] if embed else []) + [
         # The script assumes that the embedded tools zip (if exists) is the
-        # first item here, the deploy jar the second and install base key is the
-        # third
+        # first item here, the deploy jar the second, install base key is the
+        # third, and platforms archive is the fourth.
         "//src/main/java/com/google/devtools/build/lib:bazel/BazelServer_deploy.jar",
         "install_base_key" + suffix,
+        ":platforms_archive",
         ":libunix",
         "//src/main/tools:build-runfiles",
         "//src/main/tools:process-wrapper",
@@ -374,41 +360,26 @@ filegroup(
     ("_nojdk", True),
 ]]
 
+genrule(
+    name = "platforms_archive",
+    srcs = ["@platforms//:srcs"],
+    outs = ["platforms.zip"],
+    # Removing the WORKSPACE file since local_repository creates it no matter what and leaving
+    # it there would make the zip nondeterministic.
+    cmd = "zip -qX $@ $$(echo $(SRCS) | xargs -n 1 | grep -v '.*/WORKSPACE$$' | sort | xargs)",
+)
+
 [genrule(
     name = "bazel-bin" + suffix,
     srcs = [
         "//src/main/cpp:client",
-        "package-zip" + suffix,
+        "package-zip" + jdk,
     ],
     outs = ["bazel" + suffix],
     # In msys, a file path without .exe suffix(say foo), refers to a file with .exe
     # suffix(say foo.exe), if foo.exe exists and foo doesn't. So, on windows, we
     # need to remove bazel.exe first, so that cat to bazel won't fail.
-    cmd = "rm -f $@; cat $(location //src/main/cpp:client) $(location :package-zip" + suffix + ") > $@ && zip -qA $@",
-    executable = 1,
-    output_to_bindir = 1,
-    visibility = [
-        "//scripts:__pkg__",  # For bash completion generation
-        "//scripts/packages:__pkg__",  # For installer generation
-        "//src/java:__subpackages__",  # For command line reference generation
-        "//src/test:__subpackages__",  # For integration tests
-    ],
-) for suffix in [
-    "_jdk_allmodules",
-    "_jdk_minimal",
-    "_dev_jdk",
-    "_notools",
-    "_nojdk",
-]]
-
-[genrule(
-    name = "bazel-bin" + suffix,
-    srcs = [":bazel-bin" + jdk],
-    outs = ["bazel" + suffix],
-    # In msys, a file path without .exe suffix(say foo), refers to a file with .exe
-    # suffix(say foo.exe), if foo.exe exists and foo doesn't. So, on windows, we
-    # need to remove bazel.exe first, so that cat to bazel won't fail.
-    cmd = "rm -f $@; cp $(location :bazel-bin" + jdk + ") $@",
+    cmd = "rm -f $@; cat $(location //src/main/cpp:client) $(location :package-zip" + jdk + ") > $@ && zip -qA $@",
     executable = 1,
     output_to_bindir = 1,
     visibility = [
@@ -420,6 +391,11 @@ filegroup(
 ) for suffix, jdk in [
     ("-dev", "_jdk_allmodules"),
     ("", "_jdk_minimal"),
+    ("_jdk_allmodules", "_jdk_allmodules"),
+    ("_jdk_minimal", "_jdk_minimal"),
+    ("_dev_jdk", "_dev_jdk"),
+    ("_notools", "_notools"),
+    ("_nojdk", "_nojdk"),
 ]]
 
 # Build an executable named `bazel.exe`.
@@ -439,6 +415,7 @@ filegroup(
     ],
 ) for suffix in [
     "",
+    "-dev",
     "_notools",
     "_nojdk",
 ]]
@@ -453,7 +430,11 @@ filegroup(
         "//src/java_tools/singlejar:srcs",
         "//src/main/cpp:srcs",
         "//src/main/java/com/google/devtools/build/docgen:srcs",
+        "//src/main/java/com/google/devtools/build/lib/actionsketch:srcs",
         "//src/main/java/com/google/devtools/build/lib:srcs",
+        "//src/main/java/com/google/devtools/build/lib/includescanning:srcs",
+        "//src/main/java/com/google/devtools/build/lib/network:srcs",
+        "//src/main/java/com/google/devtools/build/lib/outputfilter:srcs",
         "//src/main/java/com/google/devtools/build/skydoc:srcs",
         "//src/main/java/com/google/devtools/build/skyframe:srcs",
         "//src/main/java/com/google/devtools/common/options:srcs",
@@ -461,8 +442,6 @@ filegroup(
         "//src/main/native:srcs",
         "//src/main/protobuf:srcs",
         "//src/main/tools:srcs",
-        "//src/objc_tools/bundlemerge:srcs",
-        "//src/objc_tools/plmerge:srcs",
         "//src/test/cpp:srcs",
         "//src/test/gen:srcs",
         "//src/test/native:srcs",
@@ -476,21 +455,16 @@ filegroup(
         "//src/test/java/com/google/devtools/common/options:srcs",
         "//src/test/py/bazel:srcs",
         "//src/test/shell:srcs",
+        "//src/test/testdata/test_tls_certificate",
         "//src/tools/android/java/com/google/devtools/build/android:srcs",
         "//src/tools/execlog:srcs",
         "//src/tools/workspacelog:srcs",
         "//src/tools/launcher:srcs",
         "//src/tools/package_printer/java/com/google/devtools/build/packageprinter:srcs",
         "//src/tools/skylark/java/com/google/devtools/skylark/common:srcs",
-        "//src/tools/skylark/java/com/google/devtools/skylark/skylint:srcs",
-        "//src/tools/skylark/javatests/com/google/devtools/skylark/skylint:srcs",
-        "//src/tools/xcode/actoolwrapper:srcs",
-        "//src/tools/xcode/ibtoolwrapper:srcs",
-        "//src/tools/xcode/momcwrapper:srcs",
         "//src/tools/xcode/realpath:srcs",
         "//src/tools/singlejar:srcs",
         "//src/tools/xcode/stdredirect:srcs",
-        "//src/tools/xcode-common:srcs",
         "//src/tools/remote:srcs",
         "//tools/osx:srcs",
     ],
@@ -504,6 +478,7 @@ genrule(
         "//src/main/java/com/google/devtools/build/lib/buildeventstream/proto:dist_jars",
         "//src/main/java/com/google/devtools/build/lib/bazel/debug:dist_jars",
         "//src/main/java/com/google/devtools/build/lib/skylarkdebug/proto:dist_jars",
+        "//src/main/java/com/google/devtools/build/skydoc/rendering/proto:dist_jars",
         "@googleapis//:dist_jars",
         "@remoteapis//:dist_jars",
     ],
@@ -548,4 +523,198 @@ alias(
     name = "windows",
     actual = "//src/conditions:windows",
     visibility = ["//visibility:public"],
+)
+
+sh_binary(
+    name = "zip_files",
+    srcs = ["zip_files.sh"],
+    visibility = ["//visibility:public"],
+)
+
+sh_binary(
+    name = "merge_zip_files",
+    srcs = ["merge_zip_files.sh"],
+    visibility = ["//visibility:public"],
+)
+
+JAVA_TOOLS_DEPLOY_JARS = [
+    "//src/java_tools/buildjar:JavaBuilder_deploy.jar",
+    "//src/java_tools/buildjar:VanillaJavaBuilder_deploy.jar",
+    "//src/java_tools/buildjar/java/com/google/devtools/build/buildjar/genclass:GenClass_deploy.jar",
+    "//src/java_tools/buildjar/java/com/google/devtools/build/java/turbine/javac:turbine_deploy.jar",
+    "//src/java_tools/buildjar/java/com/google/devtools/build/java/turbine:turbine_direct_binary_deploy.jar",
+    "//src/java_tools/junitrunner/java/com/google/testing/coverage:JacocoCoverage_jarjar_deploy.jar",
+    "//src/java_tools/junitrunner/java/com/google/testing/junit/runner:ExperimentalRunner_deploy.jar",
+    "//src/java_tools/junitrunner/java/com/google/testing/junit/runner:Runner_deploy.jar",
+    "//third_party/jarjar:jarjar_command_deploy.jar",
+] + select({
+    "//src/conditions:arm": ["//src/java_tools/singlejar/java/com/google/devtools/build/singlejar:bazel-singlejar_deploy.jar"],
+    "//conditions:default": [],
+})
+
+JAVA_VERSIONS = ("9", "10", "11", "12")
+
+[
+    genrule(
+        name = "jars_java_tools_java" + java_version + "_zip",
+        srcs = JAVA_TOOLS_DEPLOY_JARS + [
+            "@java_tools_langtools_javac" + java_version + "//:jdk_compiler_jar",
+            "@java_tools_langtools_javac" + java_version + "//:java_compiler_jar",
+            "@java_tools_langtools_javac" + java_version + "//:javac_jar",
+        ],
+        outs = ["jars_java_tools_java" + java_version + ".zip"],
+        cmd = "zip -qjX $@ $$(echo $(SRCS) | sort)",
+        visibility = ["//visibility:private"],
+    )
+    for java_version in JAVA_VERSIONS
+]
+
+[
+    genrule(
+        name = "java_tools_dist_java" + java_version,
+        srcs = [
+            "//src/java_tools/buildjar:srcs",
+            "//src/java_tools/junitrunner:srcs",
+            "//src/java_tools/singlejar:srcs",
+            "//src/tools/singlejar:embedded_java_tools",
+            "//third_party/checker_framework_dataflow:srcs",
+            "//third_party/checker_framework_javacutil:srcs",
+            "//third_party/jarjar:srcs",
+            "//third_party/ijar:transitive_sources",
+            "//third_party/java/jacoco:transitive_sources",
+            "//third_party/java/proguard:srcs",
+            "@java_tools_langtools_javac" + java_version + "//:srcs",
+        ],
+        outs = ["java_tools_dist_javac" + java_version + ".zip"],
+        cmd = "zip -qXr $@ $$(echo $(SRCS) | sort)",
+        output_to_bindir = 1,
+        visibility = ["//src/test/shell/bazel:__pkg__"],
+    )
+    for java_version in JAVA_VERSIONS
+]
+
+[
+    # Targets used by the java_tools_binaries Buildkite pipeline to build the
+    # java_tools_dist_java* zips and upload them to a tmp directory in GCS.
+    sh_binary(
+        name = "upload_java_tools_dist_java" + java_version,
+        srcs = ["upload_java_tools.sh"],
+        args = [
+            "--java_tools_zip",
+            "src/java_tools_dist_javac" + java_version + ".zip",
+            "--gcs_java_tools_dir",
+            "tmp/sources",
+            "--java_version",
+            java_version,
+            "--platform",
+        ] + select({
+            "//src/conditions:darwin": ["darwin"],
+            "//src/conditions:darwin_x86_64": ["darwin_x86_64"],
+            "//src/conditions:windows": ["windows"],
+            "//src/conditions:linux_x86_64": ["linux"],
+            "//conditions:default": ["unknown"],
+        }),
+        data = [":java_tools_dist_java" + java_version],
+        deps = ["@bazel_tools//tools/bash/runfiles"],
+    )
+    for java_version in JAVA_VERSIONS
+]
+
+[
+    # The java_tools releases can have BUILD files that vary depending on the
+    # javac version they embed. Currently the only difference is in the
+    # java_toolchain source version which has to be 12 for javac 12 to be able
+    # to build new Java 12 features.
+    genrule(
+        name = "create_java_tools_build_java" + java_version,
+        srcs = ["//tools/jdk:BUILD.java_tools"],
+        outs = ["remote_java_tools_java" + java_version + "/BUILD"],
+        cmd = "sed 's/JAVA_LANGUAGE_LEVEL/" + java_version + "/g' $< > $@",
+    )
+    for java_version in JAVA_VERSIONS
+]
+
+[
+    genrule(
+        name = "java_tools_java" + java_version + "_build_zip",
+        srcs = ["remote_java_tools_java" + java_version + "/BUILD"],
+        outs = ["java_tools_java_" + java_version + "_build.zip"],
+        cmd = "zip -jX $@ $<",
+    )
+    for java_version in JAVA_VERSIONS
+]
+
+# Builds the remote Java tools archive. Not embedded or used in Bazel, but used
+# by the Java tools release process.
+[
+    genrule(
+        name = "java_tools_java" + java_version + "_no_build_zip",
+        srcs = [
+            ":jars_java_tools_java" + java_version + ".zip",
+            "//src/tools/singlejar:singlejar_transitive_zip",
+            "//third_party/ijar:ijar_transitive_zip",
+            "//third_party/java/jacoco:jacoco_jars_zip",
+            "//third_party/java/proguard:proguard_zip",
+        ],
+        outs = ["java_tools_java" + java_version + "_no_build.zip"],
+        cmd = "$(location //src:merge_zip_files) java_tools $@ $(SRCS)",
+        output_to_bindir = 1,
+        tools = ["//src:merge_zip_files"],
+        visibility = ["//src/test/shell/bazel:__pkg__"],
+    )
+    for java_version in JAVA_VERSIONS
+]
+
+[
+    genrule(
+        name = "java_tools_java" + java_version + "_zip",
+        srcs = [
+            "java_tools_java" + java_version + "_no_build.zip",
+            "java_tools_java_" + java_version + "_build.zip",
+        ],
+        outs = ["java_tools_java" + java_version + ".zip"],
+        cmd = "$(location //src:merge_zip_files) - $@ $(SRCS)",
+        output_to_bindir = 1,
+        tools = ["//src:merge_zip_files"],
+        visibility = ["//src/test/shell/bazel:__pkg__"],
+    )
+    for java_version in JAVA_VERSIONS
+]
+
+[
+    # Targets used by the java_tools_binaries Buildkite pipeline to build the
+    # java_tools_java* zips and upload them to a tmp directory in GCS.
+    sh_binary(
+        name = "upload_java_tools_java" + java_version,
+        srcs = ["upload_java_tools.sh"],
+        args = [
+            "--gcs_java_tools_dir",
+            "tmp/build",
+            "--java_version",
+            java_version,
+            "--platform",
+        ] + select({
+            "//src/conditions:darwin": ["darwin"],
+            "//src/conditions:darwin_x86_64": ["darwin_x86_64"],
+            "//src/conditions:windows": ["windows"],
+            "//src/conditions:linux_x86_64": ["linux"],
+            "//conditions:default": ["unknown"],
+        }),
+        data = [":java_tools_java" + java_version + "_zip"],
+        deps = ["@bazel_tools//tools/bash/runfiles"],
+    )
+    for java_version in JAVA_VERSIONS
+]
+
+# Part of the Java tools remote archive. Not embedded or used in Bazel.
+genrule(
+    name = "zlib_zip",
+    srcs = ["//third_party/zlib:embedded_tools"],
+    outs = ["zlib.zip"],
+    cmd = "$(location //src:zip_files) zlib $@ $(SRCS)",
+    tools = ["//src:zip_files"],
+    visibility = [
+        "//src/tools/singlejar:__pkg__",
+        "//third_party/ijar:__pkg__",
+    ],
 )

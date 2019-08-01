@@ -51,7 +51,8 @@ public final class OptionsParser {
   private String outputDepsProtoFile;
   private final Set<String> depsArtifacts = new LinkedHashSet<>();
 
-  enum ReduceClasspathMode {
+  /** This modes controls how a probablistic Java classpath reduction is used. */
+  public enum ReduceClasspathMode {
     BAZEL_REDUCED,
     BAZEL_FALLBACK,
     JAVABUILDER_REDUCED,
@@ -97,6 +98,8 @@ public final class OptionsParser {
 
   private String targetLabel;
   private String injectingRuleKind;
+
+  private @Nullable String profile;
 
   /**
    * Constructs an {@code OptionsParser} from a list of command args. Sets the same JavacRunner for
@@ -213,6 +216,9 @@ public final class OptionsParser {
           break;
         case "--injecting_rule_kind":
           injectingRuleKind = getArgument(argQueue, arg);
+          break;
+        case "--profile":
+          profile = getArgument(argQueue, arg);
           break;
         default:
           throw new InvalidCommandLineException("unknown option : '" + arg + "'");
@@ -462,5 +468,9 @@ public final class OptionsParser {
 
   public String getInjectingRuleKind() {
     return injectingRuleKind;
+  }
+
+  public String getProfile() {
+    return profile;
   }
 }

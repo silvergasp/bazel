@@ -30,14 +30,15 @@ import com.google.devtools.build.lib.actions.ActionExecutedEvent;
 import com.google.devtools.build.lib.actions.ActionExecutedEvent.ErrorTiming;
 import com.google.devtools.build.lib.actions.ActionExecutionException;
 import com.google.devtools.build.lib.actions.Artifact;
-import com.google.devtools.build.lib.actions.ArtifactPathResolver;
 import com.google.devtools.build.lib.actions.ArtifactRoot;
+import com.google.devtools.build.lib.actions.CompletionContext;
 import com.google.devtools.build.lib.actions.EventReportingArtifacts;
 import com.google.devtools.build.lib.actions.util.ActionsTestUtil;
 import com.google.devtools.build.lib.analysis.BlazeDirectories;
 import com.google.devtools.build.lib.analysis.ServerDirectories;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
 import com.google.devtools.build.lib.analysis.config.BuildOptions;
+import com.google.devtools.build.lib.analysis.config.CoreOptions;
 import com.google.devtools.build.lib.analysis.config.FragmentOptions;
 import com.google.devtools.build.lib.buildeventstream.AnnounceBuildEventTransportsEvent;
 import com.google.devtools.build.lib.buildeventstream.ArtifactGroupNamer;
@@ -47,6 +48,7 @@ import com.google.devtools.build.lib.buildeventstream.BuildEventContext;
 import com.google.devtools.build.lib.buildeventstream.BuildEventId;
 import com.google.devtools.build.lib.buildeventstream.BuildEventProtocolOptions;
 import com.google.devtools.build.lib.buildeventstream.BuildEventStreamProtos;
+import com.google.devtools.build.lib.buildeventstream.BuildEventStreamProtos.Aborted.AbortReason;
 import com.google.devtools.build.lib.buildeventstream.BuildEventStreamProtos.BuildEventId.NamedSetOfFilesId;
 import com.google.devtools.build.lib.buildeventstream.BuildEventTransport;
 import com.google.devtools.build.lib.buildeventstream.BuildEventTransportClosedEvent;
@@ -58,10 +60,12 @@ import com.google.devtools.build.lib.buildeventstream.ProgressEvent;
 import com.google.devtools.build.lib.buildeventstream.transports.BuildEventStreamOptions;
 import com.google.devtools.build.lib.buildtool.BuildResult;
 import com.google.devtools.build.lib.buildtool.buildevent.BuildCompleteEvent;
+import com.google.devtools.build.lib.buildtool.buildevent.NoAnalyzeEvent;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetView;
 import com.google.devtools.build.lib.testutil.FoundationTestCase;
+import com.google.devtools.build.lib.util.ExitCode;
 import com.google.devtools.build.lib.util.Pair;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
@@ -73,10 +77,16 @@ import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.locks.LockSupport;
+import javax.annotation.Nullable;
+import org.apache.commons.lang.time.StopWatch;
 import org.junit.After;
 import org.junit.Before;
+import org.junit.Ignore;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
@@ -93,10 +103,9 @@ public class BuildEventStreamerTest extends FoundationTestCase {
   @Before
   public void setUp() {
     artifactGroupNamer = new CountingArtifactGroupNamer();
-    transport = new RecordingBuildEventTransport(artifactGroupNamer);
+    transport = new RecordingBuildEventTransport(artifactGroupNamer, true);
     streamer =
-        new BuildEventStreamer(
-            ImmutableSet.<BuildEventTransport>of(transport), reporter, artifactGroupNamer);
+        new BuildEventStreamer(ImmutableSet.<BuildEventTransport>of(transport), artifactGroupNamer);
   }
 
   @After
@@ -121,7 +130,7 @@ public class BuildEventStreamerTest extends FoundationTestCase {
     private final List<BuildEventStreamProtos.BuildEvent> eventsAsProtos = new ArrayList<>();
     private ArtifactGroupNamer artifactGroupNamer;
 
-    RecordingBuildEventTransport(ArtifactGroupNamer namer) {
+    RecordingBuildEventTransport(ArtifactGroupNamer namer, boolean recordEvents) {
       this.artifactGroupNamer = namer;
     }
 
@@ -131,7 +140,12 @@ public class BuildEventStreamerTest extends FoundationTestCase {
     }
 
     @Override
-    public void sendBuildEvent(BuildEvent event) {
+    public boolean mayBeSlow() {
+      return false;
+    }
+
+    @Override
+    public synchronized void sendBuildEvent(BuildEvent event) {
       events.add(event);
       eventsAsProtos.add(
           event.asStreamProto(
@@ -244,7 +258,7 @@ public class BuildEventStreamerTest extends FoundationTestCase {
 
     @Override
     public ReportedArtifacts reportedArtifacts() {
-      return new ReportedArtifacts(artifacts, ArtifactPathResolver.IDENTITY);
+      return new ReportedArtifacts(artifacts, CompletionContext.FAILED_COMPLETION_CTX);
     }
 
     @Override
@@ -333,6 +347,8 @@ public class BuildEventStreamerTest extends FoundationTestCase {
     eventBus.register(handler);
     assertThat(handler.transportSet).isNull();
 
+    eventBus.post(new AnnounceBuildEventTransportsEvent(ImmutableSet.of(transport)));
+
     BuildEvent startEvent =
         new GenericBuildEvent(
             testId("Initial"), ImmutableSet.of(ProgressEvent.INITIAL_PROGRESS_UPDATE,
@@ -349,6 +365,8 @@ public class BuildEventStreamerTest extends FoundationTestCase {
     streamer.buildEvent(new BuildCompleteEvent(new BuildResult(0)));
 
     assertThat(streamer.isClosed()).isTrue();
+    eventBus.post(new BuildEventTransportClosedEvent(transport));
+
     List<BuildEvent> finalStream = transport.getEvents();
     assertThat(finalStream).hasSize(3);
     assertThat(ImmutableSet.of(finalStream.get(1).getEventId(), finalStream.get(2).getEventId()))
@@ -488,6 +506,124 @@ public class BuildEventStreamerTest extends FoundationTestCase {
     assertThat(allEventsSeen.get(3).getEventId()).isEqualTo(failedTarget.getEventId());
   }
 
+  private static BuildEvent indexOrderedBuildEvent(int index, int afterIndex) {
+    return new GenericOrderEvent(
+        testId("Concurrent-" + index),
+        ImmutableList.of(),
+        afterIndex == -1
+            ? ImmutableList.of()
+            : ImmutableList.of(testId("Concurrent-" + afterIndex)));
+  }
+
+  @Test
+  public void testConcurrency() throws Exception {
+    // Verify that we can blast the BuildEventStreamer with many build events in parallel without
+    // violating internal consistency. The thread-safety under test is primarily sensitive to the
+    // pendingEvents field constructed when there are ordering constraints, so we make sure to
+    // include such ordering constraints in this test.
+    BuildEvent startEvent =
+        new GenericBuildEvent(
+            testId("Initial"),
+            ImmutableSet.of(ProgressEvent.INITIAL_PROGRESS_UPDATE, BuildEventId.buildFinished()));
+    streamer.buildEvent(startEvent);
+
+    int numThreads = 12;
+    int numEventsPerThread = 10_000;
+    int totalEvents = numThreads * numEventsPerThread;
+    AtomicInteger idIndex = new AtomicInteger();
+    ThreadPoolExecutor pool =
+        new ThreadPoolExecutor(
+            numThreads,
+            numThreads,
+            /* keepAliveTime= */ 0,
+            TimeUnit.SECONDS,
+            /* workQueue= */ new LinkedBlockingQueue<>());
+
+    for (int i = 0; i < numThreads; i++) {
+      pool.execute(
+          () -> {
+            for (int j = 0; j < numEventsPerThread; j++) {
+              int index = idIndex.getAndIncrement();
+              // Arrange for half of the events to have an ordering constraint on the subsequent
+              // event. The ordering graph must avoid cycles.
+              int afterIndex = (index % 2 == 0) ? (index + 1) % totalEvents : -1;
+              streamer.buildEvent(indexOrderedBuildEvent(index, afterIndex));
+            }
+          });
+    }
+
+    pool.shutdown();
+    pool.awaitTermination(1, TimeUnit.DAYS);
+
+    BuildEventId lateId = testId("late event");
+    streamer.buildEvent(new BuildCompleteEvent(new BuildResult(0), ImmutableList.of(lateId)));
+    assertThat(streamer.isClosed()).isFalse();
+    streamer.buildEvent(new GenericBuildEvent(lateId, ImmutableSet.of()));
+    assertThat(streamer.isClosed()).isTrue();
+
+    List<BuildEvent> eventsSeen = transport.getEvents();
+    assertThat(eventsSeen.get(0).getEventId()).isEqualTo(startEvent.getEventId());
+    assertThat(eventsSeen).hasSize(4 + totalEvents * 2);
+  }
+
+  // Re-enable this "test" for ad-hoc benchmarking of many concurrent build events.
+  @Ignore
+  public void concurrencyBenchmark() throws Exception {
+    long time = 0;
+    for (int iteration = 0; iteration < 3; iteration++) {
+      StopWatch watch = new StopWatch();
+      watch.start();
+
+      transport = new RecordingBuildEventTransport(artifactGroupNamer, /*recordEvents=*/ false);
+      streamer =
+          new BuildEventStreamer(
+              ImmutableSet.<BuildEventTransport>of(transport), artifactGroupNamer);
+      BuildEvent startEvent =
+          new GenericBuildEvent(
+              testId("Initial"),
+              ImmutableSet.of(ProgressEvent.INITIAL_PROGRESS_UPDATE, BuildEventId.buildFinished()));
+      streamer.buildEvent(startEvent);
+
+      int numThreads = 12;
+      int numEventsPerThread = 100_000;
+      int totalEvents = numThreads * numEventsPerThread;
+      AtomicInteger idIndex = new AtomicInteger();
+      ThreadPoolExecutor pool =
+          new ThreadPoolExecutor(
+              numThreads, numThreads, 0, TimeUnit.SECONDS, new LinkedBlockingQueue<>());
+
+      for (int i = 0; i < numThreads; i++) {
+        pool.execute(
+            () -> {
+              for (int j = 0; j < numEventsPerThread; j++) {
+                int index = idIndex.getAndIncrement();
+                // Arrange for half of the events to have an ordering constraint on the subsequent
+                // event. The ordering graph must avoid cycles.
+                int afterIndex = (index % 2 == 0) ? (index + 1) % totalEvents : -1;
+                streamer.buildEvent(indexOrderedBuildEvent(index, afterIndex));
+              }
+            });
+      }
+
+      pool.shutdown();
+      pool.awaitTermination(1, TimeUnit.DAYS);
+      watch.stop();
+
+      time += watch.getTime();
+
+      BuildEventId lateId = testId("late event");
+      streamer.buildEvent(new BuildCompleteEvent(new BuildResult(0), ImmutableList.of(lateId)));
+      assertThat(streamer.isClosed()).isFalse();
+      streamer.buildEvent(new GenericBuildEvent(lateId, ImmutableSet.of()));
+      assertThat(streamer.isClosed()).isTrue();
+    }
+
+    System.err.println();
+    System.err.println("=============================================================");
+    System.err.println("Concurrent performance of BEP build event processing: " + time + "ms");
+    System.err.println("=============================================================");
+  }
+
   @Test
   public void testMissingPrerequisites() {
     // Verify that an event where the prerequisite is never coming till the end of
@@ -541,7 +677,8 @@ public class BuildEventStreamerTest extends FoundationTestCase {
 
   private Artifact makeArtifact(String pathString) {
     Path path = outputBase.getRelative(PathFragment.create(pathString));
-    return new Artifact(path, ArtifactRoot.asSourceRoot(Root.fromPath(outputBase)));
+    return ActionsTestUtil.createArtifact(
+        ArtifactRoot.asSourceRoot(Root.fromPath(outputBase)), path);
   }
 
   @Test
@@ -709,8 +846,7 @@ public class BuildEventStreamerTest extends FoundationTestCase {
   public void testReportedConfigurations() throws Exception {
     // Verify that configuration events are posted, but only once.
     BuildOptions defaultBuildOptions =
-        BuildOptions.of(
-            ImmutableList.<Class<? extends FragmentOptions>>of(BuildConfiguration.Options.class));
+        BuildOptions.of(ImmutableList.<Class<? extends FragmentOptions>>of(CoreOptions.class));
     BuildEvent startEvent =
         new GenericBuildEvent(
             testId("Initial"),
@@ -1031,7 +1167,6 @@ public class BuildEventStreamerTest extends FoundationTestCase {
         new BuildEventStreamer.Builder()
             .artifactGroupNamer(artifactGroupNamer)
             .besStreamOptions(options)
-            .cmdLineReporter(reporter)
             .buildEventTransports(ImmutableSet.of(transport))
             .build();
 
@@ -1052,5 +1187,142 @@ public class BuildEventStreamerTest extends FoundationTestCase {
 
     assertThat(transportedEvents).contains(SUCCESSFUL_ACTION_EXECUTED_EVENT);
     assertThat(transportedEvents).contains(failedActionExecutedEvent);
+  }
+
+  @Test
+  public void testBuildIncomplete() {
+    BuildEventId buildEventId = testId("abort_expected");
+    BuildEvent startEvent =
+        new GenericBuildEvent(
+            BuildEventId.buildStartedId(),
+            ImmutableSet.of(
+                buildEventId, ProgressEvent.INITIAL_PROGRESS_UPDATE, BuildEventId.buildFinished()));
+    BuildCompleteEvent buildCompleteEvent =
+        buildCompleteEvent(ExitCode.BUILD_FAILURE, true, null, false);
+
+    streamer.buildEvent(startEvent);
+    streamer.buildEvent(buildCompleteEvent);
+    streamer.close();
+
+    BuildEventStreamProtos.BuildEvent aborted = getBepEvent(buildEventId);
+    assertThat(aborted).isNotNull();
+    assertThat(aborted.hasAborted()).isNotNull();
+    assertThat(aborted.getAborted().getReason()).isEqualTo(AbortReason.INCOMPLETE);
+    assertThat(aborted.getAborted().getDescription()).isEmpty();
+  }
+
+  @Test
+  public void testBuildCrash() {
+    BuildEventId buildEventId = testId("abort_expected");
+    BuildEvent startEvent =
+        new GenericBuildEvent(
+            BuildEventId.buildStartedId(),
+            ImmutableSet.of(
+                buildEventId, ProgressEvent.INITIAL_PROGRESS_UPDATE, BuildEventId.buildFinished()));
+    BuildCompleteEvent buildCompleteEvent =
+        buildCompleteEvent(ExitCode.BUILD_FAILURE, true, new RuntimeException(), false);
+
+    streamer.buildEvent(startEvent);
+    streamer.buildEvent(buildCompleteEvent);
+    streamer.close();
+
+    BuildEventStreamProtos.BuildEvent aborted = getBepEvent(buildEventId);
+    assertThat(aborted).isNotNull();
+    assertThat(aborted.hasAborted()).isNotNull();
+    assertThat(aborted.getAborted().getReason()).isEqualTo(AbortReason.INTERNAL);
+    assertThat(aborted.getAborted().getDescription()).isEmpty();
+  }
+
+  @Test
+  public void testBuildCatastrophe() {
+    BuildEventId buildEventId = testId("abort_expected");
+    BuildEvent startEvent =
+        new GenericBuildEvent(
+            BuildEventId.buildStartedId(),
+            ImmutableSet.of(
+                buildEventId, ProgressEvent.INITIAL_PROGRESS_UPDATE, BuildEventId.buildFinished()));
+    BuildCompleteEvent buildCompleteEvent =
+        buildCompleteEvent(ExitCode.BUILD_FAILURE, true, null, true);
+
+    streamer.buildEvent(startEvent);
+    streamer.buildEvent(buildCompleteEvent);
+    streamer.close();
+
+    BuildEventStreamProtos.BuildEvent aborted = getBepEvent(buildEventId);
+    assertThat(aborted).isNotNull();
+    assertThat(aborted.hasAborted()).isNotNull();
+    assertThat(aborted.getAborted().getReason()).isEqualTo(AbortReason.INTERNAL);
+    assertThat(aborted.getAborted().getDescription()).isEmpty();
+  }
+
+  @Test
+  public void testStreamAbortedWithTimeout() {
+    BuildEventId buildEventId = testId("abort_expected");
+    BuildEvent startEvent =
+        new GenericBuildEvent(
+            BuildEventId.buildStartedId(),
+            ImmutableSet.of(
+                buildEventId, ProgressEvent.INITIAL_PROGRESS_UPDATE, BuildEventId.buildFinished()));
+
+    streamer.buildEvent(startEvent);
+    streamer.close(AbortReason.TIME_OUT);
+
+    BuildEventStreamProtos.BuildEvent aborted0 = getBepEvent(buildEventId);
+    assertThat(aborted0).isNotNull();
+    assertThat(aborted0.hasAborted()).isNotNull();
+    assertThat(aborted0.getAborted().getReason()).isEqualTo(AbortReason.TIME_OUT);
+    assertThat(aborted0.getAborted().getDescription()).isEmpty();
+
+    BuildEventStreamProtos.BuildEvent aborted1 = getBepEvent(BuildEventId.buildFinished());
+    assertThat(aborted1).isNotNull();
+    assertThat(aborted1.hasAborted()).isNotNull();
+    assertThat(aborted1.getAborted().getReason()).isEqualTo(AbortReason.TIME_OUT);
+    assertThat(aborted1.getAborted().getDescription()).isEmpty();
+  }
+
+  @Test
+  public void testBuildFailureMultipleReasons() {
+    BuildEventId buildEventId = testId("abort_expected");
+    BuildEvent startEvent =
+        new GenericBuildEvent(
+            BuildEventId.buildStartedId(),
+            ImmutableSet.of(
+                buildEventId, ProgressEvent.INITIAL_PROGRESS_UPDATE, BuildEventId.buildFinished()));
+    BuildCompleteEvent buildCompleteEvent =
+        buildCompleteEvent(ExitCode.BUILD_FAILURE, false, new RuntimeException(), false);
+
+    streamer.buildEvent(startEvent);
+    streamer.noAnalyze(new NoAnalyzeEvent());
+    streamer.buildEvent(buildCompleteEvent);
+    streamer.close();
+
+    BuildEventStreamProtos.BuildEvent aborted = getBepEvent(buildEventId);
+    assertThat(aborted).isNotNull();
+    assertThat(aborted.hasAborted()).isNotNull();
+    assertThat(aborted.getAborted().getReason()).isEqualTo(AbortReason.INTERNAL);
+    assertThat(aborted.getAborted().getDescription())
+        .isEqualTo("Multiple abort reasons reported: [NO_ANALYZE, INTERNAL]");
+  }
+
+  @Nullable
+  private BuildEventStreamProtos.BuildEvent getBepEvent(BuildEventId buildEventId) {
+    return transport.getEventProtos().stream()
+        .filter(e -> e.getId().equals(buildEventId.asStreamProto()))
+        .findFirst()
+        .orElse(null);
+  }
+
+  private BuildCompleteEvent buildCompleteEvent(
+      ExitCode exitCode, boolean stopOnFailure, Throwable crash, boolean catastrophe) {
+    BuildResult result = new BuildResult(0);
+    result.setExitCondition(exitCode);
+    result.setStopOnFirstFailure(stopOnFailure);
+    if (catastrophe) {
+      result.setCatastrophe();
+    }
+    if (crash != null) {
+      result.setUnhandledThrowable(crash);
+    }
+    return new BuildCompleteEvent(result);
   }
 }

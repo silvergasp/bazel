@@ -1,5 +1,6 @@
 # External dependencies for the java_* rules.
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive", "http_file")
+load("@bazel_tools//tools/build_defs/repo:utils.bzl", "maybe")
 
 new_local_repository(
     name = "local_jdk",
@@ -174,7 +175,6 @@ http_archive(
     ],
 )
 
-
 http_archive(
     name = "remotejdk11_linux",
     build_file = "@local_jdk//:BUILD.bazel",
@@ -182,6 +182,16 @@ http_archive(
     strip_prefix = "zulu11.2.3-jdk11.0.1-linux_x64",
     urls = [
         "https://mirror.bazel.build/openjdk/azul-zulu11.2.3-jdk11.0.1/zulu11.2.3-jdk11.0.1-linux_x64.tar.gz",
+    ],
+)
+
+http_archive(
+    name = "remotejdk11_linux_aarch64",
+    build_file = "@local_jdk//:BUILD.bazel",
+    sha256 = "3b0d91611b1bdc4d409afcf9eab4f0e7f4ae09f88fc01bd9f2b48954882ae69b",
+    strip_prefix = "zulu11.31.15-ca-jdk11.0.3-linux_aarch64",
+    urls = [
+        "https://mirror.bazel.build/openjdk/azul-zulu11.31.15-ca-jdk11.0.3/zulu11.31.15-ca-jdk11.0.3-linux_aarch64.tar.gz",
     ],
 )
 
@@ -206,12 +216,50 @@ http_archive(
 )
 
 http_archive(
-    name = "remote_java_tools",
-    build_file = "@bazel_tools//tools/jdk:BUILD.pkg",
-    sha256 = "bcfc1a3dd0d638a49fed50f17f0f1f7d77101debf19ae2c82119c82459a9a8d1",
+    name = "remote_java_tools_linux",
+    sha256 = "96e223094a12c842a66db0bb7bb6866e88e26e678f045842911f9bd6b47161f5",
     urls = [
-        "https://mirror.bazel.build/bazel_java_tools/java_tools_pkg-0.5.1.tar.gz",
+        "https://mirror.bazel.build/bazel_java_tools/releases/javac11/v4.0/java_tools_javac11_linux-v4.0.zip",
     ],
 )
 
-register_toolchains('@bazel_tools//tools/jdk:all')
+http_archive(
+    name = "remote_java_tools_windows",
+    sha256 = "a1de51447b2ba2eab923d589ba6c72c289c16e6091e6a3bb3e67a05ef4ad200c",
+    urls = [
+        "https://mirror.bazel.build/bazel_java_tools/releases/javac11/v4.0/java_tools_javac11_windows-v4.0.zip",
+    ],
+)
+
+http_archive(
+    name = "remote_java_tools_darwin",
+    sha256 = "fbf5bf22e9aab9c622e4c8c59314a1eef5ea09eafc5672b4f3250dc0b971bbcc",
+    urls = [
+        "https://mirror.bazel.build/bazel_java_tools/releases/javac11/v4.0/java_tools_javac11_darwin-v4.0.zip",
+    ],
+)
+
+maybe(
+    http_archive,
+    "rules_java",
+    sha256 = "bc81f1ba47ef5cc68ad32225c3d0e70b8c6f6077663835438da8d5733f917598",
+    urls = [
+        "https://mirror.bazel.build/github.com/bazelbuild/rules_java/archive/7cf3cefd652008d0a64a419c34c13bdca6c8f178.zip",
+        "https://github.com/bazelbuild/rules_java/archive/7cf3cefd652008d0a64a419c34c13bdca6c8f178.zip",
+    ],
+    strip_prefix = "rules_java-7cf3cefd652008d0a64a419c34c13bdca6c8f178",
+)
+
+# Needed only because of java_tools.
+maybe(
+    http_archive,
+    "rules_cc",
+    sha256 = "36fa66d4d49debd71d05fba55c1353b522e8caef4a20f8080a3d17cdda001d89",
+    urls = [
+        "https://mirror.bazel.build/github.com/bazelbuild/rules_cc/archive/0d5f3f2768c6ca2faca0079a997a97ce22997a0c.zip",
+        "https://github.com/bazelbuild/rules_cc/archive/0d5f3f2768c6ca2faca0079a997a97ce22997a0c.zip",
+    ],
+    strip_prefix = "rules_cc-0d5f3f2768c6ca2faca0079a997a97ce22997a0c",
+)
+
+register_toolchains("@bazel_tools//tools/jdk:all")

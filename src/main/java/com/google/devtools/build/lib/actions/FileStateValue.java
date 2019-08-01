@@ -24,6 +24,7 @@ import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadSafe;
 import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
 import com.google.devtools.build.lib.util.BigIntegerFingerprint;
 import com.google.devtools.build.lib.util.io.TimestampGranularityMonitor;
+import com.google.devtools.build.lib.vfs.Dirent;
 import com.google.devtools.build.lib.vfs.FileStatus;
 import com.google.devtools.build.lib.vfs.FileStatusWithDigest;
 import com.google.devtools.build.lib.vfs.FileStatusWithDigestAdapter;
@@ -31,6 +32,7 @@ import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.lib.vfs.RootedPath;
 import com.google.devtools.build.lib.vfs.Symlinks;
+import com.google.devtools.build.lib.vfs.UnixGlob.FilesystemCalls;
 import com.google.devtools.build.skyframe.AbstractSkyKey;
 import com.google.devtools.build.skyframe.SkyFunctionName;
 import com.google.devtools.build.skyframe.SkyValue;
@@ -43,23 +45,21 @@ import javax.annotation.Nullable;
 /**
  * Encapsulates the filesystem operations needed to get state for a path. This is equivalent to an
  * 'lstat' that does not follow symlinks to determine what type of file the path is.
- * <ul>
- *   <li> For a non-existent file, the non-existence is noted.
- *   <li> For a symlink, the symlink target is noted.
- *   <li> For a directory, the existence is noted.
- *   <li> For a file, the existence is noted, along with metadata about the file (e.g.
- *        file digest). See {@link RegularFileStateValue}.
- * <ul>
  *
- * <p>This class is an implementation detail of {@link FileValue} and should not be used by
- * {@link com.google.devtools.build.skyframe.SkyFunction}s other than {@link FileFunction}. Instead,
- * {@link FileValue} should be used by {@link com.google.devtools.build.skyframe.SkyFunction}
- * consumers that care about files.
- *
- * <p>All subclasses must implement {@link #equals} and {@link #hashCode} properly.
+ * <ul>
+ *   <li>For a non-existent file, the non-existence is noted.
+ *   <li>For a symlink, the symlink target is noted.
+ *   <li>For a directory, the existence is noted.
+ *   <li>For a file, the existence is noted, along with metadata about the file (e.g. file digest).
+ *       See {@link RegularFileStateValue}.
+ *       <ul>
+ *         <p>This class is an implementation detail of {@link FileValue} and should not be used by
+ *         {@link com.google.devtools.build.skyframe.SkyFunction}s other than {@link FileFunction}.
+ *         Instead, {@link FileValue} should be used by {@link
+ *         com.google.devtools.build.skyframe.SkyFunction} consumers that care about files.
+ *         <p>All subclasses must implement {@link #equals} and {@link #hashCode} properly.
  */
-@VisibleForTesting
-public abstract class FileStateValue implements SkyValue {
+public abstract class FileStateValue implements HasDigest, SkyValue {
   public static final SkyFunctionName FILE_STATE = SkyFunctionName.createNonHermetic("FILE_STATE");
 
   @AutoCodec
@@ -71,6 +71,34 @@ public abstract class FileStateValue implements SkyValue {
       new NonexistentFileStateValue();
 
   protected FileStateValue() {
+  }
+
+  public static FileStateValue create(
+      RootedPath rootedPath,
+      FilesystemCalls syscallCache,
+      @Nullable TimestampGranularityMonitor tsgm)
+      throws InconsistentFilesystemException, IOException {
+    Path path = rootedPath.asPath();
+    Dirent.Type type = syscallCache.getType(path, Symlinks.NOFOLLOW);
+    if (type == null) {
+      return NONEXISTENT_FILE_STATE_NODE;
+    }
+    switch (type) {
+      case DIRECTORY:
+        return DIRECTORY_FILE_STATE_NODE;
+      case SYMLINK:
+        return new SymlinkFileStateValue(path.readSymbolicLinkUnchecked());
+      case FILE:
+      case UNKNOWN:
+        {
+          FileStatus stat = syscallCache.statIfFound(path, Symlinks.NOFOLLOW);
+          Preconditions.checkNotNull(
+              stat, "File %s found in directory, but stat failed", rootedPath);
+          return createWithStatNoFollow(rootedPath, FileStatusWithDigestAdapter.adapt(stat), tsgm);
+        }
+      default:
+        throw new IllegalStateException(type.toString());
+    }
   }
 
   public static FileStateValue create(RootedPath rootedPath,
@@ -144,7 +172,11 @@ public abstract class FileStateValue implements SkyValue {
   }
 
   @Nullable
-  byte[] getDigest() {
+  public abstract FileContentsProxy getContentsProxy();
+
+  @Nullable
+  @Override
+  public byte[] getDigest() {
     throw new IllegalStateException();
   }
 
@@ -242,6 +274,7 @@ public abstract class FileStateValue implements SkyValue {
       return digest;
     }
 
+    @Override
     public FileContentsProxy getContentsProxy() {
       return contentsProxy;
     }
@@ -267,7 +300,10 @@ public abstract class FileStateValue implements SkyValue {
 
     @Override
     public BigInteger getValueFingerprint() {
-      BigIntegerFingerprint fp = new BigIntegerFingerprint().addDigestedBytes(digest).addLong(size);
+      BigIntegerFingerprint fp = new BigIntegerFingerprint().addLong(size);
+      if (digest != null) {
+        fp.addDigestedBytes(digest);
+      }
       if (contentsProxy != null) {
         contentsProxy.addToFingerprint(fp);
       }
@@ -321,10 +357,11 @@ public abstract class FileStateValue implements SkyValue {
 
     @Override
     @Nullable
-    byte[] getDigest() {
+    public byte[] getDigest() {
       return null;
     }
 
+    @Override
     public FileContentsProxy getContentsProxy() {
       return contentsProxy;
     }
@@ -370,6 +407,11 @@ public abstract class FileStateValue implements SkyValue {
     @Override
     public FileStateType getType() {
       return FileStateType.DIRECTORY;
+    }
+
+    @Override
+    public FileContentsProxy getContentsProxy() {
+      throw new UnsupportedOperationException();
     }
 
     @Override
@@ -429,6 +471,11 @@ public abstract class FileStateValue implements SkyValue {
     }
 
     @Override
+    public FileContentsProxy getContentsProxy() {
+      return null;
+    }
+
+    @Override
     public BigInteger getValueFingerprint() {
       return new BigIntegerFingerprint().addPath(symlinkTarget).getFingerprint();
     }
@@ -451,6 +498,11 @@ public abstract class FileStateValue implements SkyValue {
     @Override
     public FileStateType getType() {
       return FileStateType.NONEXISTENT;
+    }
+
+    @Override
+    public FileContentsProxy getContentsProxy() {
+      throw new UnsupportedOperationException();
     }
 
     @Override

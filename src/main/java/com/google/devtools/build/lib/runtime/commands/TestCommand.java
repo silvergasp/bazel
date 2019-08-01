@@ -16,7 +16,7 @@ package com.google.devtools.build.lib.runtime.commands;
 
 import com.google.common.collect.ImmutableList;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
-import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
+import com.google.devtools.build.lib.analysis.config.CoreOptions;
 import com.google.devtools.build.lib.buildtool.BuildRequest;
 import com.google.devtools.build.lib.buildtool.BuildRequestOptions;
 import com.google.devtools.build.lib.buildtool.BuildResult;
@@ -31,7 +31,6 @@ import com.google.devtools.build.lib.exec.TestStrategy;
 import com.google.devtools.build.lib.exec.TestStrategy.TestOutputFormat;
 import com.google.devtools.build.lib.runtime.AggregatingTestListener;
 import com.google.devtools.build.lib.runtime.BlazeCommand;
-import com.google.devtools.build.lib.runtime.BlazeCommandEventHandler;
 import com.google.devtools.build.lib.runtime.BlazeCommandResult;
 import com.google.devtools.build.lib.runtime.BlazeRuntime;
 import com.google.devtools.build.lib.runtime.Command;
@@ -41,6 +40,7 @@ import com.google.devtools.build.lib.runtime.TerminalTestResultNotifier.TestSumm
 import com.google.devtools.build.lib.runtime.TestResultAnalyzer;
 import com.google.devtools.build.lib.runtime.TestResultNotifier;
 import com.google.devtools.build.lib.runtime.TestSummaryPrinter.TestLogPathFormatter;
+import com.google.devtools.build.lib.runtime.UiOptions;
 import com.google.devtools.build.lib.util.ExitCode;
 import com.google.devtools.build.lib.util.io.AnsiTerminalPrinter;
 import com.google.devtools.build.lib.vfs.Path;
@@ -100,8 +100,10 @@ public class TestCommand implements BlazeCommand {
         options.getOptions(ExecutionOptions.class),
         env.getEventBus());
 
-    printer = new AnsiTerminalPrinter(env.getReporter().getOutErr().getOutputStream(),
-        options.getOptions(BlazeCommandEventHandler.Options.class).useColor());
+    printer =
+        new AnsiTerminalPrinter(
+            env.getReporter().getOutErr().getOutputStream(),
+            options.getOptions(UiOptions.class).useColor());
 
     // Initialize test handler.
     AggregatingTestListener testListener =
@@ -122,7 +124,7 @@ public class TestCommand implements BlazeCommand {
         runtime.getStartupOptionsProvider(), targets,
         env.getReporter().getOutErr(), env.getCommandId(), env.getCommandStartTime());
     request.setRunTests();
-    if (options.getOptions(BuildConfiguration.Options.class).collectCodeCoverage
+    if (options.getOptions(CoreOptions.class).collectCodeCoverage
         && !options.containsExplicitOption(
             InstrumentationFilterSupport.INSTRUMENTATION_FILTER_FLAG)) {
       request.setNeedsInstrumentationFilter(true);

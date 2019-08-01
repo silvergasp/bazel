@@ -46,7 +46,7 @@ public final class Event implements Serializable {
   @Nullable
   private final String tag;
 
-  private final int hashCode;
+  private int hashCode;
 
   private Event(
       EventKind kind,
@@ -62,8 +62,6 @@ public final class Event implements Serializable {
     this.tag = tag;
     this.stdout = stdout;
     this.stderr = stderr;
-    this.hashCode =
-        Objects.hash(kind, location, message, tag, Arrays.hashCode(messageBytes), stdout, stderr);
   }
 
   private Event(
@@ -80,8 +78,6 @@ public final class Event implements Serializable {
     this.tag = tag;
     this.stdout = stdout;
     this.stderr = stderr;
-    this.hashCode =
-        Objects.hash(kind, location, message, tag, Arrays.hashCode(messageBytes), stdout, stderr);
   }
 
   public Event withTag(String tag) {
@@ -162,7 +158,21 @@ public final class Event implements Serializable {
 
   @Override
   public int hashCode() {
-    return hashCode;
+    // We defer the computation of hashCode until it is needed to avoid the overhead of computing it
+    // and then never using it. In particular, we use Event for streaming stdout and stderr, which
+    // are both large and the hashCode is never used.
+    //
+    // This uses the same construction as String.hashCode. We don't lock, so reads and writes to the
+    // field can race. However, integer reads and writes are atomic, and this code guarantees that
+    // all writes have the same value, so the memory location can only be either 0 or the final
+    // value. Note that a reader could see the final value on the first read and 0 on the second
+    // read, so we must take care to only read the field once.
+    int h = hashCode;
+    if (h == 0) {
+      h = Objects.hash(kind, location, message, tag, Arrays.hashCode(messageBytes), stdout, stderr);
+      hashCode = h;
+    }
+    return h;
   }
 
   @Override
@@ -205,18 +215,24 @@ public final class Event implements Serializable {
     return new Event(kind, location, messageBytes, null, null, null);
   }
 
-  /**
-   * Reports an error.
-   */
-  public static Event error(@Nullable Location location, String message){
+  /** Reports an error. */
+  public static Event error(@Nullable Location location, String message) {
     return new Event(EventKind.ERROR, location, message, null, null, null);
   }
 
-  /**
-   * Reports a warning.
-   */
+  /** Reports an error. */
+  public static Event error(String message) {
+    return error(null, message);
+  }
+
+  /** Reports a warning. */
   public static Event warn(@Nullable Location location, String message) {
     return new Event(EventKind.WARNING, location, message, null, null, null);
+  }
+
+  /** Reports a warning. */
+  public static Event warn(String message) {
+    return warn(null, message);
   }
 
   /**
@@ -227,45 +243,25 @@ public final class Event implements Serializable {
   }
 
   /**
-   * Reports a temporal statement about the build.
-   */
-  public static Event progress(@Nullable Location location, String message) {
-    return new Event(EventKind.PROGRESS, location, message, null, null, null);
-  }
-
-  /**
-   * Reports a debug message.
-   */
-  public static Event debug(@Nullable Location location, String message) {
-    return new Event(EventKind.DEBUG, location, message, null, null, null);
-  }
-
-  /**
-   * Reports an error.
-   */
-  public static Event error(String message){
-    return error(null, message);
-  }
-
-  /**
-   * Reports a warning.
-   */
-  public static Event warn(String message) {
-    return warn(null, message);
-  }
-
-  /**
    * Reports atemporal statements about the build, i.e. they're true for the duration of execution.
    */
   public static Event info(String message) {
     return info(null, message);
   }
 
-  /**
-   * Reports a temporal statement about the build.
-   */
+  /** Reports a temporal statement about the build. */
+  public static Event progress(@Nullable Location location, String message) {
+    return new Event(EventKind.PROGRESS, location, message, null, null, null);
+  }
+
+  /** Reports a temporal statement about the build. */
   public static Event progress(String message) {
     return progress(null, message);
+  }
+
+  /** Reports a debug message. */
+  public static Event debug(@Nullable Location location, String message) {
+    return new Event(EventKind.DEBUG, location, message, null, null, null);
   }
 
   /**

@@ -17,6 +17,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 #include "src/main/cpp/blaze_util.h"
 #include "src/main/cpp/blaze_util_platform.h"
@@ -96,9 +97,13 @@ StartupOptions::StartupOptions(const string &product_name,
       digest_function(),
       idle_server_tasks(true),
       original_startup_options_(std::vector<RcStartupFlag>()),
-      unlimit_coredumps(false) {
+#if defined(__APPLE__)
+      macos_qos_class(QOS_CLASS_DEFAULT),
+#endif
+      unlimit_coredumps(false),
+      incompatible_enable_execution_transition(false) {
   if (blaze::IsRunningWithinTest()) {
-    output_root = blaze_util::MakeAbsolute(blaze::GetEnv("TEST_TMPDIR"));
+    output_root = blaze_util::MakeAbsolute(blaze::GetPathEnv("TEST_TMPDIR"));
     max_idle_secs = 15;
     BAZEL_LOG(USER) << "$TEST_TMPDIR defined: output root default is '"
                     << output_root << "' and max_idle_secs default is '"
@@ -136,6 +141,7 @@ StartupOptions::StartupOptions(const string &product_name,
   RegisterNullaryStartupFlag("fatal_event_bus_exceptions");
   RegisterNullaryStartupFlag("host_jvm_debug");
   RegisterNullaryStartupFlag("idle_server_tasks");
+  RegisterNullaryStartupFlag("incompatible_enable_execution_transition");
   RegisterNullaryStartupFlag("shutdown_on_low_sys_mem");
   RegisterNullaryStartupFlag("ignore_all_rc_files");
   RegisterNullaryStartupFlag("unlimit_coredumps");
@@ -151,6 +157,7 @@ StartupOptions::StartupOptions(const string &product_name,
   RegisterUnaryStartupFlag("invocation_policy");
   RegisterUnaryStartupFlag("io_nice_level");
   RegisterUnaryStartupFlag("install_base");
+  RegisterUnaryStartupFlag("macos_qos_class");
   RegisterUnaryStartupFlag("max_idle_secs");
   RegisterUnaryStartupFlag("output_base");
   RegisterUnaryStartupFlag("output_user_root");
@@ -183,7 +190,13 @@ bool StartupOptions::IsUnary(const string& arg) const {
   return false;
 }
 
-void StartupOptions::AddExtraOptions(vector<string> *result) const {}
+void StartupOptions::AddExtraOptions(vector<string> *result) const {
+  if (incompatible_enable_execution_transition) {
+    result->push_back("--incompatible_enable_execution_transition");
+  } else {
+    result->push_back("--noincompatible_enable_execution_transition");
+  }
+}
 
 blaze_exit_code::ExitCode StartupOptions::ProcessArg(
       const string &argstr, const string &next_argstr, const string &rcfile,
@@ -233,7 +246,7 @@ blaze_exit_code::ExitCode StartupOptions::ProcessArg(
              NULL) {
     // TODO(bazel-team): Consider examining the javabase and re-execing in case
     // of architecture mismatch.
-    server_javabase_ = blaze::AbsolutePathFromFlag(value);
+    explicit_server_javabase_ = blaze::AbsolutePathFromFlag(value);
     option_sources["server_javabase"] = rcfile;
   } else if ((value = GetUnaryOption(arg, next_arg, "--host_jvm_args")) !=
              NULL) {
@@ -290,6 +303,36 @@ blaze_exit_code::ExitCode StartupOptions::ProcessArg(
       return blaze_exit_code::BAD_ARGV;
     }
     option_sources["max_idle_secs"] = rcfile;
+  } else if ((value = GetUnaryOption(arg, next_arg, "--macos_qos_class")) !=
+             NULL) {
+    // We parse the value of this flag on all platforms even if it is
+    // macOS-specific to ensure that rc files mentioning it are valid.
+    if (strcmp(value, "user-interactive") == 0) {
+#if defined(__APPLE__)
+      macos_qos_class = QOS_CLASS_USER_INTERACTIVE;
+#endif
+    } else if (strcmp(value, "user-initiated") == 0) {
+#if defined(__APPLE__)
+      macos_qos_class = QOS_CLASS_USER_INITIATED;
+#endif
+    } else if (strcmp(value, "default") == 0) {
+#if defined(__APPLE__)
+      macos_qos_class = QOS_CLASS_DEFAULT;
+#endif
+    } else if (strcmp(value, "utility") == 0) {
+#if defined(__APPLE__)
+      macos_qos_class = QOS_CLASS_UTILITY;
+#endif
+    } else if (strcmp(value, "background") == 0) {
+#if defined(__APPLE__)
+      macos_qos_class = QOS_CLASS_BACKGROUND;
+#endif
+    } else {
+      blaze_util::StringPrintf(
+          error, "Invalid argument to --macos_qos_class: '%s'.", value);
+      return blaze_exit_code::BAD_ARGV;
+    }
+    option_sources["macos_qos_class"] = rcfile;
   } else if (GetNullaryOption(arg, "--shutdown_on_low_sys_mem")) {
     shutdown_on_low_sys_mem = true;
     option_sources["shutdown_on_low_sys_mem"] = rcfile;
@@ -388,6 +431,14 @@ blaze_exit_code::ExitCode StartupOptions::ProcessArg(
   } else if (GetNullaryOption(arg, "--nounlimit_coredumps")) {
     unlimit_coredumps = false;
     option_sources["unlimit_coredumps"] = rcfile;
+  } else if (GetNullaryOption(arg,
+                              "--incompatible_enable_execution_transition")) {
+    incompatible_enable_execution_transition = true;
+    option_sources["incompatible_enable_execution_transition"] = rcfile;
+  } else if (GetNullaryOption(arg,
+                              "--noincompatible_enable_execution_transition")) {
+    incompatible_enable_execution_transition = false;
+    option_sources["incompatible_enable_execution_transition"] = rcfile;
   } else {
     bool extra_argument_processed;
     blaze_exit_code::ExitCode process_extra_arg_exit_code = ProcessArgExtra(
@@ -447,7 +498,7 @@ string StartupOptions::GetSystemJavabase() const {
   return blaze::GetSystemJavabase();
 }
 
-string StartupOptions::GetEmbeddedJavabase() {
+string StartupOptions::GetEmbeddedJavabase() const {
   string bundled_jre_path = blaze_util::JoinPath(
       install_base, "_embedded_binaries/embedded_tools/jdk");
   if (blaze_util::CanExecuteFile(blaze_util::JoinPath(
@@ -457,10 +508,10 @@ string StartupOptions::GetEmbeddedJavabase() {
   return "";
 }
 
-string StartupOptions::GetServerJavabase() {
+string StartupOptions::GetServerJavabase() const {
   // 1) Allow overriding the server_javabase via --server_javabase.
-  if (!server_javabase_.empty()) {
-    return server_javabase_;
+  if (!explicit_server_javabase_.empty()) {
+    return explicit_server_javabase_;
   }
   if (default_server_javabase_.empty()) {
     string bundled_jre_path = GetEmbeddedJavabase();
@@ -482,10 +533,10 @@ string StartupOptions::GetServerJavabase() {
 }
 
 string StartupOptions::GetExplicitServerJavabase() const {
-  return server_javabase_;
+  return explicit_server_javabase_;
 }
 
-string StartupOptions::GetJvm() {
+string StartupOptions::GetJvm() const {
   string java_program =
       blaze_util::JoinPath(GetServerJavabase(), GetJavaBinaryUnderJavabase());
   if (!blaze_util::CanExecuteFile(java_program)) {
@@ -519,7 +570,7 @@ string StartupOptions::GetJvm() {
   exit(1);
 }
 
-string StartupOptions::GetExe(const string &jvm, const string &jar_path) {
+string StartupOptions::GetExe(const string &jvm, const string &jar_path) const {
   return jvm;
 }
 

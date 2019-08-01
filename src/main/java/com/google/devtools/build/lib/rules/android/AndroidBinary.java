@@ -37,6 +37,7 @@ import com.google.devtools.build.lib.actions.MutableActionGraph.ActionConflictEx
 import com.google.devtools.build.lib.actions.ParamFileInfo;
 import com.google.devtools.build.lib.actions.ParameterFile;
 import com.google.devtools.build.lib.actions.ParameterFile.ParameterFileType;
+import com.google.devtools.build.lib.analysis.AnalysisUtils;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
 import com.google.devtools.build.lib.analysis.FileProvider;
 import com.google.devtools.build.lib.analysis.FilesToRunProvider;
@@ -46,6 +47,7 @@ import com.google.devtools.build.lib.analysis.RuleConfiguredTargetFactory;
 import com.google.devtools.build.lib.analysis.RuleContext;
 import com.google.devtools.build.lib.analysis.Runfiles;
 import com.google.devtools.build.lib.analysis.RunfilesProvider;
+import com.google.devtools.build.lib.analysis.TransitiveInfoCollection;
 import com.google.devtools.build.lib.analysis.actions.ActionConstructionContext;
 import com.google.devtools.build.lib.analysis.actions.CustomCommandLine;
 import com.google.devtools.build.lib.analysis.actions.CustomCommandLine.VectorArg;
@@ -59,18 +61,19 @@ import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.packages.BuildType;
+import com.google.devtools.build.lib.packages.RuleClass;
 import com.google.devtools.build.lib.packages.RuleErrorConsumer;
 import com.google.devtools.build.lib.packages.TriState;
 import com.google.devtools.build.lib.rules.android.AndroidBinaryMobileInstall.MobileInstallResourceApks;
 import com.google.devtools.build.lib.rules.android.AndroidConfiguration.AndroidAaptVersion;
 import com.google.devtools.build.lib.rules.android.AndroidRuleClasses.MultidexMode;
+import com.google.devtools.build.lib.rules.android.ProguardHelper.ProguardOutput;
 import com.google.devtools.build.lib.rules.android.ZipFilterBuilder.CheckHashMismatchMode;
 import com.google.devtools.build.lib.rules.android.databinding.DataBinding;
 import com.google.devtools.build.lib.rules.cpp.CppSemantics;
 import com.google.devtools.build.lib.rules.java.DeployArchiveBuilder;
 import com.google.devtools.build.lib.rules.java.JavaCommon;
 import com.google.devtools.build.lib.rules.java.JavaConfiguration;
-import com.google.devtools.build.lib.rules.java.JavaConfiguration.JavaOptimizationMode;
 import com.google.devtools.build.lib.rules.java.JavaConfiguration.OneVersionEnforcementLevel;
 import com.google.devtools.build.lib.rules.java.JavaRuntimeInfo;
 import com.google.devtools.build.lib.rules.java.JavaSemantics;
@@ -78,8 +81,6 @@ import com.google.devtools.build.lib.rules.java.JavaSourceInfoProvider;
 import com.google.devtools.build.lib.rules.java.JavaTargetAttributes;
 import com.google.devtools.build.lib.rules.java.JavaToolchainProvider;
 import com.google.devtools.build.lib.rules.java.OneVersionCheckActionBuilder;
-import com.google.devtools.build.lib.rules.java.ProguardHelper;
-import com.google.devtools.build.lib.rules.java.ProguardHelper.ProguardOutput;
 import com.google.devtools.build.lib.rules.java.ProguardSpecProvider;
 import com.google.devtools.build.lib.syntax.Type;
 import com.google.devtools.build.lib.vfs.PathFragment;
@@ -103,16 +104,14 @@ public abstract class AndroidBinary implements RuleConfiguredTargetFactory {
 
   protected abstract CppSemantics createCppSemantics();
 
-  protected abstract AndroidMigrationSemantics createAndroidMigrationSemantics();
-
   @Override
   public ConfiguredTarget create(RuleContext ruleContext)
       throws InterruptedException, RuleErrorException, ActionConflictException {
     CppSemantics cppSemantics = createCppSemantics();
     JavaSemantics javaSemantics = createJavaSemantics();
     AndroidSemantics androidSemantics = createAndroidSemantics();
+    androidSemantics.checkForMigrationTag(ruleContext);
     androidSemantics.validateAndroidBinaryRuleContext(ruleContext);
-    createAndroidMigrationSemantics().validateRuleContext(ruleContext);
     AndroidSdkProvider.verifyPresence(ruleContext);
 
     NestedSetBuilder<Artifact> filesBuilder = NestedSetBuilder.stableOrder();
@@ -156,6 +155,34 @@ public abstract class AndroidBinary implements RuleConfiguredTargetFactory {
       // Multidex is required so we can include legacy libs as a separate .dex file.
       ruleContext.throwWithAttributeError(
           "multidex", "Support for Java 8 libraries on legacy devices requires multidex");
+    }
+
+    if (ruleContext.getFragment(JavaConfiguration.class).enforceProguardFileExtension()
+        && ruleContext.attributes().has(ProguardHelper.PROGUARD_SPECS)) {
+      List<PathFragment> pathsWithUnexpectedExtension =
+          ruleContext
+              .getPrerequisiteArtifacts(ProguardHelper.PROGUARD_SPECS, Mode.TARGET)
+              .list()
+              .stream()
+              .filter(Artifact::isSourceArtifact)
+              .map(Artifact::getRootRelativePath)
+              .filter(
+                  // This checks the filename directly instead of using FileType because we want to
+                  // exclude third_party/, but FileType is generally only given the basename.
+                  //
+                  // See e.g. RuleContext#validateDirectPrerequisiteType and
+                  // PrerequisiteArtifacts#filter.
+                  path ->
+                      !path.getFileExtension().equals("pgcfg")
+                          && !path.startsWith(RuleClass.THIRD_PARTY_PREFIX)
+                          && !path.startsWith(RuleClass.EXPERIMENTAL_PREFIX))
+              .collect(toImmutableList());
+      if (!pathsWithUnexpectedExtension.isEmpty()) {
+        ruleContext.throwWithAttributeError(
+            ProguardHelper.PROGUARD_SPECS,
+            "Proguard spec files must use the .pgcfg extension. These files do not end in .pgcfg: "
+                + pathsWithUnexpectedExtension);
+      }
     }
   }
 
@@ -307,8 +334,16 @@ public abstract class AndroidBinary implements RuleConfiguredTargetFactory {
 
     Artifact proguardMapping =
         ruleContext.getPrerequisiteArtifact("proguard_apply_mapping", Mode.TARGET);
+    if (proguardMapping != null && dataContext.throwOnProguardApplyMapping()) {
+      throw ruleContext.throwWithAttributeError(
+          "proguard_apply_mapping", "This attribute is not supported");
+    }
     Artifact proguardDictionary =
         ruleContext.getPrerequisiteArtifact("proguard_apply_dictionary", Mode.TARGET);
+    if (proguardDictionary != null && dataContext.throwOnProguardApplyDictionary()) {
+      throw ruleContext.throwWithAttributeError(
+          "proguard_apply_dictionary", "This attribute is not supported");
+    }
 
     MobileInstallResourceApks mobileInstallResourceApks =
         AndroidBinaryMobileInstall.createMobileInstallResourceApks(
@@ -386,7 +421,6 @@ public abstract class AndroidBinary implements RuleConfiguredTargetFactory {
     // which this -printmapping command line flag will override.
     Artifact proguardOutputMap = null;
     if (ProguardHelper.genProguardMapping(ruleContext.attributes())
-        || ProguardHelper.getJavaOptimizationMode(ruleContext).alwaysGenerateOutputMapping()
         || shrinkResources) {
       proguardOutputMap = androidSemantics.getProguardOutputMap(ruleContext);
     }
@@ -427,8 +461,20 @@ public abstract class AndroidBinary implements RuleConfiguredTargetFactory {
             derivedJarFunction,
             proguardOutputMap);
 
-    NestedSet<Artifact> nativeLibsAar =
-        AndroidCommon.collectTransitiveNativeLibs(ruleContext).build();
+    // Collect all native shared libraries across split transitions. Some AARs contain shared
+    // libraries across multiple architectures, e.g. x86 and armeabi-v7a, and need to be packed
+    // into the APK.
+    NestedSetBuilder<Artifact> transitiveNativeLibs = NestedSetBuilder.naiveLinkOrder();
+    for (Map.Entry<
+            com.google.common.base.Optional<String>,
+            ? extends List<? extends TransitiveInfoCollection>>
+        entry : ruleContext.getSplitPrerequisites("deps").entrySet()) {
+      for (AndroidNativeLibsInfo provider :
+          AnalysisUtils.getProviders(entry.getValue(), AndroidNativeLibsInfo.PROVIDER)) {
+        transitiveNativeLibs.addTransitive(provider.getNativeLibs());
+      }
+    }
+    NestedSet<Artifact> nativeLibsAar = transitiveNativeLibs.build();
 
     DexPostprocessingOutput dexPostprocessingOutput =
         androidSemantics.postprocessClassesDexZip(
@@ -533,11 +579,8 @@ public abstract class AndroidBinary implements RuleConfiguredTargetFactory {
       ApkInfo targetApkProvider =
           ruleContext.getPrerequisite("instruments", Mode.TARGET, ApkInfo.PROVIDER);
 
-      Artifact targetApk = targetApkProvider.getApk();
-      Artifact instrumentationApk = zipAlignedApk;
-
       AndroidInstrumentationInfo instrumentationProvider =
-          new AndroidInstrumentationInfo(targetApk, instrumentationApk);
+          new AndroidInstrumentationInfo(targetApkProvider);
 
       builder.addNativeDeclaredProvider(instrumentationProvider);
 
@@ -625,7 +668,7 @@ public abstract class AndroidBinary implements RuleConfiguredTargetFactory {
             new ApkInfo(
                 zipAlignedApk,
                 unsignedApk,
-                getCoverageInstrumentationJarForApk(ruleContext, androidCommon),
+                getCoverageInstrumentationJarForApk(ruleContext),
                 resourceApk.getManifest(),
                 AndroidCommon.getApkDebugSigningKey(ruleContext)))
         .addNativeDeclaredProvider(new AndroidPreDexJarProvider(jarToDex))
@@ -637,20 +680,17 @@ public abstract class AndroidBinary implements RuleConfiguredTargetFactory {
 
   /**
    * For coverage builds, this returns a Jar containing <b>un</b>instrumented bytecode for the
-   * coverage reporter's consumption.  This Jar is often confusingly called <i>instrumented</i>.
-   * This method simply returns the deploy Jar when "new" coverage is used, otherwise the
-   * traditional "instrumented" Jar.  Note the deploy Jar is built anyway for Android binaries.
+   * coverage reporter's consumption. This method simply returns the deploy Jar. Note the deploy Jar
+   * is built anyway for Android binaries.
    *
    * @return A Jar containing uninstrumented bytecode or {@code null} for non-coverage builds
    */
   @Nullable
-  private static Artifact getCoverageInstrumentationJarForApk(
-      RuleContext ruleContext, AndroidCommon androidCommon) throws InterruptedException {
-    if (ruleContext.getConfiguration().isCodeCoverageEnabled()
-        && ruleContext.getConfiguration().isExperimentalJavaCoverage()) {
-      return ruleContext.getImplicitOutputArtifact(AndroidRuleClasses.ANDROID_BINARY_DEPLOY_JAR);
-    }
-    return androidCommon.getInstrumentedJar();
+  private static Artifact getCoverageInstrumentationJarForApk(RuleContext ruleContext)
+      throws InterruptedException {
+    return ruleContext.getConfiguration().isCodeCoverageEnabled()
+        ? ruleContext.getImplicitOutputArtifact(AndroidRuleClasses.ANDROID_BINARY_DEPLOY_JAR)
+        : null;
   }
 
   public static NestedSet<Artifact> getLibraryResourceJars(RuleContext ruleContext) {
@@ -775,16 +815,11 @@ public abstract class AndroidBinary implements RuleConfiguredTargetFactory {
             semantics,
             proguardOutputMap);
     outputs.addAllToSet(failures);
-    JavaOptimizationMode optMode = ProguardHelper.getJavaOptimizationMode(ruleContext);
     ruleContext.registerAction(
         new FailAction(
             ruleContext.getActionOwner(),
             failures.build(),
-            String.format(
-                "Can't run Proguard %s",
-                optMode == JavaOptimizationMode.LEGACY
-                    ? "without proguard_specs"
-                    : "in optimization mode " + optMode)));
+            String.format("Can't run Proguard without proguard_specs")));
     return new ProguardOutput(deployJarArtifact, null, null, null, null, null, null);
   }
 

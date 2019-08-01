@@ -161,19 +161,6 @@ function test_dont_parse_flags_after_dash_dash() {
   expect_log "invalid package name '-//test_dont_parse_flags_after_dash_dash'"
 }
 
-function test_doesnt_work_without_experimental_flag() {
-  local -r pkg=$FUNCNAME
-  mkdir -p $pkg
-
-  write_build_setting_bzl
-
-  bazel build //$pkg:my_drink --//$pkg:type=coffee > output 2>"$TEST_log" \
-    && fail "Expected failure"
-
-  expect_log "Error loading option //$pkg:type:"
-  expect_log "Extension file '$pkg/build_setting.bzl' has errors"
-}
-
 function test_multiple_starlark_flags() {
   local -r pkg=$FUNCNAME
   mkdir -p $pkg
@@ -223,7 +210,196 @@ EOF
   expect_log "type=cowabunga"
 }
 
-# Test that label-typed build setting has access to providers of the target it points to.
+# Regression tests for b/134580627
+# Make sure package incrementality works during options parsing
+function test_incremental_delete_build_setting() {
+  local -r pkg=$FUNCNAME
+  mkdir -p $pkg
+
+  cat > $pkg/rules.bzl <<EOF
+def _impl(ctx):
+  return []
+
+my_flag = rule(
+  implementation = _impl,
+  build_setting = config.string(flag = True)
+)
+simple_rule = rule(implementation = _impl)
+EOF
+
+  cat > $pkg/BUILD <<EOF
+load("//$pkg:rules.bzl", "my_flag", "simple_rule")
+
+my_flag(name = "my_flag", build_setting_default = "default")
+simple_rule(name = "simple_rule")
+EOF
+
+  bazel build //$pkg:simple_rule --//$pkg:my_flag=cowabunga \
+    --experimental_build_setting_api > output 2>"$TEST_log" \
+    || fail "Expected success"
+
+  cat > $pkg/BUILD <<EOF
+load("//$pkg:rules.bzl", "simple_rule")
+
+simple_rule(name = "simple_rule")
+EOF
+
+  bazel build //$pkg:simple_rule --//$pkg:my_flag=cowabunga \
+    --experimental_build_setting_api > output 2>"$TEST_log" \
+    && fail "Expected failure" || true
+
+  expect_log "no such target '//$pkg:my_flag'"
+}
+
+#############################
+
+function test_incremental_delete_build_setting_in_different_package() {
+  local -r pkg=$FUNCNAME
+  mkdir -p $pkg
+
+  cat > $pkg/rules.bzl <<EOF
+def _impl(ctx):
+  return []
+
+my_flag = rule(
+  implementation = _impl,
+  build_setting = config.string(flag = True)
+)
+simple_rule = rule(implementation = _impl)
+EOF
+
+  cat > $pkg/BUILD <<EOF
+load("//$pkg:rules.bzl", "my_flag")
+my_flag(name = "my_flag", build_setting_default = "default")
+EOF
+
+  mkdir -p pkg2
+
+  cat > pkg2/BUILD <<EOF
+load("//$pkg:rules.bzl", "simple_rule")
+simple_rule(name = "simple_rule")
+EOF
+
+  bazel build //pkg2:simple_rule --//$pkg:my_flag=cowabunga \
+    --experimental_build_setting_api > output 2>"$TEST_log" \
+    || fail "Expected success"
+
+  cat > $pkg/BUILD <<EOF
+EOF
+
+  bazel build //pkg2:simple_rule --//$pkg:my_flag=cowabunga \
+    --experimental_build_setting_api > output 2>"$TEST_log" \
+    && fail "Expected failure" || true
+
+  expect_log "no such target '//$pkg:my_flag'"
+}
+
+#############################
+
+
+function test_incremental_add_build_setting() {
+  local -r pkg=$FUNCNAME
+  mkdir -p $pkg
+
+  cat > $pkg/rules.bzl <<EOF
+def _impl(ctx):
+  return []
+
+my_flag = rule(
+  implementation = _impl,
+  build_setting = config.string(flag = True)
+)
+simple_rule = rule(implementation = _impl)
+EOF
+
+  cat > $pkg/BUILD <<EOF
+load("//$pkg:rules.bzl", "simple_rule")
+
+simple_rule(name = "simple_rule")
+EOF
+
+  bazel build //$pkg:simple_rule --experimental_build_setting_api \
+    > output 2>"$TEST_log" || fail "Expected success"
+
+  cat > $pkg/BUILD <<EOF
+load("//$pkg:rules.bzl", "my_flag", "simple_rule")
+
+my_flag(name = "my_flag", build_setting_default = "default")
+simple_rule(name = "simple_rule")
+EOF
+
+  bazel build //$pkg:simple_rule --//$pkg:my_flag=cowabunga \
+    --experimental_build_setting_api > output 2>"$TEST_log" \
+    || fail "Expected success"
+}
+
+function test_incremental_change_build_setting() {
+  local -r pkg=$FUNCNAME
+  mkdir -p $pkg
+
+  cat > $pkg/rules.bzl <<EOF
+MyProvider = provider(fields = ["value"])
+
+def _flag_impl(ctx):
+  return MyProvider(value = ctx.build_setting_value)
+
+my_flag = rule(
+  implementation = _flag_impl,
+  build_setting = config.string(flag = True)
+)
+
+def _rule_impl(ctx):
+  print("flag = " + ctx.attr.flag[MyProvider].value)
+
+simple_rule = rule(
+  implementation = _rule_impl,
+  attrs = {"flag" : attr.label()}
+)
+EOF
+
+  cat > $pkg/BUILD <<EOF
+load("//$pkg:rules.bzl", "my_flag", "simple_rule")
+
+my_flag(name = "my_flag", build_setting_default = "default")
+simple_rule(name = "simple_rule", flag = ":my_flag")
+EOF
+
+  bazel build //$pkg:simple_rule --//$pkg:my_flag=yabadabadoo \
+    --experimental_build_setting_api > output 2>"$TEST_log" \
+    || fail "Expected success"
+
+  expect_log "flag = yabadabadoo"
+
+# update the flag to return a different value
+  cat > $pkg/rules.bzl <<EOF
+MyProvider = provider(fields = ["value"])
+
+def _flag_impl(ctx):
+  return MyProvider(value = "scoobydoobydoo")
+
+my_flag = rule(
+  implementation = _flag_impl,
+  build_setting = config.string(flag = True)
+)
+
+def _rule_impl(ctx):
+  print("flag = " + ctx.attr.flag[MyProvider].value)
+
+simple_rule = rule(
+  implementation = _rule_impl,
+  attrs = {"flag" : attr.label()}
+)
+EOF
+
+  bazel build //$pkg:simple_rule --//$pkg:my_flag=yabadabadoo \
+    --experimental_build_setting_api > output 2>"$TEST_log" \
+    || fail "Expected success"
+
+  expect_log "flag = scoobydoobydoo"
+}
+
+# Test that label-typed build setting has access to providers of the
+# target it points to.
 function test_label_flag() {
   local -r pkg=$FUNCNAME
   mkdir -p $pkg
@@ -276,6 +452,74 @@ EOF
     2>"$TEST_log" || fail "Expected success"
 
   expect_log "value=command_line_val"
+}
+
+function test_output_same_config_as_generating_target() {
+  local -r pkg=$FUNCNAME
+  mkdir -p $pkg
+
+  rm -rf tools/whitelists/function_transition_whitelist
+  mkdir -p tools/whitelists/function_transition_whitelist
+  cat > tools/whitelists/function_transition_whitelist/BUILD <<EOF
+package_group(
+    name = "function_transition_whitelist",
+    packages = [
+        "//...",
+    ],
+)
+EOF
+
+  cat > $pkg/rules.bzl <<EOF
+def _rule_class_transition_impl(settings, attr):
+    return {
+        "//command_line_option:test_arg": ["blah"]
+    }
+
+_rule_class_transition = transition(
+    implementation = _rule_class_transition_impl,
+    inputs = [],
+    outputs = [
+        "//command_line_option:test_arg",
+    ],
+)
+
+def _rule_class_transition_rule_impl(ctx):
+    ctx.actions.write(ctx.outputs.artifact, "hello\n")
+    return [DefaultInfo(files = depset([ctx.outputs.artifact]))]
+
+rule_class_transition_rule = rule(
+    _rule_class_transition_rule_impl,
+    cfg = _rule_class_transition,
+    attrs = {
+        "_whitelist_function_transition": attr.label(default = "//tools/whitelists/function_transition_whitelist"),
+    },
+    outputs = {"artifact": "%{name}.output"},
+)
+EOF
+
+  cat > $pkg/BUILD <<EOF
+load("//$pkg:rules.bzl", "rule_class_transition_rule")
+
+rule_class_transition_rule(name = "with_rule_class_transition")
+EOF
+
+  bazel build //$pkg:with_rule_class_transition.output > output 2>"$TEST_log" || fail "Expected success"
+
+  bazel cquery "deps(//$pkg:with_rule_class_transition.output, 1)" > output 2>"$TEST_log" || fail "Expected success"
+
+  assert_contains "//$pkg:with_rule_class_transition.output " output
+  assert_contains "//$pkg:with_rule_class_transition " output
+
+  # Find the lines of output for the output target and the generating target
+  OUTPUT=$(grep "//$pkg:with_rule_class_transition.output " output)
+  TARGET=$(grep "//$pkg:with_rule_class_transition " output)
+
+  # Trim to just configuration
+  OUTPUT_CONFIG=${OUTPUT/"//$pkg:with_rule_class_transition.output "}
+  TARGET_CONFIG=${TARGET/"//$pkg:with_rule_class_transition "}
+
+  # Confirm same configuration
+  assert_equals $OUTPUT_CONFIG $TARGET_CONFIG
 }
 
 run_suite "${PRODUCT_NAME} starlark configurations tests"

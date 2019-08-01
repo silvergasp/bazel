@@ -81,6 +81,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -357,10 +358,15 @@ public class PackageFunction implements SkyFunction {
     if (!packageLookupValue.packageExists()) {
       switch (packageLookupValue.getErrorReason()) {
         case NO_BUILD_FILE:
+          throw new PackageFunctionException(
+              new BuildFileNotFoundException(
+                  packageId, PackageLookupFunction.explainNoBuildFileValue(packageId, env)),
+              Transience.PERSISTENT);
         case DELETED_PACKAGE:
         case REPOSITORY_NOT_FOUND:
-          throw new PackageFunctionException(new BuildFileNotFoundException(packageId,
-              packageLookupValue.getErrorMsg()), Transience.PERSISTENT);
+          throw new PackageFunctionException(
+              new BuildFileNotFoundException(packageId, packageLookupValue.getErrorMsg()),
+              Transience.PERSISTENT);
         case INVALID_PACKAGE_NAME:
           throw new PackageFunctionException(new InvalidPackageNameException(packageId,
               packageLookupValue.getErrorMsg()), Transience.PERSISTENT);
@@ -390,9 +396,8 @@ public class PackageFunction implements SkyFunction {
         repositoryMappingValue.getRepositoryMapping();
 
     RootedPath buildFileRootedPath = packageLookupValue.getRootedPath(packageId);
-    FileValue buildFileValue = null;
 
-    buildFileValue = getBuildFileValue(env, buildFileRootedPath);
+    FileValue buildFileValue = getBuildFileValue(env, buildFileRootedPath);
     if (buildFileValue == null) {
       return null;
     }
@@ -432,20 +437,24 @@ public class PackageFunction implements SkyFunction {
     List<Statement> preludeStatements =
         astLookupValue.lookupSuccessful()
             ? astLookupValue.getAST().getStatements() : ImmutableList.<Statement>of();
-    LoadedPackageCacheEntry packageCacheEntry =
-        loadPackage(
-            workspaceName,
-            repositoryMapping,
-            packageId,
-            buildFileRootedPath,
-            buildFileValue,
-            defaultVisibility,
-            starlarkSemantics,
-            preludeStatements,
-            packageLookupValue.getRoot(),
-            env);
+    LoadedPackageCacheEntry packageCacheEntry = packageFunctionCache.getIfPresent(packageId);
     if (packageCacheEntry == null) {
-      return null;
+      packageCacheEntry =
+          loadPackage(
+              workspaceName,
+              repositoryMapping,
+              packageId,
+              buildFileRootedPath,
+              buildFileValue,
+              defaultVisibility,
+              starlarkSemantics,
+              preludeStatements,
+              packageLookupValue.getRoot(),
+              env);
+      if (packageCacheEntry == null) {
+        return null;
+      }
+      packageFunctionCache.put(packageId, packageCacheEntry);
     }
     Package.Builder pkgBuilder = packageCacheEntry.builder;
     try {
@@ -711,10 +720,11 @@ public class PackageFunction implements SkyFunction {
                 containingPkgLookupKeys,
                 BuildFileNotFoundException.class,
                 InconsistentFilesystemException.class);
-    if (env.valuesMissing()) {
+    if (env.valuesMissing() || containingPkgLookupKeys.isEmpty()) {
       return;
     }
-    for (Target target : ImmutableSet.copyOf(pkgBuilder.getTargets())) {
+    for (Iterator<Target> iterator = pkgBuilder.getTargets().iterator(); iterator.hasNext(); ) {
+      Target target = iterator.next();
       SkyKey key = targetToKey.get(target);
       if (!containingPkgLookupValues.containsKey(key)) {
         continue;
@@ -728,7 +738,7 @@ public class PackageFunction implements SkyFunction {
           target.getLabel(),
           target.getLocation(),
           containingPackageLookupValue)) {
-        pkgBuilder.removeTarget(target);
+        iterator.remove();
         pkgBuilder.setContainsErrors();
       }
     }
@@ -803,13 +813,15 @@ public class PackageFunction implements SkyFunction {
     }
 
     @Override
-    public Token runAsync(List<String> includes, List<String> excludes, boolean excludeDirs)
+    public Token runAsync(
+        List<String> includes, List<String> excludes, boolean excludeDirs, boolean allowEmpty)
         throws BadGlobException, InterruptedException {
-      return delegate.runAsync(includes, excludes, excludeDirs);
+      return delegate.runAsync(includes, excludes, excludeDirs, allowEmpty);
     }
 
     @Override
-    public List<String> fetch(Token token) throws IOException, InterruptedException {
+    public List<String> fetch(Token token)
+        throws BadGlobException, IOException, InterruptedException {
       return delegate.fetch(token);
     }
 
@@ -877,7 +889,8 @@ public class PackageFunction implements SkyFunction {
     }
 
     @Override
-    public Token runAsync(List<String> includes, List<String> excludes, boolean excludeDirs)
+    public Token runAsync(
+        List<String> includes, List<String> excludes, boolean excludeDirs, boolean allowEmpty)
         throws BadGlobException, InterruptedException {
       LinkedHashSet<SkyKey> globKeys = Sets.newLinkedHashSetWithExpectedSize(includes.size());
       Map<SkyKey, String> globKeyToPatternMap = Maps.newHashMapWithExpectedSize(includes.size());
@@ -904,9 +917,11 @@ public class PackageFunction implements SkyFunction {
         }
       }
       Token legacyIncludesToken =
-          legacyGlobber.runAsync(globsToDelegate, ImmutableList.of(), excludeDirs);
-
-      return new HybridToken(globValueMap, globKeys, legacyIncludesToken, excludes);
+          globsToDelegate.isEmpty()
+              ? null
+              : legacyGlobber.runAsync(
+                  globsToDelegate, ImmutableList.of(), excludeDirs, allowEmpty);
+      return new HybridToken(globValueMap, globKeys, legacyIncludesToken, excludes, allowEmpty);
     }
 
     private Collection<SkyKey> getMissingKeys(Collection<SkyKey> globKeys,
@@ -930,7 +945,8 @@ public class PackageFunction implements SkyFunction {
     }
 
     @Override
-    public List<String> fetch(Token token) throws IOException, InterruptedException {
+    public List<String> fetch(Token token)
+        throws BadGlobException, IOException, InterruptedException {
       HybridToken hybridToken = (HybridToken) token;
       return hybridToken.resolve(legacyGlobber);
     }
@@ -959,35 +975,55 @@ public class PackageFunction implements SkyFunction {
       // (this is includes_sky above).
       private final Iterable<SkyKey> includesGlobKeys;
       // A token for computing legacy globs.
-      private final Token legacyIncludesToken;
+      @Nullable private final Token legacyIncludesToken;
 
       private final List<String> excludes;
+
+      private final boolean allowEmpty;
 
       private HybridToken(
           Map<SkyKey, ValueOrException2<IOException, BuildFileNotFoundException>> globValueMap,
           Iterable<SkyKey> includesGlobKeys,
-          Token delegateIncludesToken,
-          List<String> excludes) {
+          @Nullable Token delegateIncludesToken,
+          List<String> excludes,
+          boolean allowEmpty) {
         this.globValueMap = globValueMap;
         this.includesGlobKeys = includesGlobKeys;
         this.legacyIncludesToken = delegateIncludesToken;
         this.excludes = excludes;
+        this.allowEmpty = allowEmpty;
       }
 
-      private List<String> resolve(Globber delegate) throws IOException, InterruptedException {
+      private List<String> resolve(Globber delegate)
+          throws BadGlobException, IOException, InterruptedException {
         HashSet<String> matches = new HashSet<>();
         for (SkyKey includeGlobKey : includesGlobKeys) {
           // TODO(bazel-team): NestedSet expansion here is suboptimal.
+          boolean foundMatch = false;
           for (PathFragment match : getGlobMatches(includeGlobKey, globValueMap)) {
             matches.add(match.getPathString());
+            foundMatch = true;
+          }
+          if (!allowEmpty && !foundMatch) {
+            throw new BadGlobException(
+                "glob pattern '"
+                    + ((GlobDescriptor) includeGlobKey.argument()).getPattern()
+                    + "' didn't match anything, but allow_empty is set to False.");
           }
         }
-        matches.addAll(delegate.fetch(legacyIncludesToken));
+        if (legacyIncludesToken != null) {
+          matches.addAll(delegate.fetch(legacyIncludesToken));
+        }
         UnixGlob.removeExcludes(matches, excludes);
         List<String> result = new ArrayList<>(matches);
         // Skyframe glob results are unsorted. And we used a LegacyGlobber that doesn't sort.
         // Therefore, we want to unconditionally sort here.
         Collections.sort(result);
+
+        if (!allowEmpty && result.isEmpty()) {
+          throw new BadGlobException(
+              "all files in the glob have been excluded, but allow_empty is set to False.");
+        }
         return result;
       }
 
@@ -1062,99 +1098,99 @@ public class PackageFunction implements SkyFunction {
       Root packageRoot,
       Environment env)
       throws InterruptedException, PackageFunctionException {
-    LoadedPackageCacheEntry packageCacheEntry = packageFunctionCache.getIfPresent(packageId);
-    if (packageCacheEntry == null) {
-      if (packageProgress != null) {
-        packageProgress.startReadPackage(packageId);
-      }
-      try (SilentCloseable c =
-          Profiler.instance().profile(ProfilerTask.CREATE_PACKAGE, packageId.toString())) {
-        AstParseResult astParseResult = astCache.getIfPresent(packageId);
-        Path inputFile = buildFilePath.asPath();
-        if (astParseResult == null) {
-          if (showLoadingProgress.get()) {
-            env.getListener().handle(Event.progress("Loading package: " + packageId));
-          }
-          ParserInputSource input;
-          Preconditions.checkNotNull(buildFileValue, packageId);
-          byte[] buildFileBytes = null;
-          try {
-            buildFileBytes =
-                buildFileValue.isSpecialFile()
-                    ? FileSystemUtils.readContent(inputFile)
-                    : FileSystemUtils.readWithKnownFileSize(inputFile, buildFileValue.getSize());
-          } catch (IOException e) {
-            buildFileBytes =
-                actionOnIOExceptionReadingBuildFile.maybeGetBuildFileContentsToUse(
-                    inputFile.asFragment(), e);
-            if (buildFileBytes == null) {
-              // Note that we did the work that led to this IOException, so we should
-              // conservatively report this error as transient.
-              throw new PackageFunctionException(
-                  new BuildFileContainsErrorsException(packageId, e.getMessage(), e),
-                  Transience.TRANSIENT);
-            }
-            // If control flow reaches here, we're in territory that is deliberately unsound.
-            // See the javadoc for ActionOnIOExceptionReadingBuildFile.
-          }
-          input =
-              ParserInputSource.create(
-                  FileSystemUtils.convertFromLatin1(buildFileBytes), inputFile.asFragment());
-          StoredEventHandler astParsingEventHandler = new StoredEventHandler();
-          BuildFileAST ast =
-              PackageFactory.parseBuildFile(
-                  packageId, input, preludeStatements, repositoryMapping, astParsingEventHandler);
-          astParseResult = new AstParseResult(ast, astParsingEventHandler);
-          astCache.put(packageId, astParseResult);
-        }
-        SkylarkImportResult importResult;
-        try {
-          importResult =
-              fetchImportsFromBuildFile(
-                  buildFilePath,
-                  packageId,
-                  astParseResult.ast,
-                  /* workspaceChunk = */ -1,
-                  env,
-                  skylarkImportLookupFunctionForInlining);
-        } catch (NoSuchPackageException e) {
-          throw new PackageFunctionException(e, Transience.PERSISTENT);
-        } catch (InterruptedException e) {
-          astCache.invalidate(packageId);
-          throw e;
-        }
-        if (importResult == null) {
-          return null;
-        }
-        astCache.invalidate(packageId);
-        GlobberWithSkyframeGlobDeps globberWithSkyframeGlobDeps =
-            makeGlobber(inputFile, packageId, packageRoot, env);
-        long startTimeNanos = BlazeClock.nanoTime();
-        Package.Builder pkgBuilder =
-            packageFactory.createPackageFromAst(
-                workspaceName,
-                repositoryMapping,
-                packageId,
-                buildFilePath,
-                astParseResult,
-                importResult.importMap,
-                importResult.fileDependencies,
-                defaultVisibility,
-                starlarkSemantics,
-                globberWithSkyframeGlobDeps);
-        long loadTimeNanos = Math.max(BlazeClock.nanoTime() - startTimeNanos, 0L);
-        packageCacheEntry = new LoadedPackageCacheEntry(
-            pkgBuilder,
-            globberWithSkyframeGlobDeps.getGlobDepsRequested(),
-            loadTimeNanos);
-        numPackagesLoaded.incrementAndGet();
-        if (packageProgress != null) {
-          packageProgress.doneReadPackage(packageId);
-        }
-        packageFunctionCache.put(packageId, packageCacheEntry);
-      }
+    if (packageProgress != null) {
+      packageProgress.startReadPackage(packageId);
     }
-    return packageCacheEntry;
+    try (SilentCloseable c =
+        Profiler.instance().profile(ProfilerTask.CREATE_PACKAGE, packageId.toString())) {
+      AstParseResult astParseResult = astCache.getIfPresent(packageId);
+      Path inputFile = buildFilePath.asPath();
+      if (astParseResult == null) {
+        if (showLoadingProgress.get()) {
+          env.getListener().handle(Event.progress("Loading package: " + packageId));
+        }
+        ParserInputSource input;
+        Preconditions.checkNotNull(buildFileValue, packageId);
+        byte[] buildFileBytes = null;
+        try {
+          buildFileBytes =
+              buildFileValue.isSpecialFile()
+                  ? FileSystemUtils.readContent(inputFile)
+                  : FileSystemUtils.readWithKnownFileSize(inputFile, buildFileValue.getSize());
+        } catch (IOException e) {
+          buildFileBytes =
+              actionOnIOExceptionReadingBuildFile.maybeGetBuildFileContentsToUse(
+                  inputFile.asFragment(), e);
+          if (buildFileBytes == null) {
+            // Note that we did the work that led to this IOException, so we should
+            // conservatively report this error as transient.
+            throw new PackageFunctionException(
+                new BuildFileContainsErrorsException(packageId, e.getMessage(), e),
+                Transience.TRANSIENT);
+          }
+          // If control flow reaches here, we're in territory that is deliberately unsound.
+          // See the javadoc for ActionOnIOExceptionReadingBuildFile.
+        }
+        input =
+            ParserInputSource.create(
+                FileSystemUtils.convertFromLatin1(buildFileBytes), inputFile.asFragment());
+        StoredEventHandler astParsingEventHandler = new StoredEventHandler();
+        BuildFileAST ast =
+            PackageFactory.parseBuildFile(
+                packageId, input, preludeStatements, repositoryMapping, astParsingEventHandler);
+        astParseResult = new AstParseResult(ast, astParsingEventHandler);
+        astCache.put(packageId, astParseResult);
+      }
+      SkylarkImportResult importResult;
+      try {
+        importResult =
+            fetchImportsFromBuildFile(
+                buildFilePath,
+                packageId,
+                astParseResult.ast,
+                /* workspaceChunk = */ -1,
+                env,
+                skylarkImportLookupFunctionForInlining);
+      } catch (NoSuchPackageException e) {
+        throw new PackageFunctionException(e, Transience.PERSISTENT);
+      } catch (InterruptedException e) {
+        astCache.invalidate(packageId);
+        throw e;
+      }
+      if (importResult == null) {
+        return null;
+      }
+      astCache.invalidate(packageId);
+      GlobberWithSkyframeGlobDeps globberWithSkyframeGlobDeps =
+          makeGlobber(inputFile, packageId, packageRoot, env);
+      long startTimeNanos = BlazeClock.nanoTime();
+      Package.Builder pkgBuilder =
+          packageFactory.createPackageFromAst(
+              workspaceName,
+              repositoryMapping,
+              packageId,
+              buildFilePath,
+              astParseResult,
+              importResult.importMap,
+              importResult.fileDependencies,
+              defaultVisibility,
+              starlarkSemantics,
+              globberWithSkyframeGlobDeps);
+      long loadTimeNanos = Math.max(BlazeClock.nanoTime() - startTimeNanos, 0L);
+      LoadedPackageCacheEntry packageCacheEntry =
+          new LoadedPackageCacheEntry(
+              pkgBuilder, globberWithSkyframeGlobDeps.getGlobDepsRequested(), loadTimeNanos);
+      numPackagesLoaded.incrementAndGet();
+      if (packageProgress != null) {
+        packageProgress.doneReadPackage(packageId);
+      }
+      return packageCacheEntry;
+    } catch (InterruptedException | PackageFunctionException e) {
+      if (packageProgress != null) {
+        packageProgress.doneReadPackage(packageId);
+      }
+      throw e;
+    }
   }
 
   private static class InternalInconsistentFilesystemException extends Exception {

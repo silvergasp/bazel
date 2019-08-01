@@ -14,6 +14,7 @@
 package com.google.devtools.build.skyframe;
 
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadSafe;
+import com.google.devtools.build.lib.util.Pair;
 import java.util.Collection;
 import java.util.Map;
 import java.util.Set;
@@ -81,10 +82,23 @@ public interface WalkableGraph {
   Map<SkyKey, Iterable<SkyKey>> getDirectDeps(Iterable<SkyKey> keys) throws InterruptedException;
 
   /**
+   * Returns the direct dependencies of the node with the given key. A node for that key must exist
+   * in the graph and be done.
+   */
+  Iterable<SkyKey> getDirectDeps(SkyKey key) throws InterruptedException;
+
+  /**
    * Returns a map giving the reverse dependencies of the nodes with the given keys. A node for each
    * given key must be done in the graph if it exists.
    */
   Map<SkyKey, Iterable<SkyKey>> getReverseDeps(Iterable<SkyKey> keys) throws InterruptedException;
+
+  /**
+   * Returns a map giving the reverse dependencies of the nodes with the given keys as well as the
+   * value
+   */
+  Map<SkyKey, Pair<SkyValue, Iterable<SkyKey>>> getValueAndRdeps(Iterable<SkyKey> keys)
+      throws InterruptedException;
 
   /** Provides a WalkableGraph on demand after preparing it. */
   interface WalkableGraphFactory {

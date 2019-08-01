@@ -26,6 +26,7 @@ import com.google.devtools.build.lib.packages.Attribute.ComputationLimiter;
 import com.google.devtools.build.lib.packages.BuildType.Selector;
 import com.google.devtools.build.lib.packages.BuildType.SelectorList;
 import com.google.devtools.build.lib.syntax.Type;
+import com.google.devtools.build.lib.syntax.Type.LabelClass;
 import com.google.devtools.build.lib.syntax.Type.ListType;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -80,6 +81,9 @@ public class AggregatingAttributeMapper extends AbstractAttributeMapper {
     Type<?> type = attribute.getType();
     SelectorList<?> selectorList = getSelectorList(attribute.getName(), type);
     if (selectorList == null) {
+      if (type.getLabelClass().equals(LabelClass.NONE)) {
+        return; // Skip non-label attributes for performance.
+      }
       if (getComputedDefault(attribute.getName(), attribute.getType()) != null) {
         // Computed defaults are a special pain: we have no choice but to iterate through their
         // (computed) values and look for labels.
@@ -123,13 +127,26 @@ public class AggregatingAttributeMapper extends AbstractAttributeMapper {
     return builder.build();
   }
 
+  private static ImmutableSet.Builder<Label> addDuplicateLabels(
+      ImmutableSet.Builder<Label> builder, List<Label> labels) {
+    Set<Label> duplicates = CollectionUtils.duplicatedElementsOf(labels);
+    if (duplicates.isEmpty()) {
+      return builder;
+    }
+    if (builder == null) {
+      builder = ImmutableSet.builderWithExpectedSize(duplicates.size());
+    }
+    builder.addAll(duplicates);
+    return builder;
+  }
+
   /**
    * Returns the labels that might appear multiple times in the same attribute value.
    */
   public Set<Label> checkForDuplicateLabels(Attribute attribute) {
     String attrName = attribute.getName();
     Type<?> attrType = attribute.getType();
-    ImmutableSet.Builder<Label> duplicates = ImmutableSet.builder();
+    ImmutableSet.Builder<Label> duplicates = null;
 
     SelectorList<?> selectorList = getSelectorList(attribute.getName(), attrType);
     if (selectorList == null || selectorList.getSelectors().size() == 1) {
@@ -143,7 +160,7 @@ public class AggregatingAttributeMapper extends AbstractAttributeMapper {
         if (value != null) {
           // TODO(bazel-team): Calculate duplicates directly using attrType.visitLabels in order to
           // avoid intermediate collections here.
-          duplicates.addAll(CollectionUtils.duplicatedElementsOf(extractLabels(attrType, value)));
+          duplicates = addDuplicateLabels(duplicates, extractLabels(attrType, value));
         }
       }
     } else {
@@ -160,15 +177,15 @@ public class AggregatingAttributeMapper extends AbstractAttributeMapper {
         for (Object selectorValue : selector.getEntries().values()) {
           List<Label> labelsInSelectorValue = extractLabels(attrType, selectorValue);
           // Duplicates within a single path are not okay.
-          duplicates.addAll(CollectionUtils.duplicatedElementsOf(labelsInSelectorValue));
+          duplicates = addDuplicateLabels(duplicates, labelsInSelectorValue);
           Iterables.addAll(selectorLabels, labelsInSelectorValue);
         }
         combinedLabels.addAll(selectorLabels);
       }
-      duplicates.addAll(CollectionUtils.duplicatedElementsOf(combinedLabels));
+      duplicates = addDuplicateLabels(duplicates, combinedLabels);
     }
 
-    return duplicates.build();
+    return duplicates == null ? ImmutableSet.of() : duplicates.build();
   }
 
   /**

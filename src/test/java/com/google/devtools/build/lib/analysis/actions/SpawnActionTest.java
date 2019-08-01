@@ -15,9 +15,9 @@ package com.google.devtools.build.lib.analysis.actions;
 
 import static com.google.common.collect.Iterables.getOnlyElement;
 import static com.google.common.truth.Truth.assertThat;
+import static com.google.devtools.build.lib.testutil.MoreAsserts.assertThrows;
 import static java.nio.charset.StandardCharsets.ISO_8859_1;
 import static java.util.Arrays.asList;
-import static org.junit.Assert.fail;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
@@ -112,6 +112,14 @@ public class SpawnActionTest extends BuildViewTestCase {
         createCopyFromWelcomeToDestination(ImmutableMap.<String, String>of());
     Collection<Artifact> outputs = copyFromWelcomeToDestination.getOutputs();
     assertThat(outputs).containsExactly(destinationArtifact);
+  }
+
+  @Test
+  public void testExecutionInfoCopied() {
+    SpawnAction copyFromWelcomeToDestination =
+        createCopyFromWelcomeToDestination(ImmutableMap.of());
+    Map<String, String> executionInfo = copyFromWelcomeToDestination.getExecutionInfo();
+    assertThat(executionInfo).containsExactly("local", "");
   }
 
   @Test
@@ -288,7 +296,7 @@ public class SpawnActionTest extends BuildViewTestCase {
     assertThat(info.getMnemonic()).isEqualTo("Dummy");
 
     SpawnInfo spawnInfo = info.getExtension(SpawnInfo.spawnInfo);
-    assertThat(spawnInfo).isNotNull();
+    assertThat(info.hasExtension(SpawnInfo.spawnInfo)).isTrue();
 
     assertThat(spawnInfo.getArgumentList())
         .containsExactlyElementsIn(action.getArguments());
@@ -415,18 +423,9 @@ public class SpawnActionTest extends BuildViewTestCase {
   @Test
   public void testMnemonicMustNotContainSpaces() {
     SpawnAction.Builder builder = builder();
-    try {
-      builder.setMnemonic("contains space");
-      fail("Expected exception");
-    } catch (IllegalArgumentException expected) {}
-    try {
-      builder.setMnemonic("contains\nnewline");
-      fail("Expected exception");
-    } catch (IllegalArgumentException expected) {}
-    try {
-      builder.setMnemonic("contains/slash");
-      fail("Expected exception");
-    } catch (IllegalArgumentException expected) {}
+    assertThrows(IllegalArgumentException.class, () -> builder.setMnemonic("contains space"));
+    assertThrows(IllegalArgumentException.class, () -> builder.setMnemonic("contains\nnewline"));
+    assertThrows(IllegalArgumentException.class, () -> builder.setMnemonic("contains/slash"));
   }
 
   /**
@@ -442,12 +441,14 @@ public class SpawnActionTest extends BuildViewTestCase {
         "testrule(name='b')");
     scratch.file(
         "a/def.bzl",
+        "MyInfo = provider()",
         "def _aspect_impl(target, ctx):",
         "  f = ctx.actions.declare_file('foo.txt')",
         "  ctx.actions.run_shell(outputs = [f], command = 'echo foo > \"$1\"')",
-        "  return struct(output=f)",
+        "  return MyInfo(output=f)",
         "def _rule_impl(ctx):",
-        "  return struct(files=depset([artifact.output for artifact in ctx.attr.deps]))",
+        "  return DefaultInfo(",
+        "      files=depset([artifact[MyInfo].output for artifact in ctx.attr.deps]))",
         "aspect1 = aspect(_aspect_impl, attr_aspects=['deps'], ",
         "    attrs = {'parameter': attr.string(values = ['param_value'])})",
         "testrule = rule(_rule_impl, attrs = { ",

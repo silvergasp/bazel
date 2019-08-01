@@ -41,7 +41,6 @@ import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.collect.nestedset.Order;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
-import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadSafe;
 import com.google.devtools.build.lib.packages.BuildType;
 import com.google.devtools.build.lib.packages.RuleClass.ConfiguredTargetFactory.RuleErrorException;
 import com.google.devtools.build.lib.packages.RuleErrorConsumer;
@@ -87,21 +86,25 @@ public final class CcCompilationHelper {
    * Configures a compile action builder by setting up command line options and auxiliary inputs
    * according to the FDO configuration. This method does nothing If FDO is disabled.
    */
-  @ThreadSafe
-  public static void configureFdoBuildVariables(
-      ImmutableMap.Builder<String, String> variablesBuilder,
-      CppCompileActionBuilder builder,
+  private static void configureFdoBuildVariables(
+      Map<String, String> variablesBuilder,
       FeatureConfiguration featureConfiguration,
       FdoContext fdoContext,
-      String fdoInstrument) {
+      String fdoInstrument,
+      String csFdoInstrument,
+      CppConfiguration cppConfiguration) {
     if (featureConfiguration.isEnabled(CppRuleClasses.FDO_INSTRUMENT)) {
       variablesBuilder.put(
           CompileBuildVariables.FDO_INSTRUMENT_PATH.getVariableName(), fdoInstrument);
     }
+    if (featureConfiguration.isEnabled(CppRuleClasses.CS_FDO_INSTRUMENT)) {
+      variablesBuilder.put(
+          CompileBuildVariables.CS_FDO_INSTRUMENT_PATH.getVariableName(), csFdoInstrument);
+    }
 
     // FDO is disabled -> do nothing.
     Preconditions.checkNotNull(fdoContext);
-    if (!fdoContext.hasArtifacts()) {
+    if (!fdoContext.hasArtifacts(cppConfiguration)) {
       return;
     }
 
@@ -111,13 +114,10 @@ public final class CcCompilationHelper {
           fdoContext.getPrefetchHintsArtifact().getExecPathString());
     }
 
-    Iterable<Artifact> auxiliaryInputs = getAuxiliaryFdoInputs(fdoContext);
-    builder.addMandatoryInputs(auxiliaryInputs);
-
     FdoContext.BranchFdoProfile branchFdoProfile = fdoContext.getBranchFdoProfile();
     // Optimization phase
     if (branchFdoProfile != null) {
-      if (!Iterables.isEmpty(auxiliaryInputs)) {
+      if (!Iterables.isEmpty(getAuxiliaryFdoInputs(fdoContext))) {
         if (featureConfiguration.isEnabled(CppRuleClasses.AUTOFDO)
             || featureConfiguration.isEnabled(CppRuleClasses.XBINARYFDO)) {
           variablesBuilder.put(
@@ -125,7 +125,7 @@ public final class CcCompilationHelper {
               branchFdoProfile.getProfileArtifact().getExecPathString());
         }
         if (featureConfiguration.isEnabled(CppRuleClasses.FDO_OPTIMIZE)) {
-          if (branchFdoProfile.isLlvmFdo()) {
+          if (branchFdoProfile.isLlvmFdo() || branchFdoProfile.isLlvmCSFdo()) {
             variablesBuilder.put(
                 CompileBuildVariables.FDO_PROFILE_PATH.getVariableName(),
                 branchFdoProfile.getProfileArtifact().getExecPathString());
@@ -242,12 +242,15 @@ public final class CcCompilationHelper {
   private final List<PathFragment> systemIncludeDirs = new ArrayList<>();
   private final List<PathFragment> quoteIncludeDirs = new ArrayList<>();
   private final List<PathFragment> includeDirs = new ArrayList<>();
+  private final List<PathFragment> frameworkIncludeDirs = new ArrayList<>();
 
   private HeadersCheckingMode headersCheckingMode = HeadersCheckingMode.LOOSE;
   private boolean fake;
 
   private final SourceCategory sourceCategory;
   private final List<VariablesExtension> variablesExtensions = new ArrayList<>();
+  private CcToolchainVariables prebuiltParent;
+  private CcToolchainVariables prebuiltParentWithFdo;
   @Nullable private CppModuleMap cppModuleMap;
   private boolean propagateModuleMapToCompileAction = true;
 
@@ -262,7 +265,6 @@ public final class CcCompilationHelper {
   private String stripIncludePrefix = null;
   private String includePrefix = null;
 
-  // TODO(plf): Pull out of class.
   private CcCompilationContext ccCompilationContext;
 
   private final RuleErrorConsumer ruleErrorConsumer;
@@ -292,11 +294,11 @@ public final class CcCompilationHelper {
     this.configuration = buildConfiguration;
     this.cppConfiguration = configuration.getFragment(CppConfiguration.class);
     setGenerateNoPicAction(
-        !ccToolchain.usePicForDynamicLibraries(featureConfiguration)
-            || !CppHelper.usePicForBinaries(ccToolchain, featureConfiguration));
+        !ccToolchain.usePicForDynamicLibraries(cppConfiguration, featureConfiguration)
+            || !CppHelper.usePicForBinaries(ccToolchain, cppConfiguration, featureConfiguration));
     setGeneratePicAction(
-        ccToolchain.usePicForDynamicLibraries(featureConfiguration)
-            || CppHelper.usePicForBinaries(ccToolchain, featureConfiguration));
+        ccToolchain.usePicForDynamicLibraries(cppConfiguration, featureConfiguration)
+            || CppHelper.usePicForBinaries(ccToolchain, cppConfiguration, featureConfiguration));
     this.ruleErrorConsumer = actionConstructionContext.getRuleErrorConsumer();
     this.actionRegistry = Preconditions.checkNotNull(actionRegistry);
     this.label = Preconditions.checkNotNull(label);
@@ -414,7 +416,8 @@ public final class CcCompilationHelper {
         CppFileTypes.CPP_TEXTUAL_INCLUDE.matches(privateHeader.getExecPath());
     Preconditions.checkState(isHeader || isTextualInclude);
 
-    if (ccToolchain.shouldProcessHeaders(featureConfiguration) && !isTextualInclude) {
+    if (ccToolchain.shouldProcessHeaders(featureConfiguration, cppConfiguration)
+        && !isTextualInclude) {
       compilationUnitSources.put(
           privateHeader, CppSource.create(privateHeader, label, CppSource.Type.HEADER));
     }
@@ -470,7 +473,9 @@ public final class CcCompilationHelper {
         CppFileTypes.CPP_HEADER.matches(header.getExecPath()) || header.isTreeArtifact();
     boolean isTextualInclude = CppFileTypes.CPP_TEXTUAL_INCLUDE.matches(header.getExecPath());
     publicHeaders.add(header);
-    if (isTextualInclude || !isHeader || !ccToolchain.shouldProcessHeaders(featureConfiguration)) {
+    if (isTextualInclude
+        || !isHeader
+        || !ccToolchain.shouldProcessHeaders(featureConfiguration, cppConfiguration)) {
       return;
     }
 
@@ -575,6 +580,15 @@ public final class CcCompilationHelper {
    */
   public CcCompilationHelper addIncludeDirs(Iterable<PathFragment> includeDirs) {
     Iterables.addAll(this.includeDirs, includeDirs);
+    return this;
+  }
+
+  /**
+   * Adds the given directories to the framework include directories (they are passed with {@code
+   * "-F"} to the compiler); these are also passed to dependent rules.
+   */
+  public CcCompilationHelper addFrameworkIncludeDirs(Iterable<PathFragment> frameworkIncludeDirs) {
+    Iterables.addAll(this.frameworkIncludeDirs, frameworkIncludeDirs);
     return this;
   }
 
@@ -691,20 +705,6 @@ public final class CcCompilationHelper {
     return outputGroups;
   }
 
-  public static CppDebugFileProvider buildCppDebugFileProvider(
-      CcCompilationOutputs ccCompilationOutputs, Iterable<TransitiveInfoCollection> deps) {
-    DwoArtifactsCollector dwoArtifacts =
-        DwoArtifactsCollector.transitiveCollector(
-            ccCompilationOutputs,
-            deps,
-            /*generateDwo=*/ false,
-            /*ltoBackendArtifactsUsePic=*/ false,
-            /*ltoBackendArtifacts=*/ ImmutableList.of());
-    CppDebugFileProvider cppDebugFileProvider =
-        new CppDebugFileProvider(dwoArtifacts.getDwoArtifacts(), dwoArtifacts.getPicDwoArtifacts());
-    return cppDebugFileProvider;
-  }
-
   public static Map<String, NestedSet<Artifact>> buildOutputGroupsForEmittingCompileProviders(
       CcCompilationOutputs ccCompilationOutputs,
       CcCompilationContext ccCompilationContext,
@@ -712,17 +712,20 @@ public final class CcCompilationHelper {
       CcToolchainProvider ccToolchain,
       FeatureConfiguration featureConfiguration,
       RuleContext ruleContext) {
-    Map<String, NestedSet<Artifact>> outputGroups = new TreeMap<>();
-    outputGroups.put(OutputGroupInfo.TEMP_FILES, ccCompilationOutputs.getTemps());
+    ImmutableMap.Builder<String, NestedSet<Artifact>> outputGroupsBuilder = ImmutableMap.builder();
+    outputGroupsBuilder.put(OutputGroupInfo.TEMP_FILES, ccCompilationOutputs.getTemps());
     boolean processHeadersInDependencies = cppConfiguration.processHeadersInDependencies();
-    boolean usePic = ccToolchain.usePicForDynamicLibraries(featureConfiguration);
-    outputGroups.put(
+    boolean usePic = ccToolchain.usePicForDynamicLibraries(cppConfiguration, featureConfiguration);
+    outputGroupsBuilder.put(
         OutputGroupInfo.FILES_TO_COMPILE,
         ccCompilationOutputs.getFilesToCompile(processHeadersInDependencies, usePic));
-    outputGroups.put(
+    outputGroupsBuilder.put(
         OutputGroupInfo.COMPILATION_PREREQUISITES,
         CcCommon.collectCompilationPrerequisites(ruleContext, ccCompilationContext));
-    return outputGroups;
+    outputGroupsBuilder.putAll(
+        CcCommon.createSaveFeatureStateArtifacts(
+            cppConfiguration, featureConfiguration, ruleContext));
+    return outputGroupsBuilder.build();
   }
 
   @Immutable
@@ -871,7 +874,7 @@ public final class CcCompilationHelper {
    */
   private CcCompilationContext initializeCcCompilationContext() {
     CcCompilationContext.Builder ccCompilationContextBuilder =
-        new CcCompilationContext.Builder(actionConstructionContext, configuration, label);
+        CcCompilationContext.builder(actionConstructionContext, configuration, label);
 
     // Setup the include path; local include directories come before those inherited from deps or
     // from the toolchain; in case of aliasing (same include file found on different entries),
@@ -890,6 +893,8 @@ public final class CcCompilationHelper {
         configuration.getBinFragment().getRelative(repositoryPath));
 
     ccCompilationContextBuilder.addSystemIncludeDirs(systemIncludeDirs);
+    ccCompilationContextBuilder.addFrameworkIncludeDirs(frameworkIncludeDirs);
+    ccCompilationContextBuilder.addQuoteIncludeDirs(quoteIncludeDirs);
 
     for (PathFragment includeDir : includeDirs) {
       ccCompilationContextBuilder.addIncludeDir(includeDir);
@@ -987,7 +992,6 @@ public final class CcCompilationHelper {
       }
     }
     ccCompilationContextBuilder.setPurpose(purpose);
-    ccCompilationContextBuilder.addQuoteIncludeDirs(quoteIncludeDirs);
     return ccCompilationContextBuilder.build();
   }
 
@@ -1110,7 +1114,7 @@ public final class CcCompilationHelper {
   }
 
   /** @return the no-PIC header module artifact for the current target. */
-  private Artifact getHeaderModule(Artifact moduleMapArtifact) {
+  private Artifact.DerivedArtifact getHeaderModule(Artifact moduleMapArtifact) {
     PathFragment objectDir = CppHelper.getObjDirectory(label);
     PathFragment outputName =
         objectDir.getRelative(moduleMapArtifact.getRootRelativePath().getBaseName());
@@ -1118,7 +1122,7 @@ public final class CcCompilationHelper {
   }
 
   /** @return the pic header module artifact for the current target. */
-  private Artifact getPicHeaderModule(Artifact moduleMapArtifact) {
+  private Artifact.DerivedArtifact getPicHeaderModule(Artifact moduleMapArtifact) {
     PathFragment objectDir = CppHelper.getObjDirectory(label);
     PathFragment outputName =
         objectDir.getRelative(moduleMapArtifact.getRootRelativePath().getBaseName());
@@ -1129,16 +1133,20 @@ public final class CcCompilationHelper {
    * Calculate the output names for object file paths from a set of source files.
    *
    * <p>The object file path is constructed in the following format:
-   *    <bazel-bin>/<target_package_path>/_objs/<target_name>/<output_name>.<obj_extension>
-   * When there's no two source files having the same basename:
-   *   <output_name> = <prefixDir>/<source_file_base_name>
-   * otherwise:
-   *   <output_name> = <prefixDir>/N/<source_file_base_name>,
-   *   N = the file’s order among the source files with the same basename, starts with 0
+   *   {@code <bazel-bin>/<target_package_path>/_objs/<target_name>/<output_name>.<obj_extension>}.
    *
-   * <p>Examples: 1. Output names for ["lib1/foo.cc", "lib2/bar.cc"] are ["foo", "bar"]
-   *              2. Output names for ["foo.cc", "bar.cc", "foo.cpp", "lib/foo.cc"]
-   *                 are ["0/foo", "bar", "1/foo", "2/foo"]
+   * <p>When there's no two source files having the same basename:
+   *   {@code <output_name> = <prefixDir>/<source_file_base_name>}
+   * otherwise:
+   *   {@code <output_name> = <prefixDir>/N/<source_file_base_name>,
+   *   {@code N} = the file's order among the source files with the same basename, starts with 0
+   *
+   * <p>Examples:
+   * <ol>
+   * <li>Output names for ["lib1/foo.cc", "lib2/bar.cc"] are ["foo", "bar"]
+   * <li>Output names for ["foo.cc", "bar.cc", "foo.cpp", "lib/foo.cc"] are
+   *     ["0/foo", "bar", "1/foo", "2/foo"]
+   * </ol>
    */
   private ImmutableMap<Artifact, String> calculateOutputNameMap(
       NestedSet<Artifact> sourceArtifacts, String prefixDir) {
@@ -1210,7 +1218,7 @@ public final class CcCompilationHelper {
    * specified on the current object. This method should only be called once.
    */
   private CcCompilationOutputs createCcCompileActions() throws RuleErrorException {
-    CcCompilationOutputs.Builder result = new CcCompilationOutputs.Builder();
+    CcCompilationOutputs.Builder result = CcCompilationOutputs.builder();
     Preconditions.checkNotNull(ccCompilationContext);
 
     if (shouldProvideHeaderModules()) {
@@ -1233,8 +1241,7 @@ public final class CcCompilationHelper {
       }
     }
 
-    ImmutableMap<Artifact, String> outputNameMap = null;
-
+    ImmutableMap<Artifact, String> outputNameMap;
     String outputNamePrefixDir = null;
     // purpose is only used by objc rules, it ends with either "_non_objc_arc" or "_objc_arc".
     // Here we use it to distinguish arc and non-arc compilation.
@@ -1284,7 +1291,7 @@ public final class CcCompilationHelper {
                 // The source action does not generate dwo when it has bitcode
                 // output (since it isn't generating a native object with debug
                 // info). In that case the LtoBackendAction will generate the dwo.
-                ccToolchain.shouldCreatePerObjectDebugInfo(featureConfiguration),
+                ccToolchain.shouldCreatePerObjectDebugInfo(featureConfiguration, cppConfiguration),
                 bitcodeOutput,
                 isGenerateDotdFile(sourceArtifact));
             break;
@@ -1343,14 +1350,14 @@ public final class CcCompilationHelper {
     SpecialArtifact outputFiles =
         CppHelper.getCompileOutputTreeArtifact(
             actionConstructionContext, label, sourceArtifact, outputName, usePic);
-    // TODO(rduan): Dotd file output is not supported yet.
+    // Dotd file output is specified in the execution phase.
     builder.setOutputs(outputFiles, /* dotdFile= */ null);
     builder.setVariables(
         setupCompileBuildVariables(
             builder,
             /* sourceLabel= */ null,
             usePic,
-            /* ccRelativeName= */ null,
+            /* needsFdoBuildVariables= */ false,
             ccCompilationContext.getCppModuleMap(),
             /* gcnoFile= */ null,
             /* isUsingFission= */ false,
@@ -1363,6 +1370,8 @@ public final class CcCompilationHelper {
         new CppCompileActionTemplate(
             sourceArtifact,
             outputFiles,
+            CppHelper.getDotdOutputTreeArtifact(
+                actionConstructionContext, label, sourceArtifact, outputName, usePic),
             builder,
             ccToolchain,
             outputCategories,
@@ -1410,7 +1419,7 @@ public final class CcCompilationHelper {
       CppCompileActionBuilder builder,
       Label sourceLabel,
       boolean usePic,
-      PathFragment ccRelativeName,
+      boolean needsFdoBuildVariables,
       CppModuleMap cppModuleMap,
       Artifact gcnoFile,
       boolean isUsingFission,
@@ -1420,46 +1429,94 @@ public final class CcCompilationHelper {
     Artifact sourceFile = builder.getSourceFile();
     String dotdFileExecPath = null;
     if (builder.getDotdFile() != null) {
-      dotdFileExecPath = builder.getDotdFile().getSafeExecPath().getPathString();
+      dotdFileExecPath = builder.getDotdFile().getExecPathString();
     }
-    ImmutableMap.Builder<String, String> allAdditionalBuildVariables = ImmutableMap.builder();
-    allAdditionalBuildVariables.putAll(additionalBuildVariables);
-    if (ccRelativeName != null) {
-      configureFdoBuildVariables(
-          allAdditionalBuildVariables,
-          builder,
+    if (needsFdoBuildVariables && fdoContext.hasArtifacts(cppConfiguration)) {
+      // This modifies the passed-in builder, which is a surprising side-effect, and makes it unsafe
+      // to call this method multiple times for the same builder.
+      builder.addMandatoryInputs(getAuxiliaryFdoInputs(fdoContext));
+    }
+    CcToolchainVariables parent = needsFdoBuildVariables ? prebuiltParentWithFdo : prebuiltParent;
+    // We use the prebuilt parent variables if and only if the passed in cppModuleMap is the
+    // identical to the one returned from ccCompilationContext.getCppModuleMap(): there is exactly
+    // one caller which passes in any other value (the verification module map), so this should be
+    // fine for now.
+    boolean usePrebuiltParent =
+        cppModuleMap == ccCompilationContext.getCppModuleMap()
+            // Only use the prebuilt parent if there are enough sources to make it worthwhile. The
+            // threshold was chosen by looking at a heap dump.
+            && (compilationUnitSources.size() > 1);
+    CcToolchainVariables.Builder buildVariables;
+    if (parent != null && usePrebuiltParent) {
+      // If we have a pre-built parent and we are allowed to use it, then do so.
+      buildVariables = CcToolchainVariables.builder(parent);
+    } else {
+      Map<String, String> genericAdditionalBuildVariables = new LinkedHashMap<>();
+      if (needsFdoBuildVariables) {
+        configureFdoBuildVariables(
+            genericAdditionalBuildVariables,
+            featureConfiguration,
+            fdoContext,
+            cppConfiguration.getFdoInstrument(),
+            cppConfiguration.getCSFdoInstrument(),
+            cppConfiguration);
+      }
+      buildVariables =
+          CcToolchainVariables.builder(
+              ccToolchain.getBuildVariables(configuration.getOptions(), cppConfiguration));
+      CompileBuildVariables.setupCommonVariables(
+          buildVariables,
           featureConfiguration,
-          fdoContext,
-          cppConfiguration.getFdoInstrument());
+          ImmutableList.of(),
+          cppModuleMap,
+          CppHelper.getFdoBuildStamp(cppConfiguration, fdoContext, featureConfiguration),
+          variablesExtensions,
+          genericAdditionalBuildVariables,
+          ccCompilationContext.getDirectModuleMaps(),
+          ccCompilationContext.getIncludeDirs(),
+          ccCompilationContext.getQuoteIncludeDirs(),
+          ccCompilationContext.getSystemIncludeDirs(),
+          ccCompilationContext.getFrameworkIncludeDirs(),
+          ccCompilationContext.getDefines());
+
+      if (usePrebuiltParent) {
+        parent = buildVariables.build();
+        if (needsFdoBuildVariables) {
+          prebuiltParentWithFdo = parent;
+        } else {
+          prebuiltParent = parent;
+        }
+        buildVariables = CcToolchainVariables.builder(parent);
+      }
     }
-    return CompileBuildVariables.setupVariablesOrReportRuleError(
-        ruleErrorConsumer,
-        featureConfiguration,
-        ccToolchain,
+    if (usePic
+        && !featureConfiguration.isEnabled(CppRuleClasses.PIC)
+        && !featureConfiguration.isEnabled(CppRuleClasses.SUPPORTS_PIC)) {
+      ruleErrorConsumer.ruleError(CcCommon.PIC_CONFIGURATION_ERROR);
+    }
+
+    CompileBuildVariables.setupSpecificVariables(
+        buildVariables,
         toPathString(sourceFile),
         toPathString(builder.getOutputFile()),
         toPathString(gcnoFile),
-        isUsingFission,
         toPathString(dwoFile),
+        isUsingFission,
         toPathString(ltoIndexingFile),
-        ImmutableList.of(),
         getCopts(builder.getSourceFile(), sourceLabel),
-        cppModuleMap,
-        usePic,
-        builder.getTempOutputFile(),
-        CppHelper.getFdoBuildStamp(cppConfiguration, fdoContext, featureConfiguration),
+        toPathString(builder.getTempOutputFile()),
         dotdFileExecPath,
-        ImmutableList.copyOf(variablesExtensions),
-        allAdditionalBuildVariables.build(),
-        ccCompilationContext.getDirectModuleMaps(),
-        ccCompilationContext.getIncludeDirs(),
-        ccCompilationContext.getQuoteIncludeDirs(),
-        ccCompilationContext.getSystemIncludeDirs(),
-        ccCompilationContext.getDefines());
+        usePic,
+        additionalBuildVariables);
+    return buildVariables.build();
   }
 
   private static String toPathString(Artifact a) {
     return a == null ? null : a.getExecPathString();
+  }
+
+  private static String toPathString(PathFragment a) {
+    return a == null ? null : a.getSafePathString();
   }
 
   /**
@@ -1512,7 +1569,8 @@ public final class CcCompilationHelper {
                 actionConstructionContext, label, gcnoFileName, configuration)
             : null;
 
-    boolean generateDwo = ccToolchain.shouldCreatePerObjectDebugInfo(featureConfiguration);
+    boolean generateDwo =
+        ccToolchain.shouldCreatePerObjectDebugInfo(featureConfiguration, cppConfiguration);
     Artifact dwoFile = generateDwo ? getDwoFile(builder.getOutputFile()) : null;
     // TODO(tejohnson): Add support for ThinLTO if needed.
     boolean bitcodeOutput =
@@ -1525,7 +1583,7 @@ public final class CcCompilationHelper {
             builder,
             sourceLabel,
             /* usePic= */ pic,
-            ccRelativeName,
+            /* needsFdoBuildVariables= */ ccRelativeName != null,
             ccCompilationContext.getCppModuleMap(),
             gcnoFile,
             generateDwo,
@@ -1579,7 +1637,7 @@ public final class CcCompilationHelper {
             builder,
             sourceLabel,
             generatePicAction,
-            /* ccRelativeName= */ null,
+            /* needsFdoBuildVariables= */ false,
             ccCompilationContext.getCppModuleMap(),
             /* gcnoFile= */ null,
             /* isUsingFission= */ false,
@@ -1673,7 +1731,7 @@ public final class CcCompilationHelper {
                 picBuilder,
                 sourceLabel,
                 /* usePic= */ true,
-                ccRelativeName,
+                /* needsFdoBuildVariables= */ ccRelativeName != null,
                 ccCompilationContext.getCppModuleMap(),
                 gcnoFile,
                 generateDwo,
@@ -1748,7 +1806,7 @@ public final class CcCompilationHelper {
                 builder,
                 sourceLabel,
                 /* usePic= */ false,
-                ccRelativeName,
+                /* needsFdoBuildVariables= */ ccRelativeName != null,
                 cppModuleMap,
                 gcnoFile,
                 generateDwo,
@@ -1861,7 +1919,7 @@ public final class CcCompilationHelper {
             builder,
             sourceLabel,
             usePic,
-            ccRelativeName,
+            /* needsFdoBuildVariables= */ ccRelativeName != null,
             ccCompilationContext.getCppModuleMap(),
             /* gcnoFile= */ null,
             /* isUsingFission= */ false,
@@ -1977,7 +2035,7 @@ public final class CcCompilationHelper {
             dBuilder,
             sourceLabel,
             usePic,
-            ccRelativeName,
+            /* needsFdoBuildVariables= */ ccRelativeName != null,
             ccCompilationContext.getCppModuleMap(),
             /* gcnoFile= */ null,
             /* isUsingFission= */ false,
@@ -2003,7 +2061,7 @@ public final class CcCompilationHelper {
             sdBuilder,
             sourceLabel,
             usePic,
-            ccRelativeName,
+            /* needsFdoBuildVariables= */ ccRelativeName != null,
             ccCompilationContext.getCppModuleMap(),
             /* gcnoFile= */ null,
             /* isUsingFission= */ false,

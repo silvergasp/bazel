@@ -18,6 +18,36 @@
 
 set -o errexit
 
+# Check if all necessary tools are available.
+# List: https://github.com/bazelbuild/bazel/issues/7641#issuecomment-472344261
+for tool in basename cat chmod comm cp dirname find grep ln ls mkdir mktemp \
+            readlink rm sed sort tail touch tr uname unzip which; do
+  if ! hash "$tool" >/dev/null; then
+    echo >&2 "ERROR: cannot find \"$tool\"; check your PATH."
+    echo >&2 "       You may need to run the following command or similar:"
+    echo >&2 "         export PATH=\"/bin:/usr/bin:\$PATH\""
+    exit 1
+  fi
+done
+
+# Ensure Python is on the PATH on Windows, otherwise we would see
+# "LAUNCHER ERROR" messages from py_binary exe launchers.
+case "$(uname -s | tr "[:upper:]" "[:lower:]")" in
+msys*|mingw*|cygwin*)
+  # Ensure Python is on the PATH, otherwise the bootstrapping fails later.
+  if ! hash python.exe >/dev/null; then
+    echo >&2 "ERROR: cannot locate python.exe; check your PATH."
+    echo >&2 "       You may need to run the following command, or something"
+    echo >&2 "       similar, depending on where you installed Python:"
+    echo >&2 "         export PATH=\"/c/Python27:\$PATH\""
+    exit 1
+  fi
+  # Ensure TMPDIR uses the user-specified TMPDIR or TMP or TEMP.
+  # This is necessary to avoid overly longs paths during bootstrapping, see for
+  # example https://github.com/bazelbuild/bazel/issues/4536
+  export TMPDIR="${TMPDIR:-${TMP:-${TEMP:-}}}"
+esac
+
 # If BAZEL_WRKDIR is set, default all variables to point into
 # that directory
 
@@ -288,7 +318,9 @@ function link_dir() {
   local dest=$2
 
   if [[ "${PLATFORM}" == "windows" ]]; then
-    cmd.exe /C "mklink /J \"$(cygpath -w "$dest")\" \"$(cygpath -w "$source")\"" >&/dev/null
+    local -r s="$(cygpath -w "$source")"
+    local -r d="$(cygpath -w "$dest")"
+    powershell -command "New-Item -ItemType Junction -Path '$d' -Value '$s'"
   else
     ln -s "${source}" "${dest}"
   fi
@@ -302,7 +334,9 @@ function link_file() {
     # Attempt creating a symlink to the file. This is supported without
     # elevation (Administrator privileges) on Windows 10 version 1709 when
     # Developer Mode is enabled.
-    if ! cmd.exe /C "mklink \"$(cygpath -w "$dest")\" \"$(cygpath -w "$source")\"" >&/dev/null; then
+    local -r s="$(cygpath -w "$source")"
+    local -r d="$(cygpath -w "$dest")"
+    if ! powershell -command "New-Item -ItemType SymbolicLink -Path '$d' -Value '$s'"; then
       # If the previous call failed to create a symlink, just copy the file.
       cp "$source" "$dest"
     fi

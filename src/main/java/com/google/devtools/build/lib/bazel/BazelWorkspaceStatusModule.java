@@ -47,7 +47,6 @@ import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
 import com.google.devtools.build.lib.util.CommandBuilder;
 import com.google.devtools.build.lib.util.Fingerprint;
 import com.google.devtools.build.lib.util.NetUtil;
-import com.google.devtools.build.lib.vfs.FileSystem;
 import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
@@ -152,11 +151,11 @@ public class BazelWorkspaceStatusModule extends BlazeModule {
     }
 
     @Override
-    public void prepare(FileSystem fileSystem, Path execRoot) throws IOException {
+    public void prepare(Path execRoot) throws IOException {
       // The default implementation of this method deletes all output files; override it to keep
       // the old stableStatus around. This way we can reuse the existing file (preserving its mtime)
       // if the contents haven't changed.
-      deleteOutput(fileSystem, volatileStatus);
+      deleteOutput(volatileStatus.getPath(), volatileStatus.getRoot());
     }
 
     @Override
@@ -204,7 +203,9 @@ public class BazelWorkspaceStatusModule extends BlazeModule {
             actionExecutionContext.getInputPath(volatileStatus), printStatusMap(volatileMap));
       } catch (IOException e) {
         throw new ActionExecutionException(
-            "Failed to run workspace status command " + options.workspaceStatusCommand,
+            String.format(
+                "Failed to run workspace status command %s: %s",
+                options.workspaceStatusCommand, e.getMessage()),
             e,
             this,
             true);

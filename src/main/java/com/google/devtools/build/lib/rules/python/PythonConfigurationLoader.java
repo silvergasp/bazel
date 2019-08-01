@@ -42,7 +42,9 @@ public class PythonConfigurationLoader implements ConfigurationFragmentFactory {
         /*oldPyVersionApiAllowed=*/ !pythonOptions.incompatibleRemoveOldPythonVersionApi,
         /*useNewPyVersionSemantics=*/ pythonOptions.incompatibleAllowPythonVersionTransitions,
         /*py2OutputsAreSuffixed=*/ pythonOptions.incompatiblePy2OutputsAreSuffixed,
-        /*disallowLegacyPyProvider=*/ pythonOptions.incompatibleDisallowLegacyPyProvider);
+        /*disallowLegacyPyProvider=*/ pythonOptions.incompatibleDisallowLegacyPyProvider,
+        /*useToolchains=*/ pythonOptions.incompatibleUsePythonToolchains,
+        pythonOptions.windowsEscapePythonArgs);
   }
 
   @Override

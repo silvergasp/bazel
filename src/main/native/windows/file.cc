@@ -12,14 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+
+#include "src/main/native/windows/file.h"
+
+#include <WinIoCtl.h>
 #include <stdint.h>  // uint8_t
 #include <windows.h>
 
 #include <memory>
 #include <sstream>
 #include <string>
+#include <vector>
 
-#include "src/main/native/windows/file.h"
 #include "src/main/native/windows/util.h"
 
 namespace bazel {
@@ -38,14 +45,6 @@ wstring RemoveUncPrefixMaybe(const wstring& path) {
   return bazel::windows::HasUncPrefix(path.c_str()) ? path.substr(4) : path;
 }
 
-bool HasDriveSpecifierPrefix(const wstring& p) {
-  if (HasUncPrefix(p.c_str())) {
-    return p.size() >= 7 && iswalpha(p[4]) && p[5] == ':' && p[6] == '\\';
-  } else {
-    return p.size() >= 3 && iswalpha(p[0]) && p[1] == ':' && p[2] == '\\';
-  }
-}
-
 bool IsAbsoluteNormalizedWindowsPath(const wstring& p) {
   if (p.empty()) {
     return false;
@@ -57,7 +56,7 @@ bool IsAbsoluteNormalizedWindowsPath(const wstring& p) {
     return false;
   }
 
-  return HasDriveSpecifierPrefix(p) && p.find(L".\\") != 0 &&
+  return HasDriveSpecifierPrefix(p.c_str()) && p.find(L".\\") != 0 &&
          p.find(L"\\.\\") == wstring::npos && p.find(L"\\.") != p.size() - 2 &&
          p.find(L"..\\") != 0 && p.find(L"\\..\\") == wstring::npos &&
          p.find(L"\\..") != p.size() - 3;
@@ -72,31 +71,31 @@ static wstring uint32asHexString(uint32_t value) {
   return wstring(attr_str, 8);
 }
 
-int IsJunctionOrDirectorySymlink(const WCHAR* path, wstring* error) {
+int IsSymlinkOrJunction(const WCHAR* path, bool* result, wstring* error) {
   if (!IsAbsoluteNormalizedWindowsPath(path)) {
     if (error) {
-      *error = MakeErrorMessage(WSTR(__FILE__), __LINE__,
-                                L"IsJunctionOrDirectorySymlink", path,
-                                L"expected an absolute Windows path");
+      *error =
+          MakeErrorMessage(WSTR(__FILE__), __LINE__, L"IsSymlinkOrJunction",
+                           path, L"expected an absolute Windows path");
     }
-    return IS_JUNCTION_ERROR;
+    return IsSymlinkOrJunctionResult::kError;
   }
 
   DWORD attrs = ::GetFileAttributesW(path);
   if (attrs == INVALID_FILE_ATTRIBUTES) {
     DWORD err = GetLastError();
+    if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) {
+      return IsSymlinkOrJunctionResult::kDoesNotExist;
+    }
+
     if (error) {
       *error = MakeErrorMessage(WSTR(__FILE__), __LINE__,
-                                L"IsJunctionOrDirectorySymlink", path, err);
+                                L"IsSymlinkOrJunction", path, err);
     }
-    return IS_JUNCTION_ERROR;
+    return IsSymlinkOrJunctionResult::kError;
   } else {
-    if ((attrs & FILE_ATTRIBUTE_DIRECTORY) &&
-        (attrs & FILE_ATTRIBUTE_REPARSE_POINT)) {
-      return IS_JUNCTION_YES;
-    } else {
-      return IS_JUNCTION_NO;
-    }
+    *result = (attrs & FILE_ATTRIBUTE_REPARSE_POINT);
+    return IsSymlinkOrJunctionResult::kSuccess;
   }
 }
 
@@ -119,24 +118,32 @@ wstring GetLongPath(const WCHAR* path, unique_ptr<WCHAR[]>* result) {
 }
 
 #pragma pack(push, 4)
-typedef struct _JunctionDescription {
-  typedef struct _Header {
-    DWORD ReparseTag;
-    WORD ReparseDataLength;
-    WORD Reserved;
-  } Header;
-
-  typedef struct _WriteDesc {
-    WORD SubstituteNameOffset;
-    WORD SubstituteNameLength;
-    WORD PrintNameOffset;
-    WORD PrintNameLength;
-  } Descriptor;
-
-  Header header;
-  Descriptor descriptor;
-  WCHAR PathBuffer[ANYSIZE_ARRAY];
-} JunctionDescription;
+// See https://msdn.microsoft.com/en-us/windows/desktop/ff552012
+typedef struct _REPARSE_DATA_BUFFER {
+  ULONG ReparseTag;
+  USHORT ReparseDataLength;
+  USHORT Reserved;
+  union {
+    struct {
+      USHORT SubstituteNameOffset;
+      USHORT SubstituteNameLength;
+      USHORT PrintNameOffset;
+      USHORT PrintNameLength;
+      ULONG Flags;
+      WCHAR PathBuffer[1];
+    } SymbolicLinkReparseBuffer;
+    struct {
+      USHORT SubstituteNameOffset;
+      USHORT SubstituteNameLength;
+      USHORT PrintNameOffset;
+      USHORT PrintNameLength;
+      WCHAR PathBuffer[1];
+    } MountPointReparseBuffer;
+    struct {
+      UCHAR DataBuffer[1];
+    } GenericReparseBuffer;
+  } DUMMYUNIONNAME;
+} REPARSE_DATA_BUFFER, *PREPARSE_DATA_BUFFER;
 #pragma pack(pop)
 
 int CreateJunction(const wstring& junction_name, const wstring& junction_target,
@@ -147,7 +154,7 @@ int CreateJunction(const wstring& junction_name, const wstring& junction_target,
           WSTR(__FILE__), __LINE__, L"CreateJunction", junction_name,
           L"expected an absolute Windows path for junction_name");
     }
-    CreateJunctionResult::kError;
+    return CreateJunctionResult::kError;
   }
   if (!IsAbsoluteNormalizedWindowsPath(junction_target)) {
     if (error) {
@@ -155,19 +162,22 @@ int CreateJunction(const wstring& junction_name, const wstring& junction_target,
           WSTR(__FILE__), __LINE__, L"CreateJunction", junction_target,
           L"expected an absolute Windows path for junction_target");
     }
-    CreateJunctionResult::kError;
+    return CreateJunctionResult::kError;
   }
 
-  const wstring target = HasUncPrefix(junction_target.c_str())
-                             ? junction_target.substr(4)
-                             : junction_target;
-  // The entire JunctionDescription cannot be larger than
+  const WCHAR* target = HasUncPrefix(junction_target.c_str())
+                            ? junction_target.c_str() + 4
+                            : junction_target.c_str();
+  const size_t target_size = HasUncPrefix(junction_target.c_str())
+                                 ? junction_target.size() - 4
+                                 : junction_target.size();
+  // The entire REPARSE_DATA_BUFFER cannot be larger than
   // MAXIMUM_REPARSE_DATA_BUFFER_SIZE bytes.
   //
   // The structure's layout is:
-  //   [JunctionDescription::Header]
-  //   [JunctionDescription::Descriptor]
-  //   ---- start of JunctionDescription::PathBuffer ----
+  //   [8 bytes] : ReparseTag, ReparseDataLength, Reserved
+  //   [8 bytes] : MountPointReparseBuffer members before PathBuffer
+  //   ---- start of MountPointReparseBuffer.PathBuffer ----
   //   [4 WCHARs]             : "\??\" prefix
   //   [target.size() WCHARs] : junction target name
   //   [1 WCHAR]              : null-terminator
@@ -176,13 +186,13 @@ int CreateJunction(const wstring& junction_name, const wstring& junction_target,
   // The sum of these must not exceed MAXIMUM_REPARSE_DATA_BUFFER_SIZE.
   // We can rearrange this to get the limit for target.size().
   static const size_t kMaxJunctionTargetLen =
-      ((MAXIMUM_REPARSE_DATA_BUFFER_SIZE - sizeof(JunctionDescription::Header) -
-        sizeof(JunctionDescription::Descriptor) -
-        /* one "\??\" prefix */ sizeof(WCHAR) * 4 -
-        /* two null terminators */ sizeof(WCHAR) * 2) /
-       /* two copies of the string are stored */ 2) /
-      sizeof(WCHAR);
-  if (target.size() > kMaxJunctionTargetLen) {
+      ((MAXIMUM_REPARSE_DATA_BUFFER_SIZE -
+        offsetof(REPARSE_DATA_BUFFER, MountPointReparseBuffer.PathBuffer)) /
+           sizeof(WCHAR) -
+       /* one "\??\" prefix */ 4 -
+       /* two null terminators */ 2) /
+      /* two copies of the string are stored */ 2;
+  if (target_size > kMaxJunctionTargetLen) {
     if (error) {
       *error = MakeErrorMessage(WSTR(__FILE__), __LINE__, L"CreateJunction",
                                 target, L"target path is too long");
@@ -304,8 +314,8 @@ int CreateJunction(const wstring& junction_name, const wstring& junction_target,
   }
 
   uint8_t reparse_buffer_bytes[MAXIMUM_REPARSE_DATA_BUFFER_SIZE];
-  JunctionDescription* reparse_buffer =
-      reinterpret_cast<JunctionDescription*>(reparse_buffer_bytes);
+  PREPARSE_DATA_BUFFER reparse_buffer =
+      reinterpret_cast<PREPARSE_DATA_BUFFER>(reparse_buffer_bytes);
   if (create) {
     // The junction doesn't exist yet, and we have an open handle to the
     // candidate directory with write access and no sharing. Proceed to turn the
@@ -313,13 +323,36 @@ int CreateJunction(const wstring& junction_name, const wstring& junction_target,
 
     memset(reparse_buffer_bytes, 0, MAXIMUM_REPARSE_DATA_BUFFER_SIZE);
 
+    reparse_buffer->MountPointReparseBuffer.SubstituteNameOffset = 0;
+    reparse_buffer->MountPointReparseBuffer.SubstituteNameLength =
+        (4 + target_size) * sizeof(WCHAR);
+    reparse_buffer->MountPointReparseBuffer.PrintNameOffset =
+        reparse_buffer->MountPointReparseBuffer.SubstituteNameLength +
+        /* null-terminator */ sizeof(WCHAR);
+    reparse_buffer->MountPointReparseBuffer.PrintNameLength =
+        target_size * sizeof(WCHAR);
+
+    reparse_buffer->ReparseTag = IO_REPARSE_TAG_MOUNT_POINT;
+    reparse_buffer->ReparseDataLength =
+        4 * sizeof(USHORT) +
+        reparse_buffer->MountPointReparseBuffer.SubstituteNameLength +
+        reparse_buffer->MountPointReparseBuffer.PrintNameLength +
+        /* 2 null-terminators */ (2 * sizeof(WCHAR));
+    reparse_buffer->Reserved = 0;
+
     // "\??\" is meaningful to the kernel, it's a synomym for the "\DosDevices\"
     // object path. (NOT to be confused with "\\?\" which is meaningful for the
     // Win32 API.) We need to use this prefix to tell the kernel where the
     // reparse point is pointing to.
-    memcpy(reparse_buffer->PathBuffer, L"\\??\\", 4 * sizeof(WCHAR));
-    memcpy(reparse_buffer->PathBuffer + 4, target.c_str(),
-           target.size() * sizeof(WCHAR));
+    memcpy((uint8_t*)reparse_buffer->MountPointReparseBuffer.PathBuffer +
+               reparse_buffer->MountPointReparseBuffer.SubstituteNameOffset,
+           L"\\??\\", 4 * sizeof(WCHAR));
+    memcpy((uint8_t*)reparse_buffer->MountPointReparseBuffer.PathBuffer +
+               reparse_buffer->MountPointReparseBuffer.SubstituteNameOffset +
+               4 * sizeof(WCHAR),
+           target,
+           reparse_buffer->MountPointReparseBuffer.SubstituteNameLength -
+               4 * sizeof(WCHAR));
 
     // In addition to their target, junctions also have another string which is
     // a user-visible name of where the junction points, as listed by "dir".
@@ -329,30 +362,16 @@ int CreateJunction(const wstring& junction_name, const wstring& junction_target,
     // behaves. Using a dummy or fake display name would be misleading, it would
     // make the output of `dir` look like:
     //   2017-01-18  01:37 PM    <JUNCTION>     juncname [dummy string]
-    memcpy(reparse_buffer->PathBuffer + 4 + target.size() + 1, target.c_str(),
-           target.size() * sizeof(WCHAR));
-
-    reparse_buffer->descriptor.SubstituteNameOffset = 0;
-    reparse_buffer->descriptor.SubstituteNameLength =
-        (4 + target.size()) * sizeof(WCHAR);
-    reparse_buffer->descriptor.PrintNameOffset =
-        reparse_buffer->descriptor.SubstituteNameLength +
-        /* null-terminator */ sizeof(WCHAR);
-    reparse_buffer->descriptor.PrintNameLength = target.size() * sizeof(WCHAR);
-
-    reparse_buffer->header.ReparseTag = IO_REPARSE_TAG_MOUNT_POINT;
-    reparse_buffer->header.ReparseDataLength =
-        sizeof(JunctionDescription::Descriptor) +
-        reparse_buffer->descriptor.SubstituteNameLength +
-        reparse_buffer->descriptor.PrintNameLength +
-        /* 2 null-terminators */ (2 * sizeof(WCHAR));
-    reparse_buffer->header.Reserved = 0;
+    memcpy((uint8_t*)reparse_buffer->MountPointReparseBuffer.PathBuffer +
+               reparse_buffer->MountPointReparseBuffer.PrintNameOffset,
+           target, reparse_buffer->MountPointReparseBuffer.PrintNameLength);
 
     DWORD bytes_returned;
-    if (!::DeviceIoControl(handle, FSCTL_SET_REPARSE_POINT, reparse_buffer,
-                           reparse_buffer->header.ReparseDataLength +
-                               sizeof(JunctionDescription::Header),
-                           NULL, 0, &bytes_returned, NULL)) {
+    if (!::DeviceIoControl(
+            handle, FSCTL_SET_REPARSE_POINT, reparse_buffer,
+            reparse_buffer->ReparseDataLength +
+                offsetof(REPARSE_DATA_BUFFER, GenericReparseBuffer.DataBuffer),
+            NULL, 0, &bytes_returned, NULL)) {
       DWORD err = GetLastError();
       if (err == ERROR_DIR_NOT_EMPTY) {
         return CreateJunctionResult::kAlreadyExistsButNotJunction;
@@ -380,17 +399,94 @@ int CreateJunction(const wstring& junction_name, const wstring& junction_target,
       return CreateJunctionResult::kError;
     }
 
-    WCHAR* actual_target = reparse_buffer->PathBuffer +
-                           reparse_buffer->descriptor.SubstituteNameOffset +
-                           /* "\??\" prefix */ 4;
-    if (reparse_buffer->descriptor.SubstituteNameLength !=
-            (/* "\??\" prefix */ 4 + target.size()) * sizeof(WCHAR) ||
-        _wcsnicmp(actual_target, target.c_str(), target.size()) != 0) {
+    WCHAR* actual_target =
+        reparse_buffer->MountPointReparseBuffer.PathBuffer +
+        reparse_buffer->MountPointReparseBuffer.SubstituteNameOffset +
+        /* "\??\" prefix */ 4;
+    if (reparse_buffer->MountPointReparseBuffer.SubstituteNameLength !=
+            (/* "\??\" prefix */ 4 + target_size) * sizeof(WCHAR) ||
+        _wcsnicmp(actual_target, target, target_size) != 0) {
       return CreateJunctionResult::kAlreadyExistsWithDifferentTarget;
     }
   }
 
   return CreateJunctionResult::kSuccess;
+}
+
+int ReadSymlinkOrJunction(const wstring& path, wstring* result,
+                          wstring* error) {
+  if (!IsAbsoluteNormalizedWindowsPath(path)) {
+    if (error) {
+      *error = MakeErrorMessage(
+          WSTR(__FILE__), __LINE__, L"ReadSymlinkOrJunction", path,
+          L"expected an absolute Windows path for 'path'");
+    }
+    return ReadSymlinkOrJunctionResult::kError;
+  }
+
+  AutoHandle handle(CreateFileW(
+      AddUncPrefixMaybe(path).c_str(), 0,
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+      OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+      NULL));
+  if (!handle.IsValid()) {
+    DWORD err = GetLastError();
+    if (err == ERROR_SHARING_VIOLATION) {
+      // The path is held open by another process.
+      return ReadSymlinkOrJunctionResult::kAccessDenied;
+    } else if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) {
+      // Path or a parent directory does not exist.
+      return ReadSymlinkOrJunctionResult::kDoesNotExist;
+    }
+
+    // The path seems to exist yet we cannot open it for metadata-reading.
+    // Report as much information as we have, then give up.
+    if (error) {
+      *error =
+          MakeErrorMessage(WSTR(__FILE__), __LINE__, L"CreateFileW", path, err);
+    }
+    return ReadSymlinkOrJunctionResult::kError;
+  }
+
+  uint8_t raw_buf[MAXIMUM_REPARSE_DATA_BUFFER_SIZE];
+  PREPARSE_DATA_BUFFER buf = reinterpret_cast<PREPARSE_DATA_BUFFER>(raw_buf);
+  DWORD bytes_returned;
+  if (!::DeviceIoControl(handle, FSCTL_GET_REPARSE_POINT, NULL, 0, buf,
+                         MAXIMUM_REPARSE_DATA_BUFFER_SIZE, &bytes_returned,
+                         NULL)) {
+    DWORD err = GetLastError();
+    if (err == ERROR_NOT_A_REPARSE_POINT) {
+      return ReadSymlinkOrJunctionResult::kNotALink;
+    }
+
+    // Some unknown error occurred.
+    if (error) {
+      *error = MakeErrorMessage(WSTR(__FILE__), __LINE__, L"DeviceIoControl",
+                                path, err);
+    }
+    return ReadSymlinkOrJunctionResult::kError;
+  }
+
+  switch (buf->ReparseTag) {
+    case IO_REPARSE_TAG_SYMLINK: {
+      wchar_t* p =
+          (wchar_t*)(((uint8_t*)buf->SymbolicLinkReparseBuffer.PathBuffer) +
+                     buf->SymbolicLinkReparseBuffer.SubstituteNameOffset);
+      *result = wstring(p, buf->SymbolicLinkReparseBuffer.SubstituteNameLength /
+                               sizeof(WCHAR));
+      return ReadSymlinkOrJunctionResult::kSuccess;
+    }
+    case IO_REPARSE_TAG_MOUNT_POINT: {
+      wchar_t* p =
+          (wchar_t*)(((uint8_t*)buf->MountPointReparseBuffer.PathBuffer) +
+                     buf->MountPointReparseBuffer.SubstituteNameOffset);
+      *result = wstring(
+          p, buf->MountPointReparseBuffer.SubstituteNameLength / sizeof(WCHAR));
+      return ReadSymlinkOrJunctionResult::kSuccess;
+    }
+    default:
+      return ReadSymlinkOrJunctionResult::kUnknownLinkType;
+  }
 }
 
 struct DirectoryStatus {
@@ -456,6 +552,24 @@ int CheckDirectoryStatus(const wstring& path) {
   return DirectoryStatus::kDirectoryEmpty;
 }
 
+int GetResultFromErrorCode(const wchar_t* function_name, const wstring& path,
+                           DWORD err, wstring* error) {
+  if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) {
+    // The file disappeared, or one of its parent directories disappeared,
+    // or one of its parent directories is no longer a directory.
+    return DeletePathResult::kDoesNotExist;
+  }
+  if (err == ERROR_ACCESS_DENIED || err == ERROR_SHARING_VIOLATION) {
+    return DeletePathResult::kAccessDenied;
+  }
+  // Some unknown error occurred.
+  if (error) {
+     *error = MakeErrorMessage(WSTR(__FILE__), __LINE__,
+                               function_name, path, err);
+  }
+  return DeletePathResult::kError;
+}
+
 int DeletePath(const wstring& path, wstring* error) {
   if (!IsAbsoluteNormalizedWindowsPath(path)) {
     if (error) {
@@ -468,163 +582,203 @@ int DeletePath(const wstring& path, wstring* error) {
   const std::wstring winpath(AddUncPrefixMaybe(path));
   const wchar_t* wpath = winpath.c_str();
 
-  if (!DeleteFileW(wpath)) {
-    DWORD err = GetLastError();
-    if (err == ERROR_SHARING_VIOLATION) {
-      // The file or directory is in use by some process or we have no
-      // permission to delete it.
-      return DeletePathResult::kAccessDenied;
-    } else if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) {
-      // The file or directory does not exist, or a parent directory does not
-      // exist, or a parent directory is actually a file.
-      return DeletePathResult::kDoesNotExist;
-    } else if (err != ERROR_ACCESS_DENIED) {
+  DWORD attr = GetFileAttributesW(wpath);
+  DWORD err;
+  if (attr == INVALID_FILE_ATTRIBUTES) {
+    return GetResultFromErrorCode(L"GetFileAttributesW", path,
+                                  GetLastError(), error);
+  }
+
+  if (attr & FILE_ATTRIBUTE_DIRECTORY) {
+    // It's a directory or a junction, RemoveDirectoryW should be used.
+    //
+    // Sometimes a deleted directory lingers in its parent dir
+    // after the deleting handle has already been closed.
+    // In this case we check the content of the parent directory,
+    // if we don't find any valid file, we try to delete it again after 5 ms.
+    // But we don't want to hang infinitely because another application
+    // can hold the handle for a long time. So try at most 20 times,
+    // which means a process time of 100-120ms.
+    // Inspired by
+    // https://github.com/Alexpux/Cygwin/commit/28fa2a72f810670a0562ea061461552840f5eb70
+    // Useful link: https://stackoverflow.com/questions/31606978
+    int count;
+    for (count = 0; count < 20 && !RemoveDirectoryW(wpath); ++count) {
+      // Failed to delete the directory.
+      err = GetLastError();
+      if (err == ERROR_SHARING_VIOLATION || err == ERROR_ACCESS_DENIED) {
+        // The junction or directory is in use by another process, or we have
+        // no permission to delete it.
+        return DeletePathResult::kAccessDenied;
+      } else if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) {
+        // The directory or one of its parent directories disappeared or is no
+        // longer a directory.
+        return DeletePathResult::kDoesNotExist;
+      } else if (err == ERROR_DIR_NOT_EMPTY) {
+        // We got ERROR_DIR_NOT_EMPTY error, but maybe the child files and
+        // dirs are already marked for deletion, let's check the status of the
+        // child elements to see if we should retry the delete operation.
+        switch (CheckDirectoryStatus(winpath)) {
+          case DirectoryStatus::kDirectoryNotEmpty:
+            // The directory is truely not empty.
+            return DeletePathResult::kDirectoryNotEmpty;
+          case DirectoryStatus::kDirectoryEmpty:
+            // If no children are pending deletion then the directory is now
+            // empty. We can try deleting it again without waiting.
+            continue;
+          case DirectoryStatus::kChildMarkedForDeletionExists:
+            // If all child elements are marked for deletion, then wait 5 ms for
+            // the system to delete the files and try deleting the directory
+            // again.
+            Sleep(5L);
+            continue;
+          case DirectoryStatus::kDoesNotExist:
+            // This case should never happen, because ERROR_DIR_NOT_EMPTY
+            // means the directory exists. But if it does happen, return an
+            // error message.
+            if (error) {
+              *error =
+                  MakeErrorMessage(WSTR(__FILE__), __LINE__,
+                                   L"RemoveDirectoryW", path, GetLastError());
+            }
+            return DeletePathResult::kError;
+        }
+      }
+
       // Some unknown error occurred.
       if (error) {
-        *error = MakeErrorMessage(WSTR(__FILE__), __LINE__, L"DeleteFileW",
-                                  path, err);
+        *error = MakeErrorMessage(WSTR(__FILE__), __LINE__,
+                                  L"RemoveDirectoryW", path, err);
       }
       return DeletePathResult::kError;
     }
 
-    // DeleteFileW failed with access denied, because the file is read-only or
-    // it is a directory.
-    DWORD attr = GetFileAttributesW(wpath);
-    if (attr == INVALID_FILE_ATTRIBUTES) {
-      err = GetLastError();
-      if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) {
-        // The file disappeared, or one of its parent directories disappeared,
-        // or one of its parent directories is no longer a directory.
-        return DeletePathResult::kDoesNotExist;
-      } else {
-        // Some unknown error occurred.
-        if (error) {
-          *error = MakeErrorMessage(WSTR(__FILE__), __LINE__,
-                                    L"GetFileAttributesW", path, err);
-        }
-        return DeletePathResult::kError;
-      }
+    if (count == 20) {
+      // After trying 20 times, the "deleted" sub-directories or files still
+      // won't go away, so just return kDirectoryNotEmpty error.
+      return DeletePathResult::kDirectoryNotEmpty;
     }
-
-    // DeleteFileW failed with access denied, but the path exists.
-    if (attr & FILE_ATTRIBUTE_DIRECTORY) {
-      // It's a directory or a junction.
-
-      // Sometimes a deleted directory lingers in its parent dir
-      // after the deleting handle has already been closed.
-      // In this case we check the content of the parent directory,
-      // if we don't find any valid file, we try to delete it again after 5 ms.
-      // But we don't want to hang infinitely because another application
-      // can hold the handle for a long time. So try at most 20 times,
-      // which means a process time of 100-120ms.
-      // Inspired by
-      // https://github.com/Alexpux/Cygwin/commit/28fa2a72f810670a0562ea061461552840f5eb70
-      // Useful link: https://stackoverflow.com/questions/31606978
-      int count = 20;
-      while (count > 0 && !RemoveDirectoryW(wpath)) {
-        // Failed to delete the directory.
-        err = GetLastError();
-        if (err == ERROR_SHARING_VIOLATION || err == ERROR_ACCESS_DENIED) {
-          // The junction or directory is in use by another process, or we have
-          // no permission to delete it.
-          return DeletePathResult::kAccessDenied;
-        } else if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) {
-          // The directory or one of its directories disappeared or is no longer
-          // a directory.
-          return DeletePathResult::kDoesNotExist;
-        } else if (err == ERROR_DIR_NOT_EMPTY) {
-          // We got ERROR_DIR_NOT_EMPTY error, but maybe the child files and
-          // dirs are already marked for deletion, let's check the status of the
-          // child elements to see if we should retry the delete operation.
-          switch (CheckDirectoryStatus(winpath)) {
-            case DirectoryStatus::kDirectoryNotEmpty:
-              // The directory is truely not empty.
-              return DeletePathResult::kDirectoryNotEmpty;
-            case DirectoryStatus::kDirectoryEmpty:
-              // If we didn't find any pending delete child files or dirs, it
-              // means at the time we check, the child elements marked for
-              // deletion are gone, the directory is now empty, we can then try
-              // to delete the directory again without waiting.
-              continue;
-            case DirectoryStatus::kChildMarkedForDeletionExists:
-              // If the directory only contains child elements marked for
-              // deletion, wait the system for 5 ms to clean them up and try to
-              // delete the directory again.
-              Sleep(5L);
-              continue;
-            case DirectoryStatus::kDoesNotExist:
-              // This case should never happen, because ERROR_DIR_NOT_EMPTY
-              // means the directory exists. But if it does happen, return an
-              // error message.
-              if (error) {
-                *error =
-                    MakeErrorMessage(WSTR(__FILE__), __LINE__,
-                                     L"RemoveDirectoryW", path, GetLastError());
-              }
-              return DeletePathResult::kError;
-          }
-        }
-
-        // Some unknown error occurred.
-        if (error) {
-          *error = MakeErrorMessage(WSTR(__FILE__), __LINE__,
-                                    L"RemoveDirectoryW", path, err);
-        }
-        return DeletePathResult::kError;
-      }
-
-      if (count == 0) {
-        // After trying 20 times, the "deleted" sub-directories or files still
-        // won't go away, so just return kDirectoryNotEmpty error.
-        return DeletePathResult::kDirectoryNotEmpty;
-      }
-    } else if (attr & FILE_ATTRIBUTE_READONLY) {
-      // It's a file and it's probably read-only.
-      // Make it writable then try deleting it again.
+  } else {
+    // It's a regular file or symlink, DeleteFileW should be used.
+    if (attr & FILE_ATTRIBUTE_READONLY) {
+      // Remove the read-only attribute.
       attr &= ~FILE_ATTRIBUTE_READONLY;
       if (!SetFileAttributesW(wpath, attr)) {
-        err = GetLastError();
-        if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) {
-          // The file disappeared, or one of its parent directories disappeared,
-          // or one of its parent directories is no longer a directory.
-          return DeletePathResult::kDoesNotExist;
-        }
-        // Some unknown error occurred.
-        if (error) {
-          *error = MakeErrorMessage(WSTR(__FILE__), __LINE__,
-                                    L"SetFileAttributesW", path, err);
-        }
-        return DeletePathResult::kError;
+        return GetResultFromErrorCode(L"SetFileAttributesW", path,
+                                      GetLastError(), error);
       }
-
-      if (!DeleteFileW(wpath)) {
-        // Failed to delete the file again.
-        err = GetLastError();
-        if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) {
-          // The file disappeared, or one of its parent directories disappeared,
-          // or one of its parent directories is no longer a directory.
-          return DeletePathResult::kDoesNotExist;
-        }
-
-        // Some unknown error occurred.
-        if (error) {
-          *error = MakeErrorMessage(WSTR(__FILE__), __LINE__, L"DeleteFileW",
-                                    path, err);
-        }
-        return DeletePathResult::kError;
-      }
-    } else {
-      if (error) {
-        *error = MakeErrorMessage(
-            WSTR(__FILE__), __LINE__,
-            (std::wstring(L"Unknown error, winpath=[") + winpath + L"]")
-                .c_str(),
-            path, err);
-      }
-      return DeletePathResult::kError;
+    }
+    if (!DeleteFileW(wpath)) {
+      // Failed to delete the file or symlink.
+      return GetResultFromErrorCode(L"DeleteFileW", path,
+                                    GetLastError(), error);
     }
   }
+
   return DeletePathResult::kSuccess;
+}
+
+template <typename C>
+std::basic_string<C> NormalizeImpl(const std::basic_string<C>& p) {
+  if (p.empty()) {
+    return p;
+  }
+  typedef std::basic_string<C> Str;
+  static const Str kDot(1, '.');
+  static const Str kDotDot(2, '.');
+  std::vector<std::pair<Str::size_type, Str::size_type> > segments;
+  Str::size_type seg_start = Str::npos;
+  bool first = true;
+  bool abs = false;
+  bool starts_with_dot = false;
+  for (Str::size_type i = HasUncPrefix(p.c_str()) ? 4 : 0; i <= p.size(); ++i) {
+    if (seg_start == Str::npos) {
+      if (i < p.size() && p[i] != '/' && p[i] != '\\') {
+        seg_start = i;
+      }
+    } else {
+      if (i == p.size() || (p[i] == '/' || p[i] == '\\')) {
+        // The current character ends a segment.
+        Str::size_type len = i - seg_start;
+        if (first) {
+          first = false;
+          abs = len == 2 &&
+                ((p[seg_start] >= 'A' && p[seg_start] <= 'Z') ||
+                 (p[seg_start] >= 'a' && p[seg_start] <= 'z')) &&
+                p[seg_start + 1] == ':';
+          segments.push_back(std::make_pair(seg_start, len));
+          starts_with_dot = !abs && p.compare(seg_start, len, kDot) == 0;
+        } else {
+          if (p.compare(seg_start, len, kDot) == 0) {
+            if (segments.empty()) {
+              // Retain "." if that is the first (and possibly only segment).
+              segments.push_back(std::make_pair(seg_start, len));
+              starts_with_dot = true;
+            }
+          } else {
+            if (starts_with_dot) {
+              // Delete the existing "." if that was the only path segment.
+              segments.clear();
+              starts_with_dot = false;
+            }
+            if (p.compare(seg_start, len, kDotDot) == 0) {
+              if (segments.empty() ||
+                  p.compare(segments.back().first, segments.back().second,
+                            kDotDot) == 0) {
+                // Preserve ".." if the path is relative and there are only ".."
+                // segment(s) at the front.
+                segments.push_back(std::make_pair(seg_start, len));
+              } else if (!abs || segments.size() > 1) {
+                // Remove the last segment unless the path is already at the
+                // root directory.
+                segments.pop_back();
+              }  // Ignore ".." otherwise.
+            } else {
+              // This is a normal path segment, i.e. neither "." nor ".."
+              segments.push_back(std::make_pair(seg_start, len));
+            }
+          }
+        }
+        // Indicate that there's no segment started.
+        seg_start = Str::npos;
+      }
+    }
+  }
+  std::basic_stringstream<C> res;
+  first = true;
+  for (const auto& i : segments) {
+    Str s = p.substr(i.first, i.second);
+    if (first) {
+      first = false;
+    } else {
+      res << '\\';
+    }
+    res << s;
+  }
+  if (abs && segments.size() == 1) {
+    res << '\\';
+  }
+  return res.str();
+}
+
+std::string Normalize(const std::string& p) { return NormalizeImpl(p); }
+
+std::wstring Normalize(const std::wstring& p) { return NormalizeImpl(p); }
+
+bool GetCwd(std::wstring* result, DWORD* err_code) {
+  // Maximum path is 32767 characters, with null terminator that is 0x8000.
+  static constexpr DWORD kMaxPath = 0x8000;
+  WCHAR buf[kMaxPath];
+  DWORD len = GetCurrentDirectoryW(kMaxPath, buf);
+  if (len > 0 && len < kMaxPath) {
+    *result = buf;
+    return true;
+  } else {
+    if (err_code) {
+      *err_code = GetLastError();
+    }
+    return false;
+  }
 }
 
 }  // namespace windows

@@ -17,8 +17,10 @@ import static java.util.Comparator.comparing;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
+import com.google.common.eventbus.AllowConcurrentEvents;
 import com.google.common.eventbus.EventBus;
 import com.google.common.eventbus.Subscribe;
+import com.google.devtools.build.lib.bugreport.BugReport;
 import com.google.devtools.build.lib.clock.BlazeClock;
 import com.google.devtools.build.lib.clock.Clock;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadSafe;
@@ -103,35 +105,47 @@ public final class ActionExecutionStatusReporter {
     actionStatus.put(action, Pair.of(message, clock.nanoTime()));
   }
 
-  /**
-   * Remove action from the list of active actions.
-   */
+  /** Remove action from the list of active actions. Action must be present. */
   public void remove(Action action) {
-    Preconditions.checkNotNull(actionStatus.remove(action), action);
+    Pair<String, Long> status = actionStatus.remove(action);
+    if (status == null) {
+      BugReport.sendBugReport(
+          new IllegalStateException("Action not present: " + action.prettyPrint()));
+    }
   }
 
   @Subscribe
+  @AllowConcurrentEvents
   public void updateStatus(ActionStartedEvent event) {
     ActionExecutionMetadata action = event.getAction();
     setStatus(action, PREPARING_MESSAGE);
   }
 
   @Subscribe
-  public void updateStatus(AnalyzingActionEvent event) {
+  @AllowConcurrentEvents
+  public void updateStatus(ScanningActionEvent event) {
     ActionExecutionMetadata action = event.getActionMetadata();
-    setStatus(action, "Analyzing");
+    setStatus(action, "Scanning");
   }
 
   @Subscribe
+  @AllowConcurrentEvents
   public void updateStatus(SchedulingActionEvent event) {
     ActionExecutionMetadata action = event.getActionMetadata();
     setStatus(action, "Scheduling");
   }
 
   @Subscribe
+  @AllowConcurrentEvents
   public void updateStatus(RunningActionEvent event) {
     ActionExecutionMetadata action = event.getActionMetadata();
     setStatus(action, String.format("Running (%s)", event.getStrategy()));
+  }
+
+  @Subscribe
+  @AllowConcurrentEvents
+  public void updateStatus(StoppedScanningActionEvent event) {
+    remove(event.getAction());
   }
 
   public int getCount() {

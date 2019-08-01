@@ -26,13 +26,15 @@ import com.google.devtools.build.lib.analysis.RuleContext;
 import com.google.devtools.build.lib.analysis.Runfiles;
 import com.google.devtools.build.lib.analysis.TransitiveInfoCollection;
 import com.google.devtools.build.lib.analysis.actions.SymlinkAction;
-import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
+import com.google.devtools.build.lib.analysis.config.CoreOptionConverters.StrictDepsMode;
 import com.google.devtools.build.lib.analysis.configuredtargets.RuleConfiguredTarget.Mode;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.events.Location;
 import com.google.devtools.build.lib.packages.BuildType;
+import com.google.devtools.build.lib.packages.RuleClass.ConfiguredTargetFactory.RuleErrorException;
+import com.google.devtools.build.lib.syntax.Type;
 import com.google.devtools.build.lib.util.Pair;
 import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.lib.vfs.PathFragment;
@@ -45,6 +47,11 @@ public class ProtoCommon {
   private ProtoCommon() {
     throw new UnsupportedOperationException();
   }
+
+  // Keep in sync with the migration label in
+  // https://github.com/bazelbuild/rules_proto/blob/master/proto/defs.bzl.
+  private static final String PROTO_RULES_MIGRATION_LABEL =
+      "__PROTO_RULES_MIGRATION_DO_NOT_USE_WILL_BREAK__";
 
   /**
    * Gets the direct sources of a proto library. If protoSources is not empty, the value is just
@@ -194,29 +201,22 @@ public class ProtoCommon {
   // TODO(lberki): This should really be a PathFragment. Unfortunately, it's on the Starlark API of
   // ProtoInfo so it's not an easy change :(
   @Nullable
-  private static Library getProtoSourceRoot(
+  private static Library createLibraryWithoutVirtualSourceRoot(
       RuleContext ruleContext, ImmutableList<Artifact> directSources) {
-    String protoSourceRoot = computeEffectiveProtoSourceRoot(ruleContext);
-    if (ruleContext.hasErrors()) {
-      return null;
-    }
-
-    // This is the same as getPackageIdentifier().getPathUnderExecRoot() due to the check above for
-    // protoSourceRoot == package name, but it's a bit more future-proof.
-    String result =
+    String protoSourceRoot =
         ruleContext
             .getLabel()
             .getPackageIdentifier()
             .getRepository()
             .getPathUnderExecRoot()
-            .getRelative(protoSourceRoot)
             .getPathString();
 
     ImmutableList.Builder<Pair<Artifact, String>> builder = ImmutableList.builder();
     for (Artifact protoSource : directSources) {
       builder.add(new Pair<Artifact, String>(protoSource, null));
     }
-    return new Library(directSources, result.isEmpty() ? "." : result, builder.build());
+    return new Library(
+        directSources, protoSourceRoot.isEmpty() ? "." : protoSourceRoot, builder.build());
   }
 
   private static PathFragment getPathFragmentAttribute(
@@ -243,44 +243,99 @@ public class ProtoCommon {
    * Returns the {@link Library} representing this <code>proto_library</code> rule if import prefix
    * munging is done. Otherwise, returns null.
    */
-  private static Library createVirtualImportDirectoryMaybe(
-      RuleContext ruleContext, ImmutableList<Artifact> protoSources) {
-    PathFragment importPrefix = getPathFragmentAttribute(ruleContext, "import_prefix");
-    PathFragment stripImportPrefix = getPathFragmentAttribute(ruleContext, "strip_import_prefix");
+  private static Library createLibraryWithVirtualSourceRootMaybe(
+      RuleContext ruleContext,
+      ImmutableList<Artifact> protoSources,
+      boolean generatedProtosInVirtualImports) {
+    PathFragment importPrefixAttribute = getPathFragmentAttribute(ruleContext, "import_prefix");
+    PathFragment stripImportPrefixAttribute =
+        getPathFragmentAttribute(ruleContext, "strip_import_prefix");
+    PathFragment protoSourceRootAttribute =
+        getPathFragmentAttribute(ruleContext, "proto_source_root");
+    boolean hasGeneratedSources = false;
 
-    if (importPrefix == null && stripImportPrefix == null) {
+    if (generatedProtosInVirtualImports) {
+      for (Artifact protoSource : protoSources) {
+        if (!protoSource.isSourceArtifact()) {
+          hasGeneratedSources = true;
+          break;
+        }
+      }
+    }
+
+    if (importPrefixAttribute == null
+        && stripImportPrefixAttribute == null
+        && protoSourceRootAttribute == null
+        && !hasGeneratedSources) {
       // Simple case, no magic required.
       return null;
     }
 
-    if (!ruleContext.attributes().get("proto_source_root", STRING).isEmpty()) {
+    if (protoSourceRootAttribute != null
+        && (importPrefixAttribute != null || stripImportPrefixAttribute != null)) {
       ruleContext.ruleError(
           "the 'proto_source_root' attribute is incompatible with "
               + "'strip_import_prefix' and 'import_prefix");
       return null;
     }
 
-    if (stripImportPrefix == null) {
-      stripImportPrefix = PathFragment.EMPTY_FRAGMENT;
-    } else if (stripImportPrefix.isAbsolute()) {
-      stripImportPrefix =
-          ruleContext
-              .getLabel()
-              .getPackageIdentifier()
-              .getRepository()
-              .getSourceRoot()
-              .getRelative(stripImportPrefix.toRelative());
-    } else {
-      stripImportPrefix = ruleContext.getPackageDirectory().getRelative(stripImportPrefix);
-    }
+    PathFragment stripImportPrefix;
+    PathFragment importPrefix;
 
-    if (importPrefix == null) {
+    if (stripImportPrefixAttribute != null || importPrefixAttribute != null) {
+      if (stripImportPrefixAttribute == null) {
+        stripImportPrefix = PathFragment.create(ruleContext.getLabel().getWorkspaceRoot());
+      } else if (stripImportPrefixAttribute.isAbsolute()) {
+        stripImportPrefix =
+            ruleContext
+                .getLabel()
+                .getPackageIdentifier()
+                .getRepository()
+                .getSourceRoot()
+                .getRelative(stripImportPrefixAttribute.toRelative());
+      } else {
+        stripImportPrefix =
+            ruleContext.getPackageDirectory().getRelative(stripImportPrefixAttribute);
+      }
+
+      if (importPrefixAttribute != null) {
+        importPrefix = importPrefixAttribute;
+      } else {
+        importPrefix = PathFragment.EMPTY_FRAGMENT;
+      }
+
+      if (importPrefix.isAbsolute()) {
+        ruleContext.attributeError("import_prefix", "should be a relative path");
+        return null;
+      }
+    } else if (protoSourceRootAttribute != null) {
+      if (!ruleContext.getFragment(ProtoConfiguration.class).enableProtoSourceroot()) {
+        ruleContext.attributeError("proto_source_root", "this attribute is not supported anymore");
+        return null;
+      }
+
+      if (!ruleContext.getLabel().getPackageFragment().equals(protoSourceRootAttribute)) {
+        ruleContext.attributeError(
+            "proto_source_root",
+            "proto_source_root must be the same as the package name ("
+                + ruleContext.getLabel().getPackageName()
+                + ")."
+                + " not '"
+                + protoSourceRootAttribute
+                + "'.");
+
+        return null;
+      }
+
+      stripImportPrefix = ruleContext.getPackageDirectory();
       importPrefix = PathFragment.EMPTY_FRAGMENT;
-    }
+    } else {
+      // Has generated sources, but neither strip_import_prefix nor import_prefix nor
+      // proto_source_root.
+      stripImportPrefix =
+          ruleContext.getLabel().getPackageIdentifier().getRepository().getPathUnderExecRoot();
 
-    if (importPrefix.isAbsolute()) {
-      ruleContext.attributeError("import_prefix", "should be a relative path");
-      return null;
+      importPrefix = PathFragment.EMPTY_FRAGMENT;
     }
 
     ImmutableList.Builder<Artifact> symlinks = ImmutableList.builder();
@@ -296,12 +351,46 @@ public class ProtoCommon {
                 realProtoSource.getExecPathString(), stripImportPrefix.getPathString()));
         continue;
       }
+      Pair<PathFragment, Artifact> importsPair =
+          computeImports(
+              ruleContext, realProtoSource, sourceRootPath, importPrefix, stripImportPrefix);
+      protoSourceImportPair.add(new Pair<>(realProtoSource, importsPair.first.toString()));
+      symlinks.add(importsPair.second);
 
-      PathFragment importPath =
-          importPrefix.getRelative(
-              realProtoSource.getRootRelativePath().relativeTo(stripImportPrefix));
+      if (!ruleContext.getFragment(ProtoConfiguration.class).doNotUseBuggyImportPath()
+          && stripImportPrefixAttribute == null
+          && protoSourceRootAttribute == null
+          && !hasGeneratedSources) {
+        Pair<PathFragment, Artifact> oldImportsPair =
+            computeImports(
+                ruleContext,
+                realProtoSource,
+                sourceRootPath,
+                importPrefix,
+                PathFragment.EMPTY_FRAGMENT);
+        protoSourceImportPair.add(new Pair<>(realProtoSource, oldImportsPair.first.toString()));
+        symlinks.add(oldImportsPair.second);
+      }
+    }
 
-      protoSourceImportPair.add(new Pair<>(realProtoSource, importPath.toString()));
+    String sourceRoot =
+        ruleContext
+            .getBinOrGenfilesDirectory()
+            .getExecPath()
+            .getRelative(sourceRootPath)
+            .getPathString();
+    return new Library(symlinks.build(), sourceRoot, protoSourceImportPair.build());
+  }
+
+  private static Pair<PathFragment, Artifact> computeImports(
+      RuleContext ruleContext,
+      Artifact realProtoSource,
+      PathFragment sourceRootPath,
+      PathFragment importPrefix,
+      PathFragment stripImportPrefix) {
+    PathFragment importPath =
+        importPrefix.getRelative(
+            realProtoSource.getRootRelativePath().relativeTo(stripImportPrefix));
 
       Artifact virtualProtoSource =
           ruleContext.getDerivedArtifact(
@@ -314,16 +403,7 @@ public class ProtoCommon {
               virtualProtoSource,
               "Symlinking virtual .proto sources for " + ruleContext.getLabel()));
 
-      symlinks.add(virtualProtoSource);
-    }
-
-    String sourceRoot =
-        ruleContext
-            .getBinOrGenfilesDirectory()
-            .getExecPath()
-            .getRelative(sourceRootPath)
-            .getPathString();
-    return new Library(symlinks.build(), sourceRoot, protoSourceImportPair.build());
+    return Pair.of(importPath, virtualProtoSource);
   }
 
   /**
@@ -367,29 +447,6 @@ public class ProtoCommon {
     return getProtoSourceRootsOfAttribute(ruleContext, currentProtoSourceRoot, "exports");
   }
 
-  private static String computeEffectiveProtoSourceRoot(RuleContext ruleContext) {
-    if (!ruleContext.attributes().isAttributeValueExplicitlySpecified("proto_source_root")) {
-      return "";
-    }
-
-    if (!ruleContext.getFragment(ProtoConfiguration.class).enableProtoSourceroot()) {
-      ruleContext.attributeError("proto_source_root", "this attribute is not supported anymore");
-      return "";
-    }
-
-    String protoSourceRoot = ruleContext.attributes().get("proto_source_root", STRING);
-    if (!ruleContext.getLabel().getPackageName().equals(protoSourceRoot)) {
-      ruleContext.attributeError(
-          "proto_source_root",
-          "proto_source_root must be the same as the package name ("
-              + ruleContext.getLabel().getPackageName() + ")."
-              + " not '" + protoSourceRoot + "'."
-      );
-    }
-
-    return protoSourceRoot;
-  }
-
   /**
    * Check that .proto files in sources are from the same package. This is done to avoid clashes
    * with the generated sources.
@@ -410,25 +467,46 @@ public class ProtoCommon {
     return ruleContext.getLabel().getPackageIdentifier().equals(source.getPackageIdentifier());
   }
 
+  public static void checkRuleHasValidMigrationTag(RuleContext ruleContext)
+      throws RuleErrorException {
+    if (!ruleContext.getFragment(ProtoConfiguration.class).loadProtoRulesFromBzl()) {
+      return;
+    }
+
+    if (!hasValidMigrationTag(ruleContext)) {
+      ruleContext.ruleError(
+          "The native Protobuf rules are deprecated. Please load "
+              + ruleContext.getRule().getRuleClass()
+              + " from the rules_proto repository."
+              + " See http://github.com/bazelbuild/rules_proto.");
+    }
+  }
+
+  private static boolean hasValidMigrationTag(RuleContext ruleContext) {
+    return ruleContext
+        .attributes()
+        .get("tags", Type.STRING_LIST)
+        .contains(PROTO_RULES_MIGRATION_LABEL);
+  }
+
   /**
    * Creates the {@link ProtoInfo} for the {@code proto_library} rule associated with {@code
    * ruleContext}.
    */
-  public static ProtoInfo createProtoInfo(RuleContext ruleContext) {
+  public static ProtoInfo createProtoInfo(
+      RuleContext ruleContext, boolean generatedProtosInVirtualImports) {
     checkSourceFilesAreInSamePackage(ruleContext);
     ImmutableList<Artifact> directProtoSources =
         ruleContext.getPrerequisiteArtifacts("srcs", Mode.TARGET).list();
-    Library library = createVirtualImportDirectoryMaybe(ruleContext, directProtoSources);
+    Library library =
+        createLibraryWithVirtualSourceRootMaybe(
+            ruleContext, directProtoSources, generatedProtosInVirtualImports);
     if (ruleContext.hasErrors()) {
       return null;
     }
 
     if (library == null) {
-      library = getProtoSourceRoot(ruleContext, directProtoSources);
-    }
-
-    if (ruleContext.hasErrors()) {
-      return null;
+      library = createLibraryWithoutVirtualSourceRoot(ruleContext, directProtoSources);
     }
 
     NestedSet<Artifact> transitiveProtoSources =
@@ -462,6 +540,7 @@ public class ProtoCommon {
     ProtoInfo protoInfo =
         new ProtoInfo(
             library.getSources(),
+            directProtoSources,
             library.getSourceRoot(),
             transitiveProtoSources,
             transitiveProtoSourceRoots,
@@ -584,9 +663,7 @@ public class ProtoCommon {
    */
   @VisibleForTesting
   public static boolean areDepsStrict(RuleContext ruleContext) {
-    BuildConfiguration.StrictDepsMode flagValue =
-        ruleContext.getFragment(ProtoConfiguration.class).strictProtoDeps();
-    return flagValue != BuildConfiguration.StrictDepsMode.OFF
-        && flagValue != BuildConfiguration.StrictDepsMode.DEFAULT;
+    StrictDepsMode flagValue = ruleContext.getFragment(ProtoConfiguration.class).strictProtoDeps();
+    return flagValue != StrictDepsMode.OFF && flagValue != StrictDepsMode.DEFAULT;
   }
 }

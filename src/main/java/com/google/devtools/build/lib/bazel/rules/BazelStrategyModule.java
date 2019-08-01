@@ -22,9 +22,8 @@ import com.google.devtools.build.lib.exec.ExecutionOptions;
 import com.google.devtools.build.lib.exec.ExecutorBuilder;
 import com.google.devtools.build.lib.exec.SpawnCache;
 import com.google.devtools.build.lib.remote.RemoteModule;
-import com.google.devtools.build.lib.remote.RemoteOptions;
+import com.google.devtools.build.lib.remote.options.RemoteOptions;
 import com.google.devtools.build.lib.rules.android.WriteAdbArgsActionContext;
-import com.google.devtools.build.lib.rules.cpp.CppCompileActionContext;
 import com.google.devtools.build.lib.rules.cpp.CppIncludeExtractionContext;
 import com.google.devtools.build.lib.rules.cpp.CppIncludeScanningContext;
 import com.google.devtools.build.lib.runtime.BlazeModule;
@@ -71,6 +70,7 @@ public class BazelStrategyModule extends BlazeModule {
       builder.addStrategyByMnemonic("Javac", ImmutableList.of("worker"));
       builder.addStrategyByMnemonic("Closure", ImmutableList.of("worker"));
       builder.addStrategyByMnemonic("DexBuilder", ImmutableList.of("worker"));
+      builder.addStrategyByMnemonic("Desugar", ImmutableList.of("worker"));
 
       // The --spawn_strategy= flag is a bit special: If it's set to the empty string, we actually
       // have to pass a literal empty string to the builder to trigger the "use the strategy that
@@ -95,7 +95,6 @@ public class BazelStrategyModule extends BlazeModule {
     }
 
     builder
-        .addStrategyByContext(CppCompileActionContext.class, "")
         .addStrategyByContext(CppIncludeExtractionContext.class, "")
         .addStrategyByContext(CppIncludeScanningContext.class, "")
         .addStrategyByContext(FileWriteActionContext.class, "")

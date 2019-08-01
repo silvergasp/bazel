@@ -15,7 +15,7 @@
 package com.google.devtools.build.lib.skyframe;
 
 import static com.google.common.truth.Truth.assertThat;
-import static org.junit.Assert.fail;
+import static com.google.devtools.build.lib.testutil.MoreAsserts.assertThrows;
 
 import com.google.common.base.Supplier;
 import com.google.common.base.VerifyException;
@@ -24,7 +24,6 @@ import com.google.common.collect.Collections2;
 import com.google.common.collect.HashMultimap;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.ListMultimap;
 import com.google.common.collect.Multimap;
@@ -50,7 +49,6 @@ import com.google.devtools.build.lib.packages.Attribute;
 import com.google.devtools.build.lib.packages.Package;
 import com.google.devtools.build.lib.packages.RuleClassProvider;
 import com.google.devtools.build.lib.packages.Target;
-import com.google.devtools.build.lib.packages.util.MockCcSupport;
 import com.google.devtools.build.lib.skyframe.util.SkyframeExecutorTestUtils;
 import com.google.devtools.build.lib.testutil.Suite;
 import com.google.devtools.build.lib.testutil.TestSpec;
@@ -148,7 +146,7 @@ public class ConfigurationsForTargetsTest extends AnalysisTestCase {
                 (TargetAndConfiguration) skyKey.argument(),
                 ImmutableList.<Aspect>of(),
                 ImmutableMap.<Label, ConfigMatchingProvider>of(),
-                /*toolchainLabels=*/ ImmutableSet.of(),
+                /*toolchainContext=*/ null,
                 stateProvider.lateBoundRuleClassProvider(),
                 stateProvider.lateBoundHostConfig(),
                 NestedSetBuilder.<Package>stableOrder(),
@@ -219,10 +217,7 @@ public class ConfigurationsForTargetsTest extends AnalysisTestCase {
   @Override
   protected AnalysisMock getAnalysisMock() {
     return new AnalysisMockWithComputeDepsFunction(
-        new LateBoundStateProvider(),
-        () -> {
-          return skyframeExecutor.getDefaultBuildOptions();
-        });
+        new LateBoundStateProvider(), () -> skyframeExecutor.getDefaultBuildOptions());
   }
 
   /** Returns the configured deps for a given target. */
@@ -289,18 +284,22 @@ public class ConfigurationsForTargetsTest extends AnalysisTestCase {
   private void internalTestPutOnlyEntry(Multimap<String, String> map) throws Exception {
     ConfigurationResolver.putOnlyEntry(map, "foo", "bar");
     ConfigurationResolver.putOnlyEntry(map, "baz", "bar");
-    try {
-      ConfigurationResolver.putOnlyEntry(map, "foo", "baz");
-      fail("Expected an exception when trying to add a new value to an existing key");
-    } catch (VerifyException e) {
-      assertThat(e).hasMessage("couldn't insert baz: map already has values for key foo: [bar]");
-    }
-    try {
-      ConfigurationResolver.putOnlyEntry(map, "foo", "bar");
-      fail("Expected an exception when trying to add a pre-existing <key, value> pair");
-    } catch (VerifyException e) {
-      assertThat(e).hasMessage("couldn't insert bar: map already has values for key foo: [bar]");
-    }
+    VerifyException e =
+        assertThrows(
+            "Expected an exception when trying to add a new value to an existing key",
+            VerifyException.class,
+            () -> ConfigurationResolver.putOnlyEntry(map, "foo", "baz"));
+    assertThat(e)
+        .hasMessageThat()
+        .isEqualTo("couldn't insert baz: map already has values for key foo: [bar]");
+    e =
+        assertThrows(
+            "Expected an exception when trying to add a pre-existing <key, value> pair",
+            VerifyException.class,
+            () -> ConfigurationResolver.putOnlyEntry(map, "foo", "bar"));
+    assertThat(e)
+        .hasMessageThat()
+        .isEqualTo("couldn't insert bar: map already has values for key foo: [bar]");
   }
 
   @Test
@@ -345,17 +344,15 @@ public class ConfigurationsForTargetsTest extends AnalysisTestCase {
     if (defaultFlags().contains(Flag.TRIMMED_CONFIGURATIONS)) {
       return;
     }
-    getAnalysisMock()
-        .ccSupport()
-        .setupCrosstool(
-            mockToolsConfig,
-            /* appendToCurrentToolchain= */ false,
-            MockCcSupport.emptyToolchainForCpu("armeabi-v7a"));
+    getAnalysisMock().ccSupport().setupCcToolchainConfigForCpu(mockToolsConfig, "armeabi-v7a");
     scratch.file(
         "java/a/BUILD",
         "cc_library(name = 'lib', srcs = ['lib.cc'])",
         "android_binary(name='a', manifest = 'AndroidManifest.xml', deps = [':lib'])");
-    useConfiguration("--fat_apk_cpu=k8,armeabi-v7a");
+    // Force tests to use aapt to unblock global aapt2 migration, until these
+    // tests are migrated to use aapt2.
+    // TODO(jingwen): https://github.com/bazelbuild/bazel/issues/6907
+    useConfiguration("--fat_apk_cpu=k8,armeabi-v7a", "--android_aapt=aapt");
     List<ConfiguredTarget> deps = getConfiguredDeps("//java/a:a", "deps");
     assertThat(deps).hasSize(2);
     ConfiguredTarget dep1 = deps.get(0);

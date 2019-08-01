@@ -23,19 +23,13 @@ import static com.google.devtools.build.lib.syntax.Type.STRING;
 import com.google.devtools.build.lib.analysis.BaseRuleClasses;
 import com.google.devtools.build.lib.analysis.RuleDefinition;
 import com.google.devtools.build.lib.analysis.RuleDefinitionEnvironment;
-import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
+import com.google.devtools.build.lib.analysis.config.ExecutionTransitionFactory;
 import com.google.devtools.build.lib.analysis.config.HostTransition;
 import com.google.devtools.build.lib.packages.Attribute;
-import com.google.devtools.build.lib.packages.Attribute.ComputedDefault;
-import com.google.devtools.build.lib.packages.Attribute.LabelLateBoundDefault;
 import com.google.devtools.build.lib.packages.AttributeMap;
 import com.google.devtools.build.lib.packages.BuildType;
 import com.google.devtools.build.lib.packages.RuleClass;
 import com.google.devtools.build.lib.packages.RuleClass.Builder.RuleClassType;
-import com.google.devtools.build.lib.packages.RuleClass.ExecutionPlatformConstraintsAllowed;
-import com.google.devtools.build.lib.rules.cpp.CppConfiguration;
-import com.google.devtools.build.lib.rules.cpp.CppRuleClasses;
-import com.google.devtools.build.lib.syntax.Type;
 import com.google.devtools.build.lib.util.FileTypeSet;
 
 /**
@@ -44,50 +38,6 @@ import com.google.devtools.build.lib.util.FileTypeSet;
  * as a setup script target.
  */
 public class GenRuleBaseRule implements RuleDefinition {
-  public static boolean enableCcToolchain(BuildConfiguration configuration) {
-    CppConfiguration cppConfiguration = configuration.getFragment(CppConfiguration.class);
-    if (cppConfiguration != null) {
-      return enableCcToolchain(cppConfiguration);
-    }
-    return true;
-  }
-
-  public static boolean enableCcToolchain(CppConfiguration cppConfiguration) {
-    return !cppConfiguration.disableGenruleCcToolchainDependency();
-  }
-
-  /**
-   * Late-bound dependency on the C++ toolchain <i>iff</i> the genrule has make variables that need
-   * that toolchain.
-   */
-  public static LabelLateBoundDefault<?> ccToolchainAttribute(RuleDefinitionEnvironment env) {
-    return LabelLateBoundDefault.fromTargetConfiguration(
-        CppConfiguration.class,
-        env.getToolsLabel(CppRuleClasses.CROSSTOOL_LABEL),
-        // null guards are needed for LateBoundAttributeTest
-        (rule, attributes, cppConfig) -> {
-          if (!enableCcToolchain(cppConfig)) {
-            return null;
-          }
-          return attributes != null
-                  && attributes.get("cmd", Type.STRING) != null
-                  && GenRuleBase.requiresCrosstool(attributes.get("cmd", Type.STRING))
-              ? CppRuleClasses.ccToolchainAttribute(env).resolve(rule, attributes, cppConfig)
-              : null;
-        });
-  }
-
-  /** Computed dependency on the C++ toolchain type. */
-  public static ComputedDefault ccToolchainTypeAttribute(RuleDefinitionEnvironment env) {
-    return new ComputedDefault("cmd") {
-      @Override
-      public Object getDefault(AttributeMap rule) {
-        return GenRuleBase.requiresCrosstool(rule.get("cmd", Type.STRING))
-            ? CppRuleClasses.ccToolchainTypeAttribute(env)
-            : null;
-      }
-    };
-  }
 
   @Override
   public RuleClass build(
@@ -133,8 +83,31 @@ public class GenRuleBaseRule implements RuleDefinition {
         <!-- #END_BLAZE_RULE.ATTRIBUTE --> */
         .add(
             attr("tools", LABEL_LIST)
-                .cfg(HostTransition.INSTANCE)
+                .cfg(HostTransition.createFactory())
                 .allowedFileTypes(FileTypeSet.ANY_FILE))
+
+        /* <!-- #BLAZE_RULE(genrule).ATTRIBUTE(exec_tools) -->
+        A list of <i>tool</i> dependencies for this rule. This behaves exactly like the
+        <a href="#genrule.tools"><code>tools</code></a> attribute, except that these dependencies
+        will be configured for the rule's execution platform instead of the host configuration.
+        This means that dependencies in <code>exec_tools</code> are not subject to the same
+        limitations as dependencies in <code>tools</code>. In particular, they are not required to
+        use the host configuration for their own transitive dependencies. See
+        <a href="#genrule.tools"><code>tools</code></a> for further details.
+
+        <p>
+          Note that eventually the host configuration will be replaced by the execution
+          configuration. When that happens, this attribute will be deprecated in favor of
+          <code>tools</code>. Until then, this attribute allows users to selectively migrate
+          dependencies to the execution configuration.
+        </p>
+        <!-- #END_BLAZE_RULE.ATTRIBUTE --> */
+        .add(
+            attr("exec_tools", LABEL_LIST)
+                .cfg(new ExecutionTransitionFactory())
+                .allowedFileTypes(FileTypeSet.ANY_FILE)
+                .dontCheckConstraints())
+
         /* <!-- #BLAZE_RULE(genrule).ATTRIBUTE(outs) -->
         A list of files generated by this rule.
         <p>
@@ -193,8 +166,93 @@ public class GenRuleBaseRule implements RuleDefinition {
             </a> in this document for a list of supported values.
           </li>
         </ul>
+        <p>
+        This is the fallback of `cmd_bash`, `cmd_ps` and `cmd_bat`, if none of them are applicable.
+        </p>
+        <p>
+        If the command line length exceeds the platform limit (64K on Linux/macOS, 8K on Windows),
+        then genrule will write the command to a script and execute that script to work around. This
+        applies to all cmd attributes (`cmd`, `cmd_bash`, `cmd_ps`, `cmd_bat`).
+        </p>
         <!-- #END_BLAZE_RULE.ATTRIBUTE --> */
-        .add(attr("cmd", STRING).mandatory())
+        .add(attr("cmd", STRING))
+
+        /* <!-- #BLAZE_RULE(genrule).ATTRIBUTE(cmd_bash) -->
+        The Bash command to run.
+        <p> This attribute has higher priority than `cmd`. The command is expanded and runs in
+            the exact same way as the `cmd` attribute.
+        </p>
+        <!-- #END_BLAZE_RULE.ATTRIBUTE --> */
+        .add(attr("cmd_bash", STRING))
+
+        /* <!-- #BLAZE_RULE(genrule).ATTRIBUTE(cmd_bat) -->
+        The Batch command to run on Windows.
+        <p> This attribute has higher priority than `cmd` and `cmd_bash`. The command runs in
+            the similar way as the `cmd` attribute, with the following differences:
+        </p>
+        <ul>
+          <li>
+            This command only applies on Windows.
+          </li>
+          <li>
+            The command runs with `cmd.exe /c` with the following default arguments:
+            <ul>
+              <li>
+                `/S` - strip first and last quotes and execute everything else as is.
+              </li>
+              <li>
+                `/E:ON` - enable extended command set.
+              </li>
+              <li>
+                `/V:ON` - enable delayed variable expansion
+              </li>
+              <li>
+                `/D` - ignore AutoRun registry entries.
+              </li>
+            </ul>
+          </li>
+          <li>
+            After <a href="${link make-variables#location}">$(location)</a> and
+            <a href="${link make-variables}">"Make" variable</a> substitution, the paths will be
+            expanded to Windows style paths (with backslash).
+          </li>
+        </ul>
+        <!-- #END_BLAZE_RULE.ATTRIBUTE --> */
+        .add(attr("cmd_bat", STRING))
+
+        /* <!-- #BLAZE_RULE(genrule).ATTRIBUTE(cmd_ps) -->
+        The Powershell command to run on Windows.
+        <p> This attribute has higher priority than `cmd`, `cmd_bash` and `cmd_bat`. The command
+            runs in the similar way as the `cmd` attribute, with the following differences:
+        </p>
+        <ul>
+          <li>
+            This command only applies on Windows.
+          </li>
+          <li>
+            The command runs with `powershell.exe /c`.
+          </li>
+        </ul>
+        <p> To make Powershell easier to use and less error-prone, we run the following
+            commands to set up the environment before executing Powershell command in genrule.
+        </p>
+        <ul>
+          <li>
+            `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` is set to allow running unsigned
+            scripts.
+          </li>
+          <li>
+            In case there are multiple commands separated by `;`, `$errorActionPreference='Stop';`
+            is set so that the action exits immediately if a CmdLet fails, but this doesn't work for
+            external command.
+          </li>
+          <li>
+            `$PSDefaultParameterValues['*:Encoding'] = 'utf8'` is set to change the default
+            encoding from utf-16 to utf-8.
+          </li>
+        </ul>
+        <!-- #END_BLAZE_RULE.ATTRIBUTE --> */
+        .add(attr("cmd_ps", STRING))
 
         /* <!-- #BLAZE_RULE(genrule).ATTRIBUTE(output_to_bindir) -->
         <p>
@@ -276,7 +334,6 @@ public class GenRuleBaseRule implements RuleDefinition {
         .add(attr("heuristic_label_expansion", BOOLEAN).value(false))
         .removeAttribute("data")
         .removeAttribute("deps")
-        .executionPlatformConstraintsAllowed(ExecutionPlatformConstraintsAllowed.PER_TARGET)
         .build();
   }
 

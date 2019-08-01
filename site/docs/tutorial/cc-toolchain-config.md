@@ -31,7 +31,7 @@ libraries have been installed.
 Set up your build environment as follows:
 
 1.  If you have not already done so,
-   [download and install Bazel 0.23](install-ubuntu.html) or later.
+   [download and install Bazel 0.23](../install-ubuntu.html) or later.
 
 2.  Download the
     [example C++ project](https://github.com/bazelbuild/examples/tree/master/cpp-tutorial/stage1)
@@ -156,7 +156,6 @@ using an older release of Bazel, look for the "Configuring CROSSTOOL" tutorial.
         toolchain_config = ":asmjs_toolchain_config",
         all_files = ":empty",
         compiler_files = ":empty",
-        cpu = "asmjs",
         dwp_files = ":empty",
         linker_files = ":empty",
         objcopy_files = ":empty",
@@ -186,7 +185,7 @@ using an older release of Bazel, look for the "Configuring CROSSTOOL" tutorial.
 
     `CcToolchainConfigInfo` is a provider that we use to configure our C++
     toolchains. We are going to create a Starlark rule that will provide
-    `CcToolchainConfigInfo`. Create a `toolchains/cc_toolchain_config.bzl`
+    `CcToolchainConfigInfo`. Create a `toolchain/cc_toolchain_config.bzl`
     file with the following content:
     ```
     def _impl(ctx):
@@ -244,7 +243,7 @@ using an older release of Bazel, look for the "Configuring CROSSTOOL" tutorial.
     # toolchain/cc_toolchain_config.bzl:
     load("@bazel_tools//tools/cpp:cc_toolchain_config_lib.bzl", "tool_path")
 
-    def impl(ctx):
+    def _impl(ctx):
         tool_paths = [
             tool_path(
                 name = "gcc",
@@ -276,7 +275,7 @@ using an older release of Bazel, look for the "Configuring CROSSTOOL" tutorial.
             ),
             tool_path(
                 name = "strip",
-                path: "/bin/false",
+                path = "/bin/false",
             ),
         ]
         return cc_common.create_cc_toolchain_config_info(
@@ -289,7 +288,7 @@ using an older release of Bazel, look for the "Configuring CROSSTOOL" tutorial.
             compiler = "emscripten",
             abi_version = "unknown",
             abi_libc_version = "unknown",
-            tool_paths = tools,
+            tool_paths = tool_paths,
         )
     ```
 
@@ -318,14 +317,14 @@ using an older release of Bazel, look for the "Configuring CROSSTOOL" tutorial.
     http_archive(
       name = 'emscripten_toolchain',
       url = 'https://github.com/kripken/emscripten/archive/1.37.22.tar.gz',
-      build_file = 'emscripten-toolchain.BUILD',
+      build_file = '//:emscripten-toolchain.BUILD',
       strip_prefix = "emscripten-1.37.22",
     )
 
     http_archive(
       name = 'emscripten_clang',
       url = 'https://s3.amazonaws.com/mozilla-games/emscripten/packages/llvm/tag/linux_64bit/emscripten-llvm-e1.37.22.tar.gz',
-      build_file = 'emscripten-clang.BUILD',
+      build_file = '//:emscripten-clang.BUILD',
       strip_prefix = "emscripten-llvm-e1.37.22",
     )
     ```
@@ -333,6 +332,13 @@ using an older release of Bazel, look for the "Configuring CROSSTOOL" tutorial.
     In the workspace directory root, create the `emscripten-toolchain.BUILD` and
     `emscripten-clang.BUILD` files that expose these repositories as filegroups
     and establish their visibility across the build.
+
+    In the workspace directory root, make sure that a `BUILD` file is present.
+    If not, create an empty one.
+
+    ```
+    touch BUILD
+    ```
 
     First create the `emscripten-toolchain.BUILD` file with the following
     contents:
@@ -570,16 +576,16 @@ using an older release of Bazel, look for the "Configuring CROSSTOOL" tutorial.
              flag_sets = [
                  flag_set(
                      actions = [
-                         "ACTION_NAMES.assemble",
-                         "ACTION_NAMES.preprocess_assemble",
-                         "ACTION_NAMES.linkstamp_compile",
-                         "ACTION_NAMES.c_compile",
-                         "ACTION_NAMES.cpp_compile",
-                         "ACTION_NAMES.cpp_header_parsing",
-                         "ACTION_NAMES.cpp_module_compile",
-                         "ACTION_NAMES.cpp_module_codegen",
-                         "ACTION_NAMES.lto_backend",
-                         "ACTION_NAMES.clif_match",
+                         ACTION_NAMES.assemble,
+                         ACTION_NAMES.preprocess_assemble,
+                         ACTION_NAMES.linkstamp_compile,
+                         ACTION_NAMES.c_compile,
+                         ACTION_NAMES.cpp_compile,
+                         ACTION_NAMES.cpp_header_parsing,
+                         ACTION_NAMES.cpp_module_compile,
+                         ACTION_NAMES.cpp_module_codegen,
+                         ACTION_NAMES.lto_backend,
+                         ACTION_NAMES.clif_match,
                      ],
                      flag_groups = [
                          flag_group(

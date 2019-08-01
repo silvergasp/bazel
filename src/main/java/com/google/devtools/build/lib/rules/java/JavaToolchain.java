@@ -53,6 +53,7 @@ public class JavaToolchain implements RuleConfiguredTargetFactory {
   @Override
   public ConfiguredTarget create(RuleContext ruleContext)
       throws InterruptedException, RuleErrorException, ActionConflictException {
+    JavaCommon.checkRuleLoadedThroughMacro(ruleContext);
     ImmutableList<String> javacopts = getJavacOpts(ruleContext);
     NestedSet<Artifact> bootclasspath =
         PrerequisiteArtifacts.nestedSet(ruleContext, "bootclasspath", Mode.HOST);
@@ -81,29 +82,43 @@ public class JavaToolchain implements RuleConfiguredTargetFactory {
         getCompatibleJavacOptions(ruleContext);
 
     NestedSet<Artifact> tools = PrerequisiteArtifacts.nestedSet(ruleContext, "tools", Mode.HOST);
+    if (javac != null) {
+      tools = NestedSetBuilder.fromNestedSet(tools).add(javac).build();
+    }
 
     TransitiveInfoCollection javacDep = ruleContext.getPrerequisite("javac", Mode.HOST);
-    ImmutableList<String> jvmOpts =
-        getJvmOpts(
-            ruleContext,
-            ImmutableMap.<Label, ImmutableCollection<Artifact>>of(
-                AliasProvider.getDependencyLabel(javacDep), ImmutableList.of(javac)));
+
+    ImmutableMap.Builder<Label, ImmutableCollection<Artifact>> locationsBuilder =
+        ImmutableMap.builder();
+    if (javacDep != null) {
+      locationsBuilder.put(AliasProvider.getDependencyLabel(javacDep), ImmutableList.of(javac));
+    }
+    ImmutableMap<Label, ImmutableCollection<Artifact>> locations = locationsBuilder.build();
+
+    ImmutableList<String> jvmOpts = getJvmOpts(ruleContext, locations, "jvm_opts");
+    ImmutableList<String> javabuilderJvmOpts =
+        ImmutableList.<String>builder()
+            .addAll(jvmOpts)
+            .addAll(getJvmOpts(ruleContext, locations, "javabuilder_jvm_opts"))
+            .build();
 
     ImmutableList<JavaPackageConfigurationProvider> packageConfiguration =
         ImmutableList.copyOf(
             ruleContext.getPrerequisites(
                 "package_configuration", Mode.HOST, JavaPackageConfigurationProvider.class));
 
-    JavaConfiguration configuration = ruleContext.getFragment(JavaConfiguration.class);
+    FilesToRunProvider jacocoRunner =
+        ruleContext.getExecutablePrerequisite("jacocorunner", Mode.HOST);
+
     JavaToolchainProvider provider =
         JavaToolchainProvider.create(
             ruleContext.getLabel(),
             javacopts,
             jvmOpts,
+            javabuilderJvmOpts,
             javacSupportsWorkers,
             bootclasspath,
             extclasspath,
-            configuration.getDefaultJavacFlags(),
             javac,
             tools,
             javabuilder,
@@ -119,6 +134,7 @@ public class JavaToolchain implements RuleConfiguredTargetFactory {
             ijar,
             compatibleJavacOptions,
             packageConfiguration,
+            jacocoRunner,
             semantics);
     RuleConfiguredTargetBuilder builder =
         new RuleConfiguredTargetBuilder(ruleContext)
@@ -160,7 +176,9 @@ public class JavaToolchain implements RuleConfiguredTargetFactory {
   }
 
   private static ImmutableList<String> getJvmOpts(
-      RuleContext ruleContext, ImmutableMap<Label, ImmutableCollection<Artifact>> locations) {
-    return ruleContext.getExpander().withExecLocations(locations).list("jvm_opts");
+      RuleContext ruleContext,
+      ImmutableMap<Label, ImmutableCollection<Artifact>> locations,
+      String attribute) {
+    return ruleContext.getExpander().withExecLocations(locations).list(attribute);
   }
 }

@@ -177,8 +177,8 @@ static NSMutableDictionary<NSString *, XcodeVersionEntry *> *FindXcodes()
           url, version, expandedVersion);
 
     NSURL *versionPlistUrl = [url URLByAppendingPathComponent:@"Contents/version.plist"];
-    NSDictionary *versionPlistContents = [[NSDictionary alloc] initWithContentsOfURL:versionPlistUrl
-                                                                               error:nil];
+    NSDictionary *versionPlistContents =
+        [[NSDictionary alloc] initWithContentsOfURL:versionPlistUrl];
     NSString *productVersion = [versionPlistContents objectForKey:@"ProductBuildVersion"];
     if (productVersion) {
       expandedVersion = [expandedVersion stringByAppendingFormat:@".%@", productVersion];

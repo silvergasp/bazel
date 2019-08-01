@@ -30,6 +30,7 @@ import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.ArtifactRoot;
 import com.google.devtools.build.lib.analysis.ActionsProvider;
 import com.google.devtools.build.lib.analysis.AliasProvider;
+import com.google.devtools.build.lib.analysis.BashCommandConstructor;
 import com.google.devtools.build.lib.analysis.CommandHelper;
 import com.google.devtools.build.lib.analysis.ConfigurationMakeVariableContext;
 import com.google.devtools.build.lib.analysis.DefaultInfo;
@@ -63,6 +64,7 @@ import com.google.devtools.build.lib.packages.OutputFile;
 import com.google.devtools.build.lib.packages.Package;
 import com.google.devtools.build.lib.packages.Provider;
 import com.google.devtools.build.lib.packages.RawAttributeMapper;
+import com.google.devtools.build.lib.packages.RuleClass.ConfiguredTargetFactory.RuleErrorException;
 import com.google.devtools.build.lib.packages.StructImpl;
 import com.google.devtools.build.lib.packages.StructProvider;
 import com.google.devtools.build.lib.shell.ShellUtils;
@@ -156,7 +158,7 @@ public final class SkylarkRuleContext implements SkylarkRuleContextApi {
       RuleContext ruleContext,
       @Nullable AspectDescriptor aspectDescriptor,
       StarlarkSemantics starlarkSemantics)
-      throws EvalException, InterruptedException {
+      throws EvalException, InterruptedException, RuleErrorException {
     this.actionFactory = new SkylarkActionFactory(this, starlarkSemantics, ruleContext);
     this.ruleContext = Preconditions.checkNotNull(ruleContext);
     this.ruleLabelCanonicalName = ruleContext.getLabel().getCanonicalForm();
@@ -261,7 +263,11 @@ public final class SkylarkRuleContext implements SkylarkRuleContextApi {
       this.ruleAttributesCollection = ruleBuilder.build();
     }
 
-    makeVariables = ruleContext.getConfigurationMakeVariableContext().collectMakeVariables();
+    try {
+      makeVariables = ruleContext.getConfigurationMakeVariableContext().collectMakeVariables();
+    } catch (ExpansionException e) {
+      throw ruleContext.throwWithRuleError(e.getMessage());
+    }
   }
 
   /**
@@ -422,45 +428,45 @@ public final class SkylarkRuleContext implements SkylarkRuleContextApi {
 
     ImmutableMap.Builder<String, Object> splitAttrInfos = ImmutableMap.builder();
     for (Attribute attr : attributes) {
+      if (!attr.getTransitionFactory().isSplit() || attr.hasStarlarkDefinedTransition()) {
+        continue;
+      }
+      Map<Optional<String>, ? extends List<? extends TransitiveInfoCollection>> splitPrereqs =
+          ruleContext.getSplitPrerequisites(attr.getName());
 
-      if (attr.hasSplitConfigurationTransition()) {
+      Map<Object, Object> splitPrereqsMap = new LinkedHashMap<>();
+      for (Map.Entry<Optional<String>, ? extends List<? extends TransitiveInfoCollection>>
+          splitPrereq : splitPrereqs.entrySet()) {
 
-        Map<Optional<String>, ? extends List<? extends TransitiveInfoCollection>> splitPrereqs =
-            ruleContext.getSplitPrerequisites(attr.getName());
-
-        Map<Object, Object> splitPrereqsMap = new LinkedHashMap<>();
-        for (Map.Entry<Optional<String>, ? extends List<? extends TransitiveInfoCollection>>
-            splitPrereq : splitPrereqs.entrySet()) {
-
-          Object value;
-          if (attr.getType() == BuildType.LABEL) {
-            Preconditions.checkState(splitPrereq.getValue().size() == 1);
-            value = splitPrereq.getValue().get(0);
-          } else {
-            // BuildType.LABEL_LIST
-            value = SkylarkList.createImmutable(splitPrereq.getValue());
-          }
-
-          if (splitPrereq.getKey().isPresent()) {
-            splitPrereqsMap.put(splitPrereq.getKey().get(), value);
-          } else {
-            // If the split transition is not in effect, then the key will be missing since there's
-            // nothing to key on because the dependencies aren't split and getSplitPrerequisites()
-            // behaves like getPrerequisites(). This also means there should be only one entry in
-            // the map. Use None in Skylark to represent this.
-            Preconditions.checkState(splitPrereqs.size() == 1);
-            splitPrereqsMap.put(Runtime.NONE, value);
-          }
+        Object value;
+        if (attr.getType() == BuildType.LABEL) {
+          Preconditions.checkState(splitPrereq.getValue().size() == 1);
+          value = splitPrereq.getValue().get(0);
+        } else {
+          // BuildType.LABEL_LIST
+          value = SkylarkList.createImmutable(splitPrereq.getValue());
         }
 
-        splitAttrInfos.put(attr.getPublicName(), SkylarkDict.copyOf(null, splitPrereqsMap));
+        if (splitPrereq.getKey().isPresent()) {
+          splitPrereqsMap.put(splitPrereq.getKey().get(), value);
+        } else {
+          // If the split transition is not in effect, then the key will be missing since there's
+          // nothing to key on because the dependencies aren't split and getSplitPrerequisites()
+          // behaves like getPrerequisites(). This also means there should be only one entry in
+          // the map. Use None in Skylark to represent this.
+          Preconditions.checkState(splitPrereqs.size() == 1);
+          splitPrereqsMap.put(Runtime.NONE, value);
+        }
       }
+
+      splitAttrInfos.put(attr.getPublicName(), SkylarkDict.copyOf(null, splitPrereqsMap));
     }
 
     return StructProvider.STRUCT.create(
         splitAttrInfos.build(),
-        "No attribute '%s' in split_attr. Make sure that this attribute is defined with a "
-            + "split configuration.");
+        "No attribute '%s' in split_attr. This attribute is either not defined with a split"
+            + " configuration OR is defined with a Starlark split transition, the results of which"
+            + " cannot be accessed from split_attr.");
   }
 
   @Override
@@ -578,8 +584,6 @@ public final class SkylarkRuleContext implements SkylarkRuleContextApi {
     return ruleContext.getHostConfiguration();
   }
 
-  // TODO(juliexxia): special-case label-typed build settings so they return the providers of the
-  // target represented by the label instead of the actual label.
   @Override
   @Nullable
   public Object getBuildSettingValue() throws EvalException {
@@ -890,6 +894,7 @@ public final class SkylarkRuleContext implements SkylarkRuleContextApi {
           .run(
               outputs,
               inputs,
+              /*unusedInputsList=*/ Runtime.NONE,
               executableUnchecked,
               toolsUnchecked,
               arguments,
@@ -915,7 +920,8 @@ public final class SkylarkRuleContext implements SkylarkRuleContextApi {
               envUnchecked,
               executionRequirementsUnchecked,
               inputManifestsUnchecked,
-              loc);
+              loc,
+              env.getSemantics());
     }
     return Runtime.NONE;
   }
@@ -1062,15 +1068,15 @@ public final class SkylarkRuleContext implements SkylarkRuleContextApi {
                 String.class,
                 "execution_requirements"));
     PathFragment shExecutable = ShToolchain.getPathOrError(ruleContext);
-    List<String> argv =
-        helper.buildCommandLine(
+
+    BashCommandConstructor constructor =
+        CommandHelper.buildBashCommandConstructor(
+            executionRequirements,
             shExecutable,
-            command,
-            inputs,
             // Hash the command-line to prevent multiple actions from the same rule invocation
             // conflicting with each other.
-            "." + Hashing.murmur3_32().hashUnencodedChars(command).toString() + SCRIPT_SUFFIX,
-            executionRequirements);
+            "." + Hashing.murmur3_32().hashUnencodedChars(command).toString() + SCRIPT_SUFFIX);
+    List<String> argv = helper.buildCommandLine(command, inputs, constructor);
     return Tuple.<Object>of(
         MutableList.copyOf(env, inputs),
         MutableList.copyOf(env, argv),

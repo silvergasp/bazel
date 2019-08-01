@@ -44,7 +44,6 @@
 #include <string>
 
 #include "src/main/cpp/blaze_util.h"
-#include "src/main/cpp/global_variables.h"
 #include "src/main/cpp/startup_options.h"
 #include "src/main/cpp/util/errors.h"
 #include "src/main/cpp/util/exit_code.h"
@@ -141,43 +140,48 @@ static void handler(int signum) {
       if (++sigint_count >= 3) {
         SigPrintf(
             "\n%s caught third interrupt signal; killed.\n\n",
-            SignalHandler::Get().GetGlobals()->options->product_name.c_str());
-        if (SignalHandler::Get().GetGlobals()->server_pid != -1) {
+            SignalHandler::Get().GetProductName().c_str());
+        if (SignalHandler::Get().GetServerProcessInfo()->server_pid_ != -1) {
           KillServerProcess(
-              SignalHandler::Get().GetGlobals()->server_pid,
-              SignalHandler::Get().GetGlobals()->options->output_base);
+              SignalHandler::Get().GetServerProcessInfo()->server_pid_,
+              SignalHandler::Get().GetOutputBase());
         }
         _exit(1);
       }
       SigPrintf(
           "\n%s caught interrupt signal; shutting down.\n\n",
-          SignalHandler::Get().GetGlobals()->options->product_name.c_str());
+          SignalHandler::Get().GetProductName().c_str());
       SignalHandler::Get().CancelServer();
       break;
     case SIGTERM:
       SigPrintf(
           "\n%s caught terminate signal; shutting down.\n\n",
-          SignalHandler::Get().GetGlobals()->options->product_name.c_str());
+          SignalHandler::Get().GetProductName().c_str());
       SignalHandler::Get().CancelServer();
       break;
     case SIGPIPE:
       signal_handler_received_signal = SIGPIPE;
       break;
     case SIGQUIT:
-      SigPrintf("\nSending SIGQUIT to JVM process %d (see %s).\n\n",
-                SignalHandler::Get().GetGlobals()->server_pid,
-                SignalHandler::Get().GetGlobals()->jvm_log_file.c_str());
-      kill(SignalHandler::Get().GetGlobals()->server_pid, SIGQUIT);
+      SigPrintf(
+          "\nSending SIGQUIT to JVM process %d (see %s).\n\n",
+          SignalHandler::Get().GetServerProcessInfo()->server_pid_,
+          SignalHandler::Get().GetServerProcessInfo()->jvm_log_file_.c_str());
+      kill(SignalHandler::Get().GetServerProcessInfo()->server_pid_, SIGQUIT);
       break;
   }
 
   errno = saved_errno;
 }
 
-void SignalHandler::Install(GlobalVariables* globals,
+void SignalHandler::Install(const string &product_name,
+                            const string &output_base,
+                            const ServerProcessInfo *server_process_info,
                             SignalHandler::Callback cancel_server) {
-  _globals = globals;
-  _cancel_server = cancel_server;
+  product_name_ = product_name;
+  output_base_ = output_base;
+  server_process_info_ = server_process_info;
+  cancel_server_ = cancel_server;
 
   // Unblock all signals.
   sigset_t sigset;
@@ -206,7 +210,7 @@ string GetProcessIdAsString() {
   return ToString(getpid());
 }
 
-string GetHomeDir() { return GetEnv("HOME"); }
+string GetHomeDir() { return GetPathEnv("HOME"); }
 
 string GetJavaBinaryUnderJavabase() { return "bin/java"; }
 
@@ -334,7 +338,8 @@ bool SocketBlazeServerStartup::IsStillAlive() {
 //
 // Returns zero on success or -1 on error, in which case errno is set to the
 // corresponding error details.
-int ConfigureDaemonProcess(posix_spawnattr_t* attrp);
+int ConfigureDaemonProcess(posix_spawnattr_t* attrp,
+                           const StartupOptions &options);
 
 void WriteSystemSpecificProcessIdentifier(
     const string& server_dir, pid_t server_pid);
@@ -346,6 +351,7 @@ int ExecuteDaemon(const string& exe,
                   const bool daemon_output_append,
                   const string& binaries_dir,
                   const string& server_dir,
+                  const StartupOptions &options,
                   BlazeServerStartup** server_startup) {
   const string pid_file = blaze_util::JoinPath(server_dir, kServerPidFile);
   const string daemonize = blaze_util::JoinPath(binaries_dir, "daemonize");
@@ -380,16 +386,16 @@ int ExecuteDaemon(const string& exe,
   posix_spawnattr_t attrp;
   if (posix_spawnattr_init(&attrp) == -1) {
     BAZEL_DIE(blaze_exit_code::INTERNAL_ERROR)
-      << "Failed to create posix_spawnattr: "<< GetLastErrorString();
+        << "Failed to create posix_spawnattr: " << GetLastErrorString();
   }
-  if (ConfigureDaemonProcess(&attrp) == -1) {
+  if (ConfigureDaemonProcess(&attrp, options) == -1) {
     BAZEL_DIE(blaze_exit_code::INTERNAL_ERROR)
-      << "Failed to modify posix_spawnattr: "<< GetLastErrorString();
+        << "Failed to modify posix_spawnattr: " << GetLastErrorString();
   }
 
   pid_t transient_pid;
   if (posix_spawn(&transient_pid, daemonize.c_str(), &file_actions, &attrp,
-      CharPP(daemonize_args).get(), CharPP(env).get()) == -1) {
+                  CharPP(daemonize_args).get(), CharPP(env).get()) == -1) {
     BAZEL_DIE(blaze_exit_code::INTERNAL_ERROR)
       << "Failed to execute JVM via " << daemonize
       << ": " << GetLastErrorString();
@@ -480,6 +486,8 @@ string GetEnv(const string& name) {
   char* result = getenv(name.c_str());
   return result != NULL ? string(result) : "";
 }
+
+string GetPathEnv(const string& name) { return GetEnv(name); }
 
 bool ExistsEnv(const string& name) {
   return getenv(name.c_str()) != NULL;
@@ -698,35 +706,34 @@ string GetUserName() {
 
 bool IsEmacsTerminal() {
   string emacs = GetEnv("EMACS");
-  string inside_emacs = GetEnv("INSIDE_EMACS");
   // GNU Emacs <25.1 (and ~all non-GNU emacsen) set EMACS=t, but >=25.1 doesn't
   // do that and instead sets INSIDE_EMACS=<stuff> (where <stuff> can look like
   // e.g. "25.1.1,comint").  So we check both variables for maximum
   // compatibility.
-  return emacs == "t" || !inside_emacs.empty();
+  return emacs == "t" || ExistsEnv("INSIDE_EMACS");
 }
 
-// Returns true if stderr is connected to a terminal, and it can support color
-// and cursor movement (this is computed heuristically based on the values of
-// environment variables).  The only file handle into which Blaze outputs
-// control characters is stderr, so we only care for the stderr descriptor type.
-bool IsStderrStandardTerminal() {
+bool IsStandardTerminal() {
   string term = GetEnv("TERM");
+  bool isEmacs = IsEmacsTerminal();
+
+  // Emacs 22+ terminal emulation uses 'eterm-color' as its terminfo name and,
+  // more importantly, supports color in terminals.
+  // see https://github.com/emacs-mirror/emacs/blob/master/etc/NEWS.22#L331-L333
+  if (isEmacs && term == "eterm-color") {
+    return true;
+  }
   if (term.empty() || term == "dumb" || term == "emacs" ||
       term == "xterm-mono" || term == "symbolics" || term == "9term" ||
-      IsEmacsTerminal()) {
+      isEmacs) {
     return false;
   }
-  return isatty(STDERR_FILENO);
+  return isatty(STDOUT_FILENO) && isatty(STDERR_FILENO);
 }
 
-// Returns the number of columns of the terminal to which stderr is connected,
-// or $COLUMNS (default 80) if there is no such terminal.  The only file handle
-// into which Blaze outputs formatted messages is stderr, so we only care for
-// width of a terminal connected to the stderr descriptor.
-int GetStderrTerminalColumns() {
+int GetTerminalColumns() {
   struct winsize ws;
-  if (ioctl(STDERR_FILENO, TIOCGWINSZ, &ws) != -1) {
+  if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) != -1) {
     return ws.ws_col;
   }
   string columns_env = GetEnv("COLUMNS");

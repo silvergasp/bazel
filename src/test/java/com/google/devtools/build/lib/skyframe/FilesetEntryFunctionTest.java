@@ -32,6 +32,7 @@ import com.google.devtools.build.lib.actions.FilesetOutputSymlink;
 import com.google.devtools.build.lib.actions.FilesetTraversalParams;
 import com.google.devtools.build.lib.actions.FilesetTraversalParams.PackageBoundaryMode;
 import com.google.devtools.build.lib.actions.FilesetTraversalParamsFactory;
+import com.google.devtools.build.lib.actions.util.ActionsTestUtil;
 import com.google.devtools.build.lib.analysis.BlazeDirectories;
 import com.google.devtools.build.lib.analysis.ServerDirectories;
 import com.google.devtools.build.lib.cmdline.Label;
@@ -58,6 +59,7 @@ import com.google.devtools.build.skyframe.RecordingDifferencer;
 import com.google.devtools.build.skyframe.SequencedRecordingDifferencer;
 import com.google.devtools.build.skyframe.SequentialBuildDriver;
 import com.google.devtools.build.skyframe.SkyFunction;
+import com.google.devtools.build.skyframe.SkyFunctionException;
 import com.google.devtools.build.skyframe.SkyFunctionName;
 import com.google.devtools.build.skyframe.SkyKey;
 import com.google.devtools.build.skyframe.SkyValue;
@@ -106,7 +108,9 @@ public final class FilesetEntryFunctionTest extends FoundationTestCase {
     skyFunctions.put(
         FileStateValue.FILE_STATE,
         new FileStateFunction(
-            new AtomicReference<TimestampGranularityMonitor>(), externalFilesHelper));
+            new AtomicReference<TimestampGranularityMonitor>(),
+            new AtomicReference<>(UnixGlob.DEFAULT_SYSCALLS),
+            externalFilesHelper));
     skyFunctions.put(FileValue.FILE, new FileFunction(pkgLocator));
     skyFunctions.put(SkyFunctions.DIRECTORY_LISTING, new DirectoryListingFunction());
     skyFunctions.put(
@@ -126,7 +130,8 @@ public final class FilesetEntryFunctionTest extends FoundationTestCase {
             /*hardcodedBlacklistedPackagePrefixes=*/ ImmutableSet.of(),
             /*additionalBlacklistedPackagePrefixesFile=*/ PathFragment.EMPTY_FRAGMENT));
     skyFunctions.put(
-        SkyFunctions.FILESET_ENTRY, new FilesetEntryFunction(rootDirectory.asFragment()));
+        SkyFunctions.FILESET_ENTRY, new FilesetEntryFunction((unused) -> rootDirectory));
+    skyFunctions.put(SkyFunctions.WORKSPACE_NAME, new TestWorkspaceNameFunction());
     skyFunctions.put(SkyFunctions.LOCAL_REPOSITORY_LOOKUP, new LocalRepositoryLookupFunction());
 
     differencer = new SequencedRecordingDifferencer();
@@ -137,8 +142,8 @@ public final class FilesetEntryFunctionTest extends FoundationTestCase {
   }
 
   private Artifact getSourceArtifact(String path) throws Exception {
-    return new Artifact(
-        PathFragment.create(path), ArtifactRoot.asSourceRoot(Root.fromPath(rootDirectory)));
+    return ActionsTestUtil.createArtifact(
+        ArtifactRoot.asSourceRoot(Root.fromPath(rootDirectory)), path);
   }
 
   private Artifact createSourceArtifact(String path) throws Exception {
@@ -955,5 +960,21 @@ public final class FilesetEntryFunctionTest extends FoundationTestCase {
             (Set<String>) kwArgs.get("excludes"));
       }
     }.doTest();
+  }
+
+  private static class TestWorkspaceNameFunction implements SkyFunction {
+
+    @Nullable
+    @Override
+    public SkyValue compute(SkyKey skyKey, Environment env)
+        throws SkyFunctionException, InterruptedException {
+      return WorkspaceNameValue.withName("workspace");
+    }
+
+    @Nullable
+    @Override
+    public String extractTag(SkyKey skyKey) {
+      return null;
+    }
   }
 }

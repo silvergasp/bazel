@@ -1,6 +1,6 @@
 package(default_visibility = ["//visibility:public"])
 
-load("//tools/build_defs/pkg:pkg.bzl", "pkg_tar")
+load("@rules_pkg//:pkg.bzl", "pkg_tar")
 
 filegroup(
     name = "srcs",
@@ -22,7 +22,6 @@ filegroup(
         "//third_party/java/j2objc:srcs",
         "//third_party/java/jacoco:srcs",
         "//third_party/java/javapoet:srcs",
-        "//third_party/java/java_tools:srcs",
         "//third_party/java/jcommander:srcs",
         "//third_party/java/jdk/langtools:srcs",
         "//third_party/java/proguard:srcs",
@@ -51,8 +50,6 @@ filegroup(
 filegroup(
     name = "gpl-srcs",
     srcs = [
-        "//third_party/checker_framework_dataflow:srcs",
-        "//third_party/checker_framework_javacutil:srcs",
         "//third_party/jformatstring:srcs",
     ],
 )
@@ -75,6 +72,20 @@ java_import(
     ],
 )
 
+# This target only contains the jars that are used for building / running Bazel.
+# The target below is for the Android tools that are not shipped with Bazel.
+java_import(
+    name = "android_common_25_0_0_lite",
+    jars = [
+        "android_common/com.android.tools.layoutlib_layoutlib_26.1.2-stripped.jar",
+        "android_common/com.android.tools_sdk-common_25.0.0-stripped.jar",
+        "android_common/com.android.tools_repository_25.0.0.jar",
+    ],
+    deps = [
+        "//third_party/jaxb",
+    ],
+)
+
 java_import(
     name = "android_common_25_0_0",
     jars = [
@@ -94,7 +105,6 @@ java_import(
         "android_common/com.android.tools.lint_lint-api_25.0.0.jar",
         "android_common/com.android.tools.lint_lint-checks_25.0.0.jar",
         "android_common/com.android.tools_common_25.0.0.jar",
-        "android_common/com.android.tools_ddmlib_25.0.0.jar",
         "android_common/com.android.tools_dvlib_25.0.0.jar",
         "android_common/com.android.tools_repository_25.0.0.jar",
         "android_common/com.android.tools_sdk-common_25.0.0.jar",
@@ -214,8 +224,8 @@ java_import(
 java_import(
     name = "auth",
     jars = [
-        "auth/google-auth-library-oauth2-http-0.6.0.jar",
-        "auth/google-auth-library-credentials-0.6.0.jar",
+        "auth/google-auth-library-oauth2-http-0.15.0.jar",
+        "auth/google-auth-library-credentials-0.15.0.jar",
     ],
     runtime_deps = [
         ":api_client",
@@ -315,8 +325,24 @@ filegroup(
 )
 
 java_import(
+    name = "byte_buddy",
+    jars = [
+        "bytebuddy/byte-buddy-1.9.7.jar",
+        "bytebuddy/byte-buddy-agent-1.9.7.jar",
+    ],
+)
+
+java_import(
+    name = "checker_framework_annotations",
+    jars = [
+        "checker_framework_annotations/checker-qual-2.6.0.jar",
+        "checker_framework_annotations/checker-compat-qual-2.6.0.jar",
+    ],
+)
+
+java_import(
     name = "compile_testing",
-    jars = ["compile_testing/compile-testing-0.13.jar"],
+    jars = ["compile_testing/compile-testing-0.18.jar"],
 )
 
 java_import(
@@ -430,8 +456,8 @@ java_import(
 java_import(
     name = "opencensus-api",
     jars = [
-        "opencensus/opencensus-api-0.11.0.jar",
-        "opencensus/opencensus-contrib-grpc-metrics-0.11.0.jar",
+        "opencensus/opencensus-api-0.19.2.jar",
+        "opencensus/opencensus-contrib-grpc-metrics-0.19.2.jar",
     ],
 )
 
@@ -491,14 +517,36 @@ java_import(
     ],
 )
 
+UNNECESSARY_DYNAMIC_LIBRARIES = select({
+    "//src/conditions:windows": "*.so *.jnilib",
+    "//src/conditions:darwin": "*.so *.dll",
+    "//src/conditions:darwin_x86_64": "*.so *.dll",
+    "//src/conditions:linux_x86_64": "*.jnilib *.dll",
+    # The .so file is an x86 one, so we can just remove it if the CPU is not x86
+    "//src/conditions:arm": "*.so *.jnilib *.dll",
+    "//src/conditions:linux_aarch64": "*.so *.jnilib *.dll",
+    # Play it safe -- better have a big binary than a slow binary
+    # zip -d does require an argument. Supply something bogus.
+    "//conditions:default": "*.bogusextension",
+})
+
+# Remove native libraries that are for a platform different from the one we are
+# building Bazel for.
+genrule(
+    name = "filter_netty_dynamic_libs",
+    srcs = ["netty_tcnative/netty-tcnative-boringssl-static-2.0.24.Final.jar"],
+    outs = ["netty_tcnative/netty-tcnative-filtered.jar"],
+    cmd = "cp $< $@ && zip -qd $@ " + UNNECESSARY_DYNAMIC_LIBRARIES,
+)
+
 java_import(
     name = "netty",
-    jars = ["netty/netty-all-4.1.17.Final.jar"],
+    jars = ["netty/netty-all-4.1.34.Final.jar"],
 )
 
 java_import(
     name = "netty_tcnative",
-    jars = ["netty_tcnative/netty-tcnative-boringssl-static-2.0.7.Final.jar"],
+    jars = ["netty_tcnative/netty-tcnative-filtered.jar"],
 )
 
 java_import(
@@ -557,8 +605,9 @@ java_import(
 
 java_import(
     name = "mockito",
-    jars = ["mockito/mockito-all-1.10.19.jar"],
+    jars = ["mockito/mockito-core-2.25.1.jar"],
     deps = [
+        ":byte_buddy",
         ":objenesis",
     ],
 )
@@ -580,15 +629,15 @@ java_import(
 
 java_import(
     name = "truth",
-    jars = ["truth/truth-0.42.jar"],
-    runtime_deps = [
+    jars = ["truth/truth-0.45.jar"],
+    deps = [
         ":diffutils",
     ],
 )
 
 java_import(
     name = "truth8",
-    jars = ["truth8/truth-java8-extension-0.42.jar"],
+    jars = ["truth8/truth-java8-extension-0.45.jar"],
 )
 
 java_import(
@@ -603,20 +652,6 @@ filegroup(
         "hamcrest/hamcrest-core-1.3.jar",
         "junit/junit-4.12.jar",
     ],
-)
-
-pkg_tar(
-    name = "java_tools_pkg-gz",
-    srcs = [
-        "//third_party/java/java_tools",
-        "//third_party/java/jdk/langtools:java_compiler_jar",
-        "//third_party/java/jdk/langtools:javac_jar",
-        "//third_party/java/jdk/langtools:jdk_compiler_jar",
-    ],
-    extension = "tar.gz",
-    # Permissions -rwxr-xr-x
-    mode = "755",
-    package_dir = "java_tools",
 )
 
 load(":compiler_config_setting.bzl", "create_compiler_config_setting")

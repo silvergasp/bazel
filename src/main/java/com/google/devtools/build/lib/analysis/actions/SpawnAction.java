@@ -18,7 +18,6 @@ import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.CharMatcher;
 import com.google.common.base.Joiner;
 import com.google.common.base.Preconditions;
-import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
@@ -56,7 +55,6 @@ import com.google.devtools.build.lib.actions.ResourceSet;
 import com.google.devtools.build.lib.actions.RunfilesSupplier;
 import com.google.devtools.build.lib.actions.SingleStringArgFormatter;
 import com.google.devtools.build.lib.actions.Spawn;
-import com.google.devtools.build.lib.actions.SpawnActionContext;
 import com.google.devtools.build.lib.actions.SpawnContinuation;
 import com.google.devtools.build.lib.actions.SpawnResult;
 import com.google.devtools.build.lib.actions.extra.EnvironmentVariable;
@@ -67,7 +65,6 @@ import com.google.devtools.build.lib.analysis.TransitiveInfoCollection;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
-import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.events.Location;
 import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
 import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec.VisibleForSerialization;
@@ -75,6 +72,7 @@ import com.google.devtools.build.lib.syntax.EvalException;
 import com.google.devtools.build.lib.syntax.SkylarkList;
 import com.google.devtools.build.lib.util.Fingerprint;
 import com.google.devtools.build.lib.util.LazyString;
+import com.google.devtools.build.lib.util.Pair;
 import com.google.devtools.build.lib.util.ShellEscaper;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.errorprone.annotations.CompileTimeConstant;
@@ -85,6 +83,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Consumer;
 import javax.annotation.CheckReturnValue;
 import javax.annotation.Nullable;
 
@@ -112,6 +111,7 @@ public class SpawnAction extends AbstractAction implements ExecutionInfoSpecifie
 
   private final ExtraActionInfoSupplier extraActionInfoSupplier;
   private final Artifact primaryOutput;
+  private final Consumer<Pair<ActionExecutionContext, List<SpawnResult>>> resultConsumer;
 
   /**
    * Constructs a SpawnAction using direct initialization arguments.
@@ -164,6 +164,7 @@ public class SpawnAction extends AbstractAction implements ExecutionInfoSpecifie
         EmptyRunfilesSupplier.INSTANCE,
         mnemonic,
         false,
+        null,
         null);
   }
 
@@ -195,7 +196,7 @@ public class SpawnAction extends AbstractAction implements ExecutionInfoSpecifie
       ActionOwner owner,
       Iterable<Artifact> tools,
       Iterable<Artifact> inputs,
-      Iterable<Artifact> outputs,
+      Iterable<? extends Artifact> outputs,
       Artifact primaryOutput,
       ResourceSet resourceSet,
       CommandLines commandLines,
@@ -207,7 +208,8 @@ public class SpawnAction extends AbstractAction implements ExecutionInfoSpecifie
       RunfilesSupplier runfilesSupplier,
       String mnemonic,
       boolean executeUnconditionally,
-      ExtraActionInfoSupplier extraActionInfoSupplier) {
+      ExtraActionInfoSupplier extraActionInfoSupplier,
+      Consumer<Pair<ActionExecutionContext, List<SpawnResult>>> resultConsumer) {
     super(owner, tools, inputs, runfilesSupplier, outputs, env);
     this.primaryOutput = primaryOutput;
     this.resourceSet = resourceSet;
@@ -219,6 +221,7 @@ public class SpawnAction extends AbstractAction implements ExecutionInfoSpecifie
     this.mnemonic = mnemonic;
     this.executeUnconditionally = executeUnconditionally;
     this.extraActionInfoSupplier = extraActionInfoSupplier;
+    this.resultConsumer = resultConsumer;
   }
 
   @Override
@@ -292,53 +295,23 @@ public class SpawnAction extends AbstractAction implements ExecutionInfoSpecifie
   public final ActionContinuationOrResult beginExecution(
       ActionExecutionContext actionExecutionContext)
       throws ActionExecutionException, InterruptedException {
+    Spawn spawn;
     try {
       beforeExecute(actionExecutionContext);
-      Spawn spawn = getSpawn(actionExecutionContext);
-      SpawnActionContext context = actionExecutionContext.getContext(SpawnActionContext.class);
-      SpawnContinuation spawnContinuation = context.beginExecution(spawn, actionExecutionContext);
-      return new SpawnActionContinuation(spawnContinuation, actionExecutionContext);
+      spawn = getSpawn(actionExecutionContext);
     } catch (IOException e) {
-      throw warnUnexpectedIOException(actionExecutionContext, e);
-    } catch (ExecException e) {
-      throw toActionExecutionException(e, actionExecutionContext.getVerboseFailures());
+      throw toActionExecutionException(
+          new EnvironmentalExecException(e), actionExecutionContext.getVerboseFailures());
     } catch (CommandLineExpansionException e) {
       throw new ActionExecutionException(e, this, /*catastrophe=*/ false);
     }
-  }
-
-  @Override
-  public final ActionResult execute(ActionExecutionContext actionExecutionContext)
-      throws ActionExecutionException, InterruptedException {
-    try {
-      beforeExecute(actionExecutionContext);
-      Spawn spawn = getSpawn(actionExecutionContext);
-      List<SpawnResult> spawnResults =
-          actionExecutionContext
-              .getContext(SpawnActionContext.class)
-              .exec(spawn, actionExecutionContext);
-      afterExecute(actionExecutionContext);
-      return ActionResult.create(spawnResults);
-    } catch (IOException e) {
-      throw warnUnexpectedIOException(actionExecutionContext, e);
-    } catch (ExecException e) {
-      throw toActionExecutionException(e, actionExecutionContext.getVerboseFailures());
-    } catch (CommandLineExpansionException e) {
-      throw new ActionExecutionException(e, this, /*catastrophe=*/ false);
-    }
-  }
-
-  private ActionExecutionException warnUnexpectedIOException(
-      ActionExecutionContext actionExecutionContext, IOException e) {
-    // Print the stack trace, otherwise the unexpected I/O error is hard to diagnose.
-    // A stack trace could help with bugs like https://github.com/bazelbuild/bazel/issues/4924
-    String stackTrace = Throwables.getStackTraceAsString(e);
-    actionExecutionContext
-        .getEventHandler()
-        .handle(Event.error("Unexpected I/O exception:\n" + stackTrace));
-    return toActionExecutionException(
-        new EnvironmentalExecException("unexpected I/O exception", e),
-        actionExecutionContext.getVerboseFailures());
+    // This construction ensures that beginExecution and execute are called with identical exception
+    // handling, pre-processing, and post-processing, at the expense of two throwaway objects.
+    SpawnActionContinuation continuation =
+        new SpawnActionContinuation(
+            actionExecutionContext,
+            SpawnContinuation.ofBeginExecution(spawn, actionExecutionContext));
+    return continuation.execute();
   }
 
   private ActionExecutionException toActionExecutionException(
@@ -607,7 +580,6 @@ public class SpawnAction extends AbstractAction implements ExecutionInfoSpecifie
     private final NestedSetBuilder<Artifact> inputsBuilder = NestedSetBuilder.stableOrder();
     private final List<Artifact> outputs = new ArrayList<>();
     private final List<RunfilesSupplier> inputRunfilesSuppliers = new ArrayList<>();
-    private final List<RunfilesSupplier> toolRunfilesSuppliers = new ArrayList<>();
     private ResourceSet resourceSet = AbstractAction.DEFAULT_RESOURCE_SET;
     private ActionEnvironment actionEnvironment = null;
     private ImmutableMap<String, String> environment = ImmutableMap.of();
@@ -624,6 +596,8 @@ public class SpawnAction extends AbstractAction implements ExecutionInfoSpecifie
     protected ExtraActionInfoSupplier extraActionInfoSupplier = null;
     private boolean disableSandboxing = false;
 
+    private Consumer<Pair<ActionExecutionContext, List<SpawnResult>>> resultConsumer = null;
+
     /**
      * Creates a SpawnAction builder.
      */
@@ -637,7 +611,6 @@ public class SpawnAction extends AbstractAction implements ExecutionInfoSpecifie
       this.inputsBuilder.addTransitive(other.inputsBuilder.build());
       this.outputs.addAll(other.outputs);
       this.inputRunfilesSuppliers.addAll(other.inputRunfilesSuppliers);
-      this.toolRunfilesSuppliers.addAll(other.toolRunfilesSuppliers);
       this.resourceSet = other.resourceSet;
       this.actionEnvironment = other.actionEnvironment;
       this.environment = other.environment;
@@ -752,8 +725,7 @@ public class SpawnAction extends AbstractAction implements ExecutionInfoSpecifie
               ? executionInfo
               : configuration.modifiedExecutionInfo(executionInfo, mnemonic),
           progressMessage,
-          new CompositeRunfilesSupplier(
-              Iterables.concat(this.inputRunfilesSuppliers, this.toolRunfilesSuppliers)),
+          CompositeRunfilesSupplier.fromSuppliers(this.inputRunfilesSuppliers),
           mnemonic);
     }
 
@@ -789,7 +761,8 @@ public class SpawnAction extends AbstractAction implements ExecutionInfoSpecifie
           runfilesSupplier,
           mnemonic,
           executeUnconditionally,
-          extraActionInfoSupplier);
+          extraActionInfoSupplier,
+          resultConsumer);
     }
 
     /**
@@ -1095,7 +1068,7 @@ public class SpawnAction extends AbstractAction implements ExecutionInfoSpecifie
      */
     public Builder addTool(FilesToRunProvider tool) {
       addTransitiveTools(tool.getFilesToRun());
-      toolRunfilesSuppliers.add(tool.getRunfilesSupplier());
+      addRunfilesSupplier(tool.getRunfilesSupplier());
       return this;
     }
 
@@ -1292,6 +1265,12 @@ public class SpawnAction extends AbstractAction implements ExecutionInfoSpecifie
       this.disableSandboxing = true;
       return this;
     }
+
+    public Builder addResultConsumer(
+        Consumer<Pair<ActionExecutionContext, List<SpawnResult>>> resultConsumer) {
+      this.resultConsumer = resultConsumer;
+      return this;
+    }
   }
 
   /**
@@ -1344,13 +1323,13 @@ public class SpawnAction extends AbstractAction implements ExecutionInfoSpecifie
   }
 
   private final class SpawnActionContinuation extends ActionContinuationOrResult {
-    private final SpawnContinuation spawnContinuation;
     private final ActionExecutionContext actionExecutionContext;
+    private final SpawnContinuation spawnContinuation;
 
     public SpawnActionContinuation(
-        SpawnContinuation spawnContinuation, ActionExecutionContext actionExecutionContext) {
-      this.spawnContinuation = spawnContinuation;
+        ActionExecutionContext actionExecutionContext, SpawnContinuation spawnContinuation) {
       this.actionExecutionContext = actionExecutionContext;
+      this.spawnContinuation = spawnContinuation;
     }
 
     @Override
@@ -1364,12 +1343,16 @@ public class SpawnAction extends AbstractAction implements ExecutionInfoSpecifie
       try {
         SpawnContinuation nextContinuation = spawnContinuation.execute();
         if (nextContinuation.isDone()) {
+          if (resultConsumer != null) {
+            resultConsumer.accept(Pair.of(actionExecutionContext, nextContinuation.get()));
+          }
           afterExecute(actionExecutionContext);
           return ActionContinuationOrResult.of(ActionResult.create(nextContinuation.get()));
         }
-        return new SpawnActionContinuation(nextContinuation, actionExecutionContext);
+        return new SpawnActionContinuation(actionExecutionContext, nextContinuation);
       } catch (IOException e) {
-        throw warnUnexpectedIOException(actionExecutionContext, e);
+        throw toActionExecutionException(
+            new EnvironmentalExecException(e), actionExecutionContext.getVerboseFailures());
       } catch (ExecException e) {
         throw toActionExecutionException(e, actionExecutionContext.getVerboseFailures());
       }

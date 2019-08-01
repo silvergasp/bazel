@@ -15,6 +15,13 @@
 package com.google.devtools.build.skydoc.rendering;
 
 import com.google.common.base.Joiner;
+import com.google.devtools.build.skydoc.rendering.proto.StardocOutputProtos.AspectInfo;
+import com.google.devtools.build.skydoc.rendering.proto.StardocOutputProtos.AttributeInfo;
+import com.google.devtools.build.skydoc.rendering.proto.StardocOutputProtos.AttributeType;
+import com.google.devtools.build.skydoc.rendering.proto.StardocOutputProtos.FunctionParamInfo;
+import com.google.devtools.build.skydoc.rendering.proto.StardocOutputProtos.ProviderInfo;
+import com.google.devtools.build.skydoc.rendering.proto.StardocOutputProtos.RuleInfo;
+import com.google.devtools.build.skydoc.rendering.proto.StardocOutputProtos.UserDefinedFunctionInfo;
 import java.util.List;
 import java.util.stream.Collectors;
 
@@ -22,6 +29,14 @@ import java.util.stream.Collectors;
  * Contains a number of utility methods for markdown rendering.
  */
 public final class MarkdownUtil {
+  /**
+   * Return a string that escapes angle brackets for HTML.
+   *
+   * <p>For example: 'Information with <brackets>.' becomes 'Information with &lt;brackets&gt;'.
+   */
+  public String htmlEscape(String docString) {
+    return docString.replace("<", "&lt;").replace(">", "&gt;");
+  }
 
   /**
    * Return a string representing the rule summary for the given rule with the given name.
@@ -31,9 +46,10 @@ public final class MarkdownUtil {
    */
   @SuppressWarnings("unused") // Used by markdown template.
   public String ruleSummary(String ruleName, RuleInfo ruleInfo) {
-    List<String> attributeNames = ruleInfo.getAttributes().stream()
-        .map(attr -> attr.getName())
-        .collect(Collectors.toList());
+    List<String> attributeNames =
+        ruleInfo.getAttributeList().stream()
+            .map(attr -> attr.getName())
+            .collect(Collectors.toList());
     return summary(ruleName, attributeNames);
   }
 
@@ -45,10 +61,25 @@ public final class MarkdownUtil {
    */
   @SuppressWarnings("unused") // Used by markdown template.
   public String providerSummary(String providerName, ProviderInfo providerInfo) {
-    List<String> fieldNames = providerInfo.getFields().stream()
-        .map(field -> field.getName())
-        .collect(Collectors.toList());
+    List<String> fieldNames =
+        providerInfo.getFieldInfoList().stream()
+            .map(field -> field.getName())
+            .collect(Collectors.toList());
     return summary(providerName, fieldNames);
+  }
+
+  /**
+   * Return a string representing the aspect summary for the given aspect with the given name.
+   *
+   * <p>For example: 'my_aspect(foo, bar)'. The summary will contain hyperlinks for each attribute.
+   */
+  @SuppressWarnings("unused") // Used by markdown template.
+  public String aspectSummary(String aspectName, AspectInfo aspectInfo) {
+    List<String> attributeNames =
+        aspectInfo.getAttributeList().stream()
+            .map(attr -> attr.getName())
+            .collect(Collectors.toList());
+    return summary(aspectName, attributeNames);
   }
 
   /**
@@ -59,10 +90,11 @@ public final class MarkdownUtil {
    */
   @SuppressWarnings("unused") // Used by markdown template.
   public String funcSummary(UserDefinedFunctionInfo funcInfo) {
-    List<String> paramNames = funcInfo.getParameters().stream()
-        .map(param -> param.getName())
-        .collect(Collectors.toList());
-    return summary(funcInfo.getName(), paramNames);
+    List<String> paramNames =
+        funcInfo.getParameterList().stream()
+            .map(param -> param.getName())
+            .collect(Collectors.toList());
+    return summary(funcInfo.getFunctionName(), paramNames);
   }
 
   private String summary(String functionName, List<String> paramNames) {
@@ -99,9 +131,57 @@ public final class MarkdownUtil {
         break;
     }
     if (typeLink == null) {
-      return attrInfo.getType().getDescription();
+      return attributeTypeDescription(attrInfo.getType());
     } else {
-      return String.format("<a href=\"%s\">%s</a>", typeLink, attrInfo.getType().getDescription());
+      return String.format(
+          "<a href=\"%s\">%s</a>", typeLink, attributeTypeDescription(attrInfo.getType()));
     }
+  }
+
+  public String mandatoryString(AttributeInfo attrInfo) {
+    return attrInfo.getMandatory() ? "required" : "optional";
+  }
+
+  /**
+   * Returns "required" if providing a value for this parameter is mandatory. Otherwise, returns
+   * "optional".
+   */
+  public String mandatoryString(FunctionParamInfo paramInfo) {
+    return paramInfo.getMandatory() ? "required" : "optional";
+  }
+
+  private String attributeTypeDescription(AttributeType attributeType) {
+    switch (attributeType) {
+      case NAME:
+        return "Name";
+      case INT:
+        return "Integer";
+      case LABEL:
+        return "Label";
+      case STRING:
+        return "String";
+      case STRING_LIST:
+        return "List of strings";
+      case INT_LIST:
+        return "List of integers";
+      case LABEL_LIST:
+        return "List of labels";
+      case BOOLEAN:
+        return "Boolean";
+      case LABEL_STRING_DICT:
+        return "Dictionary: Label -> String";
+      case STRING_DICT:
+        return "Dictionary: String -> String";
+      case STRING_LIST_DICT:
+        return "Dictionary: String -> List of strings";
+      case OUTPUT:
+        return "Label";
+      case OUTPUT_LIST:
+        return "List of labels";
+      case UNKNOWN:
+      case UNRECOGNIZED:
+        throw new IllegalArgumentException("Unhandled type " + attributeType);
+    }
+    throw new IllegalArgumentException("Unhandled type " + attributeType);
   }
 }

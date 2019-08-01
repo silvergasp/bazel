@@ -45,6 +45,7 @@ import com.google.devtools.build.lib.skyframe.AspectValue.AspectKey;
 import com.google.devtools.build.lib.skyframe.Builder;
 import com.google.devtools.build.lib.skyframe.ConfiguredTargetKey;
 import com.google.devtools.build.lib.skyframe.SkyframeExecutor;
+import com.google.devtools.build.lib.skyframe.TopDownActionCache;
 import com.google.devtools.build.lib.util.AbruptExitException;
 import com.google.devtools.build.lib.util.ExitCode;
 import com.google.devtools.build.lib.util.LoggingUtil;
@@ -76,16 +77,19 @@ public class SkyframeBuilder implements Builder {
   private final MetadataProvider fileCache;
   private final ActionInputPrefetcher actionInputPrefetcher;
   private final ActionCacheChecker actionCacheChecker;
+  private final TopDownActionCache topDownActionCache;
 
   @VisibleForTesting
   public SkyframeBuilder(
       SkyframeExecutor skyframeExecutor,
       ActionCacheChecker actionCacheChecker,
+      TopDownActionCache topDownActionCache,
       ModifiedFileSet modifiedOutputFiles,
       MetadataProvider fileCache,
       ActionInputPrefetcher actionInputPrefetcher) {
     this.skyframeExecutor = skyframeExecutor;
     this.actionCacheChecker = actionCacheChecker;
+    this.topDownActionCache = topDownActionCache;
     this.modifiedOutputFiles = modifiedOutputFiles;
     this.fileCache = fileCache;
     this.actionInputPrefetcher = actionInputPrefetcher;
@@ -156,6 +160,7 @@ public class SkyframeBuilder implements Builder {
               exclusiveTests,
               options,
               actionCacheChecker,
+              topDownActionCache,
               executionProgressReceiver,
               topLevelArtifactContext);
       // progressReceiver is finished, so unsynchronized access to builtTargets is now safe.
@@ -165,17 +170,6 @@ public class SkyframeBuilder implements Builder {
               result,
               options.getOptions(KeepGoingOption.class).keepGoing,
               skyframeExecutor);
-
-      Preconditions.checkState(
-          exitCode != null
-              || result.keyNames().size()
-                  == (artifacts.size()
-                      + targetsToBuild.size()
-                      + aspects.size()
-                      + parallelTests.size()),
-          "Build reported as successful but not all artifacts and targets built: %s, %s",
-          result,
-          artifacts);
 
       if (exitCode != null) {
         exitCodes.add(exitCode.orNull());
@@ -194,6 +188,7 @@ public class SkyframeBuilder implements Builder {
                 exclusiveTest,
                 options,
                 actionCacheChecker,
+                topDownActionCache,
                 null,
                 topLevelArtifactContext);
         exitCode =

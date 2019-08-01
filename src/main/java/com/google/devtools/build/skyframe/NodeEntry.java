@@ -13,6 +13,7 @@
 // limitations under the License.
 package com.google.devtools.build.skyframe;
 
+import com.google.common.collect.ImmutableSet;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadSafe;
 import com.google.devtools.build.lib.util.GroupedList;
 import com.google.devtools.build.lib.util.GroupedList.GroupedListHelper;
@@ -106,6 +107,16 @@ public interface NodeEntry extends ThinNodeEntry {
    */
   @ThreadSafe
   Iterable<SkyKey> getDirectDeps() throws InterruptedException;
+
+  /**
+   * Returns the number of groups in this node's direct deps.
+   *
+   * <p>Prefer calling this over {@link #getDirectDeps} if possible.
+   *
+   * <p>This method may only be called after the evaluation of this node is complete.
+   */
+  @ThreadSafe
+  int getNumberOfDirectDepGroups() throws InterruptedException;
 
   /** Removes a reverse dependency. */
   @ThreadSafe
@@ -338,7 +349,7 @@ public interface NodeEntry extends ThinNodeEntry {
    * always produce the same result until the entry finishes evaluation. Contrast with {@link
    * #getAllDirectDepsForIncompleteNode}.
    */
-  Set<SkyKey> getAllRemainingDirtyDirectDeps() throws InterruptedException;
+  ImmutableSet<SkyKey> getAllRemainingDirtyDirectDeps() throws InterruptedException;
 
   /**
    * Whether this entry stores fingerprints of its dep groups, which enables it to change-prune

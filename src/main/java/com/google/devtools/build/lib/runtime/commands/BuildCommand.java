@@ -14,6 +14,7 @@
 package com.google.devtools.build.lib.runtime.commands;
 
 import com.google.devtools.build.lib.analysis.AnalysisOptions;
+import com.google.devtools.build.lib.buildeventstream.BuildEventProtocolOptions;
 import com.google.devtools.build.lib.buildtool.BuildRequest;
 import com.google.devtools.build.lib.buildtool.BuildRequestOptions;
 import com.google.devtools.build.lib.buildtool.BuildTool;
@@ -41,24 +42,24 @@ import java.util.List;
  * passed to Blaze.
  */
 @Command(
-  name = "build",
-  builds = true,
-  options = {
-    BuildRequestOptions.class,
-    ExecutionOptions.class,
-    LocalExecutionOptions.class,
-    PackageCacheOptions.class,
-    AnalysisOptions.class,
-    LoadingOptions.class,
-    KeepGoingOption.class,
-    LoadingPhaseThreadsOption.class
-  },
-  usesConfigurationOptions = true,
-  shortDescription = "Builds the specified targets.",
-  allowResidue = true,
-  completion = "label",
-  help = "resource:build.txt"
-)
+    name = "build",
+    builds = true,
+    options = {
+      BuildRequestOptions.class,
+      ExecutionOptions.class,
+      LocalExecutionOptions.class,
+      PackageCacheOptions.class,
+      AnalysisOptions.class,
+      LoadingOptions.class,
+      KeepGoingOption.class,
+      LoadingPhaseThreadsOption.class,
+      BuildEventProtocolOptions.class
+    },
+    usesConfigurationOptions = true,
+    shortDescription = "Builds the specified targets.",
+    allowResidue = true,
+    completion = "label",
+    help = "resource:build.txt")
 public final class BuildCommand implements BlazeCommand {
 
   @Override
@@ -70,6 +71,7 @@ public final class BuildCommand implements BlazeCommand {
     BlazeRuntime runtime = env.getRuntime();
     List<String> targets;
     try (SilentCloseable closeable = Profiler.instance().profile("ProjectFileSupport.getTargets")) {
+      // only takes {@code options} to get options.getResidue()
       targets = ProjectFileSupport.getTargets(runtime.getProjectFileProvider(), options);
     }
     if (targets.isEmpty()) {
@@ -79,7 +81,9 @@ public final class BuildCommand implements BlazeCommand {
                   "Usage: "
                       + runtime.getProductName()
                       + " build <options> <targets>."
-                      + "\nInvoke `bazel help build` for full description of usage and options."
+                      + "\nInvoke `"
+                      + runtime.getProductName()
+                      + " help build` for full description of usage and options."
                       + "\nYour request is correct, but requested an empty set of targets."
                       + " Nothing will be built."));
     }

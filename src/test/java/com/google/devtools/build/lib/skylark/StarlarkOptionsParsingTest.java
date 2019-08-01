@@ -24,7 +24,6 @@ import com.google.devtools.build.lib.packages.StarlarkSemanticsOptions;
 import com.google.devtools.build.lib.pkgcache.LoadingOptions;
 import com.google.devtools.build.lib.pkgcache.PackageCacheOptions;
 import com.google.devtools.build.lib.runtime.BlazeCommand;
-import com.google.devtools.build.lib.runtime.BlazeCommandEventHandler.Options;
 import com.google.devtools.build.lib.runtime.BlazeCommandResult;
 import com.google.devtools.build.lib.runtime.ClientOptions;
 import com.google.devtools.build.lib.runtime.Command;
@@ -32,6 +31,7 @@ import com.google.devtools.build.lib.runtime.CommandEnvironment;
 import com.google.devtools.build.lib.runtime.CommonCommandOptions;
 import com.google.devtools.build.lib.runtime.KeepGoingOption;
 import com.google.devtools.build.lib.runtime.StarlarkOptionsParser;
+import com.google.devtools.build.lib.runtime.UiOptions;
 import com.google.devtools.build.lib.skylark.util.SkylarkTestCase;
 import com.google.devtools.build.lib.util.ExitCode;
 import com.google.devtools.build.lib.vfs.PathFragment;
@@ -59,14 +59,17 @@ public class StarlarkOptionsParsingTest extends SkylarkTestCase {
           KeepGoingOption.class,
           LoadingOptions.class,
           ClientOptions.class,
-          Options.class,
+          UiOptions.class,
           CommonCommandOptions.class);
 
   @Before
   public void setUp() throws Exception {
     optionsParser =
-        OptionsParser.newOptionsParser(
-            Iterables.concat(requiredOptionsClasses, ruleClassProvider.getConfigurationOptions()));
+        OptionsParser.builder()
+            .optionsClasses(
+                Iterables.concat(
+                    requiredOptionsClasses, ruleClassProvider.getConfigurationOptions()))
+            .build();
     starlarkOptionsParser =
         StarlarkOptionsParser.newStarlarkOptionsParserForTesting(
             skyframeExecutor, reporter, PathFragment.EMPTY_FRAGMENT, optionsParser);
@@ -81,7 +84,7 @@ public class StarlarkOptionsParsingTest extends SkylarkTestCase {
         KeepGoingOption.class,
         LoadingOptions.class,
         ClientOptions.class,
-        Options.class,
+        UiOptions.class,
       },
       allowResidue = true,
       shortDescription =
@@ -198,12 +201,8 @@ public class StarlarkOptionsParsingTest extends SkylarkTestCase {
     assertThat(e).hasMessageThat().contains("Error loading option //fake_flag");
   }
 
-  // test -flag=value (Note - there's currently no way in real life to allow single dash long form
-  // options.)
   @Test
   public void testSingleDash_notAllowed() throws Exception {
-    optionsParser.setAllowSingleDashLongOptions(false);
-
     writeBasicIntFlag();
 
     OptionsParsingResult result = parseStarlarkOptions("-//test:my_int_setting=666");
@@ -247,10 +246,10 @@ public class StarlarkOptionsParsingTest extends SkylarkTestCase {
   public void testBooleanFlag() throws Exception {
     writeBasicBoolFlag();
 
-    OptionsParsingResult result = parseStarlarkOptions("--//test:my_bool_setting");
+    OptionsParsingResult result = parseStarlarkOptions("--//test:my_bool_setting=false");
 
     assertThat(result.getStarlarkOptions()).hasSize(1);
-    assertThat(result.getStarlarkOptions().get("//test:my_bool_setting")).isEqualTo(true);
+    assertThat(result.getStarlarkOptions().get("//test:my_bool_setting")).isEqualTo(false);
     assertThat(result.getResidue()).isEmpty();
   }
 
@@ -395,5 +394,16 @@ public class StarlarkOptionsParsingTest extends SkylarkTestCase {
     assertThat(e)
         .hasMessageThat()
         .isEqualTo("While parsing option //test:my_bool_setting=woohoo: 'woohoo' is not a boolean");
+  }
+
+  // test --int-flag=same value as default
+  @Test
+  public void testDontStoreDefaultValue() throws Exception {
+    // build_setting_default = 42
+    writeBasicIntFlag();
+
+    OptionsParsingResult result = parseStarlarkOptions("--//test:my_int_setting=42");
+
+    assertThat(result.getStarlarkOptions()).isEmpty();
   }
 }

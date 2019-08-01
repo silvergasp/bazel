@@ -70,6 +70,14 @@ public class RepositoryOptions extends OptionsBase {
   public List<PathFragment> experimentalDistdir;
 
   @Option(
+      name = "http_timeout_scaling",
+      defaultValue = "1.0",
+      documentationCategory = OptionDocumentationCategory.BAZEL_CLIENT_OPTIONS,
+      effectTags = {OptionEffectTag.BAZEL_INTERNAL_CONFIGURATION},
+      help = "Scale all timeouts related to http downloads by the given factor")
+  public double httpTimeoutScaling;
+
+  @Option(
     name = "override_repository",
     defaultValue = "null",
     allowMultiple = true,
@@ -124,6 +132,20 @@ public class RepositoryOptions extends OptionsBase {
       effectTags = {OptionEffectTag.CHANGES_INPUTS},
       help = "If non-empty read the specified resolved file instead of the WORKSPACE file")
   public String experimentalResolvedFileInsteadOfWorkspace;
+
+  @Option(
+      name = "incompatible_use_native_patch",
+      defaultValue = "false",
+      documentationCategory = OptionDocumentationCategory.UNCATEGORIZED,
+      effectTags = {OptionEffectTag.LOADING_AND_ANALYSIS},
+      metadataTags = {
+        OptionMetadataTag.INCOMPATIBLE_CHANGE,
+        OptionMetadataTag.TRIGGERED_BY_ALL_INCOMPATIBLE_CHANGES
+      },
+      help =
+          "If enabled, Bazel's repository rules use a native implementation of patch, "
+              + "otherwise Bazel still calls patch command line tool for applying patch files.")
+  public boolean useNativePatch;
 
   /**
    * Converts from an equals-separated pair of strings into RepositoryName->PathFragment mapping.

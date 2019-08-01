@@ -90,6 +90,10 @@ function set_up() {
   export XDG_CONFIG_HOME=
 }
 
+function get_pluto_repo() {
+  echo "$TEST_TMPDIR/repos/pluto"
+}
+
 # Test cloning a Git repository using the git_repository rule.
 #
 # This test uses the pluto Git repository at tag 1-build, which contains the
@@ -119,7 +123,7 @@ function set_up() {
 #
 # //planets has a dependency on a target in the pluto Git repository.
 function do_git_repository_test() {
-  local pluto_repo_dir=$TEST_TMPDIR/repos/pluto
+  local pluto_repo_dir=$(get_pluto_repo)
   # Commit corresponds to tag 1-build. See testdata/pluto.git_log.
   local commit_hash="$1"
   local strip_prefix=""
@@ -128,7 +132,7 @@ function do_git_repository_test() {
   [ $# -eq 3 ] && shallow_since="shallow_since=\"$3\","
   # Create a workspace that clones the repository at the first commit.
   cd $WORKSPACE_DIR
-  cat > WORKSPACE <<EOF
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
 load('@bazel_tools//tools/build_defs/repo:git.bzl', 'git_repository')
 git_repository(
     name = "pluto",
@@ -169,8 +173,9 @@ function test_git_repository_strip_prefix() {
 }
 
 function test_git_repository_shallow_since() {
-    # This date is the day the commit was made.
-    do_git_repository_test "52f9a3f87a2dd17ae0e5847bbae9734f09354afd" "" "2016-07-16"
+    # This date is the previous day before the commit was made.
+    # We need the revious day, because git adds current time to the specified date.
+    do_git_repository_test "52f9a3f87a2dd17ae0e5847bbae9734f09354afd" "" "2015-07-15"
 }
 function test_new_git_repository_with_build_file() {
   do_new_git_repository_test "0-initial" "build_file"
@@ -214,7 +219,7 @@ function test_new_git_repository_with_build_file_content_strip_prefix() {
 # //planets has a dependency on a target in the $TEST_TMPDIR/pluto Git
 # repository.
 function do_new_git_repository_test() {
-  local pluto_repo_dir=$TEST_TMPDIR/repos/pluto
+  local pluto_repo_dir=$(get_pluto_repo)
   local strip_prefix=""
   [ $# -eq 3 ] && strip_prefix="strip_prefix=\"$3\","
 
@@ -222,7 +227,7 @@ function do_new_git_repository_test() {
   cd $WORKSPACE_DIR
 
   if [ "$2" == "build_file" ] ; then
-    cat > WORKSPACE <<EOF
+    cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
 load('@bazel_tools//tools/build_defs/repo:git.bzl', 'new_git_repository')
 new_git_repository(
     name = "pluto",
@@ -244,7 +249,7 @@ filegroup(
 )
 EOF
   else
-    cat > WORKSPACE <<EOF
+    cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
 load('@bazel_tools//tools/build_defs/repo:git.bzl', 'new_git_repository')
 new_git_repository(
     name = "pluto",
@@ -313,7 +318,7 @@ function test_new_git_repository_submodules() {
 
   # Create a workspace that clones the outer_planets repository.
   cd $WORKSPACE_DIR
-  cat > WORKSPACE <<EOF
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
 load('@bazel_tools//tools/build_defs/repo:git.bzl', 'new_git_repository')
 new_git_repository(
     name = "outer_planets",
@@ -370,7 +375,7 @@ function test_git_repository_not_refetched_on_server_restart() {
   local repo_dir=$TEST_TMPDIR/repos/refetch
 
   cd $WORKSPACE_DIR
-  cat > WORKSPACE <<EOF
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
 load('@bazel_tools//tools/build_defs/repo:git.bzl', 'git_repository')
 git_repository(name='g', remote='$repo_dir', commit='22095302abaf776886879efa5129aa4d44c53017', verbose=True)
 EOF
@@ -386,7 +391,8 @@ EOF
   assert_contains "GIT 1" bazel-genfiles/external/g/go
 
   # Change the commit id, which should cause the checkout to be re-cloned.
-  cat > WORKSPACE <<EOF
+  rm WORKSPACE
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
 load('@bazel_tools//tools/build_defs/repo:git.bzl', 'git_repository')
 git_repository(name='g', remote='$repo_dir', commit='db134ae9b644d8237954a8e6f1ef80fcfd85d521', verbose=True)
 EOF
@@ -396,7 +402,8 @@ EOF
   assert_contains "GIT 2" bazel-genfiles/external/g/go
 
   # Change the WORKSPACE but not the commit id, which should not cause the checkout to be re-cloned.
-  cat > WORKSPACE <<EOF
+  rm WORKSPACE
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
 # This comment line is to change the line numbers, which should not cause Bazel
 # to refetch the repository
 load('@bazel_tools//tools/build_defs/repo:git.bzl', 'git_repository')
@@ -411,7 +418,7 @@ EOF
 function test_git_repository_not_refetched_on_server_restart_strip_prefix() {
   local repo_dir=$TEST_TMPDIR/repos/refetch
   # Change the strip_prefix which should cause a new checkout
-  cat > WORKSPACE <<EOF
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
 load('@bazel_tools//tools/build_defs/repo:git.bzl', 'git_repository')
 git_repository(name='g', remote='$repo_dir', commit='17ea13b242e4cbcc27a6ef745939ebb7dcccea10', verbose=True)
 EOF
@@ -419,7 +426,8 @@ EOF
   expect_log "Cloning"
   assert_contains "GIT 2" bazel-genfiles/external/g/gdir/go
 
-  cat > WORKSPACE <<EOF
+  rm WORKSPACE
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
 load('@bazel_tools//tools/build_defs/repo:git.bzl', 'git_repository')
 git_repository(name='g', remote='$repo_dir', commit='17ea13b242e4cbcc27a6ef745939ebb7dcccea10', verbose=True, strip_prefix="gdir")
 EOF
@@ -433,7 +441,7 @@ function test_git_repository_refetched_when_commit_changes() {
   local repo_dir=$TEST_TMPDIR/repos/refetch
 
   cd $WORKSPACE_DIR
-  cat > WORKSPACE <<EOF
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
 load('@bazel_tools//tools/build_defs/repo:git.bzl', 'git_repository')
 git_repository(name='g', remote='$repo_dir', commit='22095302abaf776886879efa5129aa4d44c53017', verbose=True)
 EOF
@@ -443,7 +451,8 @@ EOF
   assert_contains "GIT 1" bazel-genfiles/external/g/go
 
   # Change the commit id, which should cause the checkout to be re-cloned.
-  cat > WORKSPACE <<EOF
+  rm WORKSPACE
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
 load('@bazel_tools//tools/build_defs/repo:git.bzl', 'git_repository')
 git_repository(name='g', remote='$repo_dir', commit='db134ae9b644d8237954a8e6f1ef80fcfd85d521', verbose=True)
 EOF
@@ -457,7 +466,7 @@ function test_git_repository_and_nofetch() {
   local repo_dir=$TEST_TMPDIR/repos/refetch
 
   cd $WORKSPACE_DIR
-  cat > WORKSPACE <<EOF
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
 load('@bazel_tools//tools/build_defs/repo:git.bzl', 'git_repository')
 git_repository(name='g', remote='$repo_dir', commit='22095302abaf776886879efa5129aa4d44c53017')
 EOF
@@ -467,11 +476,11 @@ EOF
   bazel build @g//:g >& $TEST_log || fail "Build failed"
   assert_contains "GIT 1" bazel-genfiles/external/g/go
 
-  cat > WORKSPACE <<EOF
+  rm WORKSPACE
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
 load('@bazel_tools//tools/build_defs/repo:git.bzl', 'git_repository')
 git_repository(name='g', remote='$repo_dir', commit='db134ae9b644d8237954a8e6f1ef80fcfd85d521')
 EOF
-
 
   bazel build --nofetch @g//:g >& $TEST_log || fail "Build failed"
   expect_log "External repository 'g' is not up-to-date"
@@ -479,7 +488,8 @@ EOF
   bazel build  @g//:g >& $TEST_log || fail "Build failed"
   assert_contains "GIT 2" bazel-genfiles/external/g/go
 
-  cat > WORKSPACE <<EOF
+  rm WORKSPACE
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
 load('@bazel_tools//tools/build_defs/repo:git.bzl', 'git_repository')
 git_repository(name='g', remote='$repo_dir', commit='17ea13b242e4cbcc27a6ef745939ebb7dcccea10', strip_prefix="gdir")
 EOF
@@ -526,12 +536,12 @@ EOF
 #   info
 function test_git_repository_both_commit_tag_error() {
   setup_error_test
-  local pluto_repo_dir=$TEST_TMPDIR/repos/pluto
+  local pluto_repo_dir=$(get_pluto_repo)
   # Commit corresponds to tag 1-build. See testdata/pluto.git_log.
   local commit_hash="52f9a3f87a2dd17ae0e5847bbae9734f09354afd"
 
   cd $WORKSPACE_DIR
-  cat > WORKSPACE <<EOF
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
 load('@bazel_tools//tools/build_defs/repo:git.bzl', 'git_repository')
 git_repository(
     name = "pluto",
@@ -557,10 +567,10 @@ EOF
 #   info
 function test_git_repository_no_commit_tag_error() {
   setup_error_test
-  local pluto_repo_dir=$TEST_TMPDIR/repos/pluto
+  local pluto_repo_dir=$(get_pluto_repo)
 
   cd $WORKSPACE_DIR
-  cat > WORKSPACE <<EOF
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
 load('@bazel_tools//tools/build_defs/repo:git.bzl', 'git_repository')
 git_repository(
     name = "pluto",
@@ -577,10 +587,10 @@ EOF
 # throws an error.
 function test_invalid_strip_prefix_error() {
   setup_error_test
-  local pluto_repo_dir=$TEST_TMPDIR/repos/pluto
+  local pluto_repo_dir=$(get_pluto_repo)
 
   cd $WORKSPACE_DIR
-  cat > WORKSPACE <<EOF
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
 load('@bazel_tools//tools/build_defs/repo:git.bzl', 'git_repository')
 git_repository(
     name = "pluto",
@@ -600,10 +610,10 @@ EOF
 #
 function test_git_repository_shallow_since_with_tag_error() {
   setup_error_test
-  local pluto_repo_dir=$TEST_TMPDIR/pluto
+  local pluto_repo_dir=$(get_pluto_repo)
 
   cd $WORKSPACE_DIR
-  cat > WORKSPACE <<EOF
+  cat >> $(create_workspace_with_default_repos WORKSPACE) <<EOF
 load('@bazel_tools//tools/build_defs/repo:git.bzl', 'git_repository')
 git_repository(
     name = "pluto",
@@ -616,31 +626,6 @@ EOF
   bazel fetch //planets:planet-info >& $TEST_log \
     || echo "Expect run to fail."
   expect_log "shallow_since not allowed if a tag is specified; --depth=1 will be used for tags"
-}
-
-# Verifies that rule fails if you target a commit that is before
-# the shallow point
-#
-function test_git_repository_shallow_since_with_earlier_commit_error() {
-  setup_error_test
-  local pluto_repo_dir=$TEST_TMPDIR/pluto
-
-  cd $WORKSPACE_DIR
-  # This commit was made in July so should not be available if we
-  # shallow since December.
-  cat > WORKSPACE <<EOF
-load('@bazel_tools//tools/build_defs/repo:git.bzl', 'git_repository')
-git_repository(
-    name = "pluto",
-    remote = "$pluto_repo_dir",
-    commit = "52f9a3f87a2dd17ae0e5847bbae9734f09354afd",
-    shallow_since = "2017-12-27"
-)
-EOF
-
-  bazel fetch //planets:planet-info >& $TEST_log \
-    || echo "Expect run to fail."
-  expect_log "error cloning"
 }
 
 run_suite "skylark git_repository tests"

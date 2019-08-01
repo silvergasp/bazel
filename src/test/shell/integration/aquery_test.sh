@@ -14,28 +14,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# --- begin runfiles.bash initialization ---
-# Copy-pasted from Bazel's Bash runfiles library (tools/bash/runfiles/runfiles.bash).
-set -euo pipefail
-if [[ ! -d "${RUNFILES_DIR:-/dev/null}" && ! -f "${RUNFILES_MANIFEST_FILE:-/dev/null}" ]]; then
-  if [[ -f "$0.runfiles_manifest" ]]; then
-    export RUNFILES_MANIFEST_FILE="$0.runfiles_manifest"
-  elif [[ -f "$0.runfiles/MANIFEST" ]]; then
-    export RUNFILES_MANIFEST_FILE="$0.runfiles/MANIFEST"
-  elif [[ -f "$0.runfiles/bazel_tools/tools/bash/runfiles/runfiles.bash" ]]; then
-    export RUNFILES_DIR="$0.runfiles"
-  fi
-fi
-if [[ -f "${RUNFILES_DIR:-/dev/null}/bazel_tools/tools/bash/runfiles/runfiles.bash" ]]; then
-  source "${RUNFILES_DIR}/bazel_tools/tools/bash/runfiles/runfiles.bash"
-elif [[ -f "${RUNFILES_MANIFEST_FILE:-/dev/null}" ]]; then
-  source "$(grep -m1 "^bazel_tools/tools/bash/runfiles/runfiles.bash " \
-            "$RUNFILES_MANIFEST_FILE" | cut -d ' ' -f 2-)"
-else
-  echo >&2 "ERROR: cannot find @bazel_tools//tools/bash/runfiles:runfiles.bash"
-  exit 1
-fi
-# --- end runfiles.bash initialization ---
+# --- begin runfiles.bash initialization v2 ---
+# Copy-pasted from the Bazel Bash runfiles library v2.
+set -uo pipefail; f=bazel_tools/tools/bash/runfiles/runfiles.bash
+source "${RUNFILES_DIR:-/dev/null}/$f" 2>/dev/null || \
+  source "$(grep -sm1 "^$f " "${RUNFILES_MANIFEST_FILE:-/dev/null}" | cut -f2- -d' ')" 2>/dev/null || \
+  source "$0.runfiles/$f" 2>/dev/null || \
+  source "$(grep -sm1 "^$f " "$0.runfiles_manifest" | cut -f2- -d' ')" 2>/dev/null || \
+  source "$(grep -sm1 "^$f " "$0.exe.runfiles_manifest" | cut -f2- -d' ')" 2>/dev/null || \
+  { echo>&2 "ERROR: cannot find $f"; exit 1; }; f=; set -e
+# --- end runfiles.bash initialization v2 ---
 
 source "$(rlocation "io_bazel/src/test/shell/integration_test_setup.sh")" \
   || { echo "integration_test_setup.sh not found!" >&2; exit 1; }
@@ -235,7 +223,7 @@ EOF
   bazel aquery --output=text "//$pkg:goo" > output 2> "$TEST_log" \
     || fail "Expected success"
   cat output >> "$TEST_log"
-  assert_contains "Mnemonic: SkylarkAction" output
+  assert_contains "Mnemonic: Action" output
   assert_contains "Target: //$pkg:goo" output
   assert_contains "Environment: \[.*foo=bar" output
 }
@@ -263,7 +251,7 @@ bar_aspect = aspect(implementation = _aspect_impl,
 )
 
 def _bar_impl(ctx):
-    ctx.file_action(content = "hello world", output = ctx.outputs.out)
+    ctx.actions.write(content = "hello world", output = ctx.outputs.out)
     return struct(files = depset(transitive = [dep[DummyProvider].dummies for dep in ctx.attr.deps]))
 
 bar_rule = rule(
@@ -741,7 +729,7 @@ def _impl(ctx):
     outputs = [ctx.outputs.outfile],
     executable = 'dummy',
     arguments = ['--non-param-file-flag', args],
-    mnemonic = 'SkylarkAction'
+    mnemonic = 'Action'
   )
 
 test_rule = rule(
@@ -810,7 +798,7 @@ function test_aquery_cpp_action_template_treeartifact_output() {
   cat > "$pkg/a.bzl" <<'EOF'
 def _impl(ctx):
   directory = ctx.actions.declare_directory(ctx.attr.name + "_artifact.cc")
-  ctx.action(
+  ctx.actions.run_shell(
     inputs = ctx.files.srcs,
     outputs = [directory],
     mnemonic = 'MoveTreeArtifact',
@@ -891,7 +879,7 @@ def _intermediate_aspect_imp(target, ctx):
   if hasattr(ctx.rule.attr, 'srcs'):
     out = ctx.actions.declare_file('out_jpl_{}'.format(target))
     ctx.actions.run(
-      inputs = [f for src in ctx.rule.attr.srcs for f in src.files],
+      inputs = [f for src in ctx.rule.attr.srcs for f in src.files.to_list()],
       outputs = [out],
       executable = 'dummy',
       mnemonic = 'MyIntermediateAspect'
@@ -921,7 +909,7 @@ def _aspect_impl(target, ctx):
   if hasattr(ctx.rule.attr, 'srcs'):
     out = ctx.actions.declare_file('out{}'.format(target))
     ctx.actions.run(
-      inputs = [f for src in ctx.rule.attr.srcs for f in src.files],
+      inputs = [f for src in ctx.rule.attr.srcs for f in src.files.to_list()],
       outputs = [out],
       executable = 'dummy',
       mnemonic = 'MyAspect'
@@ -1003,7 +991,7 @@ function test_aquery_skyframe_state_wrong_syntax() {
   local pkg="${FUNCNAME[0]}"
   mkdir -p "$pkg" || fail "mkdir -p $pkg"
 
-  EXPECTED_LOG="Specifying a build target(s) \[//some_target\] with --skyframe_state is currently not supported"
+  EXPECTED_LOG="Specifying build target(s) \[//some_target\] with --skyframe_state is currently not supported"
   bazel aquery --output=textproto --skyframe_state "//some_target" > output 2> "$TEST_log" \
     && fail "Expected failure"
   expect_log "${EXPECTED_LOG}"

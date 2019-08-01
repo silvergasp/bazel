@@ -26,6 +26,7 @@ import static com.google.devtools.build.lib.syntax.Type.BOOLEAN;
 import static com.google.devtools.build.lib.syntax.Type.INTEGER;
 import static com.google.devtools.build.lib.syntax.Type.STRING;
 import static com.google.devtools.build.lib.syntax.Type.STRING_LIST;
+import static com.google.devtools.build.lib.testutil.MoreAsserts.assertThrows;
 import static org.junit.Assert.fail;
 
 import com.google.common.base.Function;
@@ -38,6 +39,7 @@ import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
 import com.google.devtools.build.lib.actions.MutableActionGraph.ActionConflictException;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
+import com.google.devtools.build.lib.analysis.config.transitions.TransitionFactory;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.cmdline.LabelSyntaxException;
 import com.google.devtools.build.lib.cmdline.PackageIdentifier;
@@ -298,7 +300,7 @@ public class RuleClassTest extends PackageLoadingTestCase {
     reporter.removeHandler(failFastHandler);
     createRule(depsRuleClass, "depsRule", attributeValues, testRuleLocation);
 
-    assertThat(eventCollector.count()).isSameAs(3);
+    assertThat(eventCollector.count()).isSameInstanceAs(3);
     assertDupError("//testpackage:dup1", "list1", "depsRule");
     assertDupError("//testpackage:dup1", "list3", "depsRule");
     assertDupError("//testpackage:dup2", "list3", "depsRule");
@@ -399,13 +401,14 @@ public class RuleClassTest extends PackageLoadingTestCase {
     assertThat(attributes.get("my-labellist-attr", BuildType.LABEL_LIST)).isEmpty();
     assertThat(attributes.get("my-stringlist-attr", Type.STRING_LIST))
         .isEqualTo(Arrays.asList("foo", "bar"));
-    try {
-      attributes.get("my-labellist-attr", Type.STRING); // wrong type
-      fail();
-    } catch (IllegalArgumentException e) {
-      assertThat(e).hasMessage("Attribute my-labellist-attr is of type list(label) "
-          + "and not of type string in ruleA rule //testpackage:my-rule-A");
-    }
+    IllegalArgumentException e =
+        assertThrows(
+            IllegalArgumentException.class, () -> attributes.get("my-labellist-attr", Type.STRING));
+    assertThat(e)
+        .hasMessageThat()
+        .isEqualTo(
+            "Attribute my-labellist-attr is of type list(label) "
+                + "and not of type string in ruleA rule //testpackage:my-rule-A");
   }
 
   @Test
@@ -445,7 +448,7 @@ public class RuleClassTest extends PackageLoadingTestCase {
     Set<String> set = new HashSet<>();
     for (OutputFile outputFile : rule.getOutputFiles()) {
       set.add(outputFile.getName());
-      assertThat(outputFile.getGeneratingRule()).isSameAs(rule);
+      assertThat(outputFile.getGeneratingRule()).isSameInstanceAs(rule);
     }
     assertThat(set).containsExactly("foo-myrule.bar", "libmyrule-wazoo-myrule.mumble",
         "stuff-explicit_out-bar", "explicit_out");
@@ -540,15 +543,16 @@ public class RuleClassTest extends PackageLoadingTestCase {
    */
   private void checkInvalidComputedDefault(Attribute computedDefault, String expectedMessage)
       throws Exception {
-    try {
-      createRule(getRuleClassWithComputedDefault(computedDefault), "myRule",
-              ImmutableMap.<String, Object>of(), testRuleLocation);
-      fail("Expected computed default \"" + computedDefault.getName() + "\" to fail with "
-          + "declaration errors");
-    } catch (IllegalArgumentException e) {
-      // Expected outcome.
-      assertThat(e).hasMessage(expectedMessage);
-    }
+    IllegalArgumentException e =
+        assertThrows(
+            IllegalArgumentException.class,
+            () ->
+                createRule(
+                    getRuleClassWithComputedDefault(computedDefault),
+                    "myRule",
+                    ImmutableMap.<String, Object>of(),
+                    testRuleLocation));
+    assertThat(e).hasMessageThat().isEqualTo(expectedMessage);
   }
 
   /**
@@ -688,7 +692,7 @@ public class RuleClassTest extends PackageLoadingTestCase {
     List<String> actual = new ArrayList<>();
     for (OutputFile outputFile : rule.getOutputFiles()) {
       actual.add(outputFile.getName());
-      assertThat(outputFile.getGeneratingRule()).isSameAs(rule);
+      assertThat(outputFile.getGeneratingRule()).isSameInstanceAs(rule);
     }
     assertWithMessage("unexpected output set").that(actual).containsExactly("first-myrule",
         "second-myrule", "out-third", "out-fourth", "third", "fourth");
@@ -793,17 +797,19 @@ public class RuleClassTest extends PackageLoadingTestCase {
 
   @Test
   public void testOverrideWithWrongType() {
-    try {
-      RuleClass parentRuleClass = createParentRuleClass();
+    RuleClass parentRuleClass = createParentRuleClass();
 
-      RuleClass.Builder childRuleClassBuilder = new RuleClass.Builder(
-          "child_rule", RuleClassType.NORMAL, false, parentRuleClass);
-      childRuleClassBuilder.override(attr("attr", INTEGER));
-      fail();
-    } catch (IllegalStateException e) {
-      assertThat(e).hasMessage("The type of the new attribute 'int' is different from "
-          + "the original one 'string'.");
-    }
+    RuleClass.Builder childRuleClassBuilder =
+        new RuleClass.Builder("child_rule", RuleClassType.NORMAL, false, parentRuleClass);
+    IllegalStateException e =
+        assertThrows(
+            IllegalStateException.class,
+            () -> childRuleClassBuilder.override(attr("attr", INTEGER)));
+    assertThat(e)
+        .hasMessageThat()
+        .isEqualTo(
+            "The type of the new attribute 'int' is different from "
+                + "the original one 'string'.");
   }
 
   @Test
@@ -836,7 +842,7 @@ public class RuleClassTest extends PackageLoadingTestCase {
     reporter.removeHandler(failFastHandler);
     createRule(childRuleClass, "child_rule", childValues, testRuleLocation);
 
-    assertThat(eventCollector.count()).isSameAs(1);
+    assertThat(eventCollector.count()).isSameInstanceAs(1);
     assertContainsEvent("//testpackage:child_rule: missing value for mandatory "
         + "attribute 'attr' in 'child_rule' rule");
   }
@@ -861,7 +867,7 @@ public class RuleClassTest extends PackageLoadingTestCase {
       boolean outputsDefaultExecutable,
       boolean isAnalysisTest,
       ImplicitOutputsFunction implicitOutputsFunction,
-      RuleTransitionFactory transitionFactory,
+      TransitionFactory<Rule> transitionFactory,
       ConfiguredTargetFactory<?, ?, ?> configuredTargetFactory,
       PredicateWithMessage<Rule> validityPredicate,
       Predicate<String> preferredDependencyPredicate,
@@ -891,9 +897,8 @@ public class RuleClassTest extends PackageLoadingTestCase {
         isAnalysisTest,
         /* hasAnalysisTestTransition=*/ false,
         /* hasFunctionTransitionWhitelist=*/ false,
-        /* ignorePackageLicenses=*/ false,
+        /* ignoreLicenses=*/ false,
         implicitOutputsFunction,
-        /*isConfigMatcher=*/ false,
         transitionFactory,
         configuredTargetFactory,
         validityPredicate,
@@ -913,7 +918,7 @@ public class RuleClassTest extends PackageLoadingTestCase {
         supportsConstraintChecking,
         ThirdPartyLicenseExistencePolicy.USER_CONTROLLABLE,
         /*requiredToolchains=*/ ImmutableSet.of(),
-        /*supportsPlatforms=*/ true,
+        /*useToolchainResolution=*/ true,
         ExecutionPlatformConstraintsAllowed.PER_RULE,
         /* executionPlatformConstraints= */ ImmutableSet.of(),
         OutputFile.Kind.FILE,
@@ -1044,12 +1049,7 @@ public class RuleClassTest extends PackageLoadingTestCase {
   }
 
   private void expectError(RuleClassType type, String name) {
-    try {
-      type.checkName(name);
-      fail();
-    } catch (IllegalArgumentException expected) {
-      // expected
-    }
+    assertThrows(IllegalArgumentException.class, () -> type.checkName(name));
   }
 
   @Test

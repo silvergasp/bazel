@@ -746,6 +746,7 @@ The following is a reference of `CcToolchainConfigInfo` build variables.
   </tr>
   <tr>
    <td><strong><code>quote_include_paths</code></strong>
+   </td>
    <td>compile</td>
    <td>Sequence of <code>-iquote</code> includes -
        directories in which the compiler searches for headers included using
@@ -969,10 +970,39 @@ The following is a reference of `CcToolchainConfigInfo` build variables.
   <tr>
    <td><strong><code>is_using_fission</code></strong>
    </td>
-   <td>link</td>
-   <td>Presence of this variable indicates that files were
-       compiled with fission. Debug info is in <code>.dwo</code> files instead
-       of <code>.o</code> files and the linker needs to know this.
+   <td>compile, link</td>
+   <td>Presence of this variable indicates that fission (per-object debug info)
+     is activated. Debug info will be in <code>.dwo</code> files instead
+       of <code>.o</code> files and the compiler and linker need to know this.
+   </td>
+  </tr>
+  <tr>
+   <td><strong><code>fdo_instrument_path</code></strong>
+   </td>
+   <td>compile, link</td>
+   <td> Path to the directory that stores FDO instrumentation profile.
+   </td>
+  </tr>
+  <tr>
+   <td><strong><code>fdo_profile_path</code></strong>
+   </td>
+   <td>compile</td>
+   <td> Path to FDO profile.
+   </td>
+  </tr>
+  <tr>
+   <td><strong><code>fdo_prefetch_hints_path</code></strong>
+   </td>
+   <td>compile</td>
+   <td> Path to the cache prefetch profile.
+   </td>
+  </tr>
+  <tr>
+   <td><strong><code>csfdo_instrument_path</code></strong>
+   </td>
+   <td>compile, link</td>
+   <td> Path to the directory that stores context sensitive FDO
+        instrumentation profile.
    </td>
   </tr>
 </table>
@@ -1093,6 +1123,8 @@ conditions.
     <li>Adds <code>include_paths</code> (if not present) feature to the top of the toolchain</li>
     <li>Adds <code>fdo_instrument</code> (if not present) feature to the top of the toolchain</li>
     <li>Adds <code>fdo_optimize</code> (if not present) feature to the top of the toolchain</li>
+    <li>Adds <code>cs_fdo_instrument</code> (if not present) feature to the top of the toolchain</li>
+    <li>Adds <code>cs_fdo_optimize</code> (if not present) feature to the top of the toolchain</li>
     <li>Adds <code>fdo_prefetch_hints</code> (if not present) feature to the top of the toolchain</li>
     <li>Adds <code>autofdo</code> (if not present) feature to the top of the toolchain</li>
     <li>Adds <code>build_interface_libraries</code> (if not present) feature to the top of the toolchain</li>

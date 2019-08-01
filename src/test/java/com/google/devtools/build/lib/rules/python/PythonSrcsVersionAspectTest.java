@@ -352,12 +352,12 @@ public class PythonSrcsVersionAspectTest extends BuildViewTestCase {
     scratch.file(
         "pkg/rules.bzl",
         "def _dummy_rule_impl(ctx):",
-        "    info = struct(",
+        "    info = PyInfo(",
         "        transitive_sources = depset(",
-        "            transitive=[d.py.transitive_sources for d in ctx.attr.deps],",
+        "            transitive=[d[PyInfo].transitive_sources for d in ctx.attr.deps],",
         "            order='postorder'),",
         "        has_py3_only_sources = True)",
-        "    return struct(py=info)",
+        "    return [info]",
         "dummy_rule = rule(",
         "    implementation = _dummy_rule_impl,",
         "    attrs = {'deps': attr.label_list()},",
@@ -405,11 +405,11 @@ public class PythonSrcsVersionAspectTest extends BuildViewTestCase {
     scratch.file(
         "pkg/rules.bzl",
         "def _dummy_rule_impl(ctx):",
-        "    info = struct(",
+        "    info = PyInfo(",
         "        transitive_sources = depset(",
-        "            transitive=[d.py.transitive_sources for d in ctx.attr.deps],",
+        "            transitive=[d[PyInfo].transitive_sources for d in ctx.attr.deps],",
         "            order='postorder'))",
-        "    return struct(py=info)",
+        "    return [info]",
         "dummy_rule = rule(",
         "    implementation = _dummy_rule_impl,",
         "    attrs = {",
@@ -448,5 +448,29 @@ public class PythonSrcsVersionAspectTest extends BuildViewTestCase {
             "<None>",
             "");
     assertThat(result).isEqualTo(golden);
+  }
+
+  @Test
+  public void toleratesTargetsWithoutDepsAttr() throws Exception {
+    scratch.file(
+        "pkg/rules.bzl",
+        "def _dummy_rule_impl(ctx):",
+        "    info = PyInfo(transitive_sources = depset([]))",
+        "    return [info]",
+        "dummy_rule = rule(",
+        "    implementation = _dummy_rule_impl,",
+        ")");
+    scratch.file(
+        "pkg/BUILD",
+        "load(':rules.bzl', 'dummy_rule')",
+        "dummy_rule(",
+        "    name = 'lib',",
+        ")",
+        "py_binary(",
+        "    name = 'bin',",
+        "    srcs = ['bin.py'],",
+        "    deps = [':lib'],",
+        ")");
+    evaluateAspectFor("//pkg:bin");
   }
 }

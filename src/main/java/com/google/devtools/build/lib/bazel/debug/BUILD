@@ -5,6 +5,7 @@ package(
 )
 
 load("//tools/build_rules:utilities.bzl", "java_library_srcs")
+load("@rules_proto//proto:defs.bzl", "proto_library")
 
 filegroup(
     name = "srcs",
@@ -57,6 +58,7 @@ java_library(
         "//src/main/java/com/google/devtools/build/lib:io",
         "//src/main/java/com/google/devtools/build/lib:runtime",
         "//src/main/java/com/google/devtools/build/lib:util",
+        "//src/main/java/com/google/devtools/build/lib/vfs:pathfragment",
         "//src/main/java/com/google/devtools/common/options",
         "//third_party:guava",
     ],
@@ -66,6 +68,8 @@ java_library(
     name = "debugging-options",
     srcs = ["DebuggingOptions.java"],
     deps = [
+        "//src/main/java/com/google/devtools/build/lib:util",
+        "//src/main/java/com/google/devtools/build/lib/vfs:pathfragment",
         "//src/main/java/com/google/devtools/common/options",
     ],
 )

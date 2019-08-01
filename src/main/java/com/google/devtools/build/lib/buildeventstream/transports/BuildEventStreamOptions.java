@@ -85,14 +85,15 @@ public class BuildEventStreamOptions extends OptionsBase {
   public boolean buildEventBinaryFilePathConversion;
 
   @Option(
-      name = "experimental_build_event_json_file_path_conversion",
-      oldName = "build_event_json_file_path_conversion",
+      name = "build_event_json_file_path_conversion",
+      oldName = "experimental_build_event_json_file_path_conversion",
       defaultValue = "true",
       documentationCategory = OptionDocumentationCategory.LOGGING,
       effectTags = {OptionEffectTag.AFFECTS_OUTPUTS},
-      help = "Convert paths in the json file representation of the build event protocol to more "
-          + "globally valid URIs whenever possible; if disabled, the file:// uri scheme will "
-          + "always be used")
+      help =
+          "Convert paths in the json file representation of the build event protocol to more "
+              + "globally valid URIs whenever possible; if disabled, the file:// uri scheme will "
+              + "always be used")
   public boolean buildEventJsonFilePathConversion;
 
   @Option(
@@ -116,29 +117,4 @@ public class BuildEventStreamOptions extends OptionsBase {
               + "of the set as well as the file and uri lengths, which may in turn depend on the "
               + "hash function.")
   public int maxNamedSetEntries;
-
-  // TODO(ruperts): Remove these public getter methods for consistency with other options classes?
-  public String getBuildEventTextFile() {
-    return buildEventTextFile;
-  }
-
-  public String getBuildEventBinaryFile() {
-    return buildEventBinaryFile;
-  }
-
-  public String getBuildEventJsonFile() {
-    return buildEventJsonFile;
-  }
-
-  public boolean getBuildEventTextFilePathConversion() {
-    return buildEventTextFilePathConversion;
-  }
-
-  public boolean getBuildEventBinaryFilePathConversion() {
-    return buildEventBinaryFilePathConversion;
-  }
-
-  public boolean getBuildEventJsonFilePathConversion() {
-    return buildEventJsonFilePathConversion;
-  }
 }

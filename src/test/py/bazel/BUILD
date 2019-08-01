@@ -1,5 +1,8 @@
 package(default_visibility = ["//visibility:private"])
 
+load("@rules_cc//cc:defs.bzl", "cc_binary")
+load("//tools/python:private/defs.bzl", "py_library", "py_test")
+
 filegroup(
     name = "srcs",
     srcs = glob(["**"]),
@@ -23,6 +26,7 @@ py_library(
         "//third_party/def_parser:__pkg__",
         "//tools/android:__pkg__",
         "//tools/build_rules:__pkg__",
+        "//tools/python:__pkg__",
     ],
 )
 
@@ -156,6 +160,13 @@ py_test(
         "//src/conditions:windows": ["test_wrapper_test.py"],
         "//conditions:default": ["empty_test.py"],
     }),
+    data = select({
+        "//src/conditions:windows": [
+            ":printargs",
+            "native_test.bzl",
+        ],
+        "//conditions:default": [],
+    }),
     main = select({
         "//src/conditions:windows": "test_wrapper_test.py",
         "//conditions:default": "empty_test.py",
@@ -164,6 +175,12 @@ py_test(
         "//src/conditions:windows": [":test_base"],
         "//conditions:default": [],
     }),
+)
+
+cc_binary(
+    name = "printargs",
+    testonly = 1,
+    srcs = ["printargs.cc"],
 )
 
 py_test(
@@ -176,6 +193,13 @@ py_test(
     name = "query_test",
     size = "medium",
     srcs = ["query_test.py"],
+    deps = [":test_base"],
+)
+
+py_test(
+    name = "genrule_test",
+    size = "medium",
+    srcs = ["genrule_test.py"],
     deps = [":test_base"],
 )
 

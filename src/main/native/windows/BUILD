@@ -1,3 +1,5 @@
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_library")
+
 package(default_visibility = ["//visibility:private"])
 
 filegroup(
@@ -19,25 +21,33 @@ filegroup(
 
 cc_library(
     name = "lib-file",
-    srcs = ["file.cc"],
-    hdrs = ["file.h"],
+    srcs = [
+        "file.cc",
+        "util.cc",
+    ],
+    hdrs = [
+        "file.h",
+        "util.h",
+    ],
     visibility = [
         "//src/main/cpp:__subpackages__",
+        "//src/main/tools:__pkg__",
         "//src/test/cpp:__subpackages__",
         "//src/test/native:__subpackages__",
-        "//tools/test:__pkg__",
-    ],
-    deps = [":lib-util"],
-)
-
-cc_library(
-    name = "lib-util",
-    srcs = ["util.cc"],
-    hdrs = ["util.h"],
-    visibility = [
         "//src/tools/launcher/util:__pkg__",
         "//tools/test:__pkg__",
     ],
+)
+
+cc_library(
+    name = "lib-process",
+    srcs = ["process.cc"],
+    hdrs = ["process.h"],
+    visibility = [
+        "//src/main/cpp:__pkg__",
+        "//tools/test:__pkg__",
+    ],
+    deps = [":lib-file"],
 )
 
 cc_binary(
@@ -58,13 +68,27 @@ cc_binary(
     ],
     deps = [
         ":lib-file",
-        ":lib-util",
+        ":lib-process",
     ],
 )
 
-# Directly re-export resources.o so it can be consumed in the client.
-cc_library(
-    name = "resources",
-    srcs = ["resources.o"],
-    visibility = ["//src/main/cpp:__pkg__"],
+filegroup(
+    name = "embedded_java_tools",
+    srcs = [
+        "file.cc",
+        "file.h",
+        "util.cc",
+        "util.h",
+    ],
+    visibility = ["//src/main/cpp/util:__pkg__"],
+)
+
+# A zip containing source files used by ijar.
+genrule(
+    name = "native_windows_zip",
+    srcs = [":embedded_java_tools"],
+    outs = ["native_windows.zip"],
+    cmd = "$(location //src:zip_files) src/main/native/windows $@ $(SRCS)",
+    tools = ["//src:zip_files"],
+    visibility = ["//src/main/cpp/util:__pkg__"],
 )

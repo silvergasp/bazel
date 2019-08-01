@@ -37,7 +37,8 @@ import java.util.Map;
  * Implementation for the {@code xcode_config} rule.
  */
 public class XcodeConfig implements RuleConfiguredTargetFactory {
-  private static final DottedVersion MINIMUM_BITCODE_XCODE_VERSION = DottedVersion.fromString("7");
+  private static final DottedVersion MINIMUM_BITCODE_XCODE_VERSION =
+      DottedVersion.fromStringUnchecked("7");
 
   /**
    * An exception that signals that an Xcode config setup was invalid.
@@ -248,42 +249,10 @@ public class XcodeConfig implements RuleConfiguredTargetFactory {
             alias, Joiner.on(", ").join(labelsContainingAlias.build())));
   }
 
-  /**
-   * Returns the minimum compatible OS version for target simulator and devices for a particular
-   * platform type.
-   */
-  public static DottedVersion getMinimumOsForPlatformType(
-      RuleContext ruleContext, ApplePlatform.PlatformType platformType) {
-    XcodeConfigProvider versions = ruleContext.getPrerequisite(
+  public static XcodeConfigProvider getXcodeConfigProvider(RuleContext ruleContext) {
+    return ruleContext.getPrerequisite(
         XcodeConfigRule.XCODE_CONFIG_ATTR_NAME,
         RuleConfiguredTarget.Mode.TARGET,
         XcodeConfigProvider.PROVIDER);
-    return versions.getMinimumOsForPlatformType(platformType);
-  }
-
-  /**
-   * Returns the SDK version for a platform (whether they be for simulator or device). This is
-   * directly derived from command line args.
-   */
-  public static DottedVersion getSdkVersionForPlatform(
-      RuleContext ruleContext, ApplePlatform platform) {
-    XcodeConfigProvider versions = ruleContext.getPrerequisite(
-        XcodeConfigRule.XCODE_CONFIG_ATTR_NAME,
-        RuleConfiguredTarget.Mode.TARGET,
-        XcodeConfigProvider.PROVIDER);
-    return versions.getSdkVersionForPlatform(platform);
-  }
-
-  /**
-   * Returns the value of the xcode version, if available. This is determined based on a combination
-   * of the {@code --xcode_version} build flag and the {@code xcode_config} target defined in the
-   * {@code --xcode_version_config} flag. Returns null if no xcode is available.
-   */
-  public static DottedVersion getXcodeVersion(RuleContext ruleContext) {
-    XcodeConfigProvider versions = ruleContext.getPrerequisite(
-        XcodeConfigRule.XCODE_CONFIG_ATTR_NAME,
-        RuleConfiguredTarget.Mode.TARGET,
-        XcodeConfigProvider.PROVIDER);
-    return versions.getXcodeVersion();
   }
 }

@@ -31,6 +31,7 @@ public class PlatformRule implements RuleDefinition {
   public static final String CONSTRAINT_VALUES_ATTR = "constraint_values";
   public static final String PARENTS_PLATFORM_ATTR = "parents";
   public static final String REMOTE_EXECUTION_PROPS_ATTR = "remote_execution_properties";
+  public static final String EXEC_PROPS_ATTR = "exec_properties";
   static final String HOST_PLATFORM_ATTR = "host_platform";
   static final String TARGET_PLATFORM_ATTR = "target_platform";
   static final String CPU_CONSTRAINTS_ATTR = "cpu_constraints";
@@ -49,7 +50,7 @@ public class PlatformRule implements RuleDefinition {
 
         <p>Each <code>constraint_value</code> in this list must be for a different
         <code>constraint_setting</code>. For example, you cannot define a platform that requires the
-        cpu architecture to be both <code>@bazel_tools//platforms:x86_64</code> and
+        cpu architecture to be both <code>@platforms//cpu:x86_64</code> and
         <code>@bazel_tools//platforms:arm</code>.
         <!-- #END_BLAZE_RULE.ATTRIBUTE --> */
         .add(
@@ -69,6 +70,8 @@ public class PlatformRule implements RuleDefinition {
                 .mandatoryProviders(PlatformInfo.PROVIDER.id()))
 
         /* <!-- #BLAZE_RULE(platform).ATTRIBUTE(remote_execution_properties) -->
+        DEPRECATED. Please use exec_properties attribute instead.
+
         A string used to configure a remote execution platform. Actual builds make no attempt to
         interpret this, it is treated as opaque data that can be used by a specific SpawnRunner.
         This can include data from the parent platform's "remote_execution_properties" attribute,
@@ -76,6 +79,19 @@ public class PlatformRule implements RuleDefinition {
         <a href="#platform_inheritance">Platform Inheritance</a> for details.
         <!-- #END_BLAZE_RULE.ATTRIBUTE --> */
         .add(attr(REMOTE_EXECUTION_PROPS_ATTR, Type.STRING))
+
+        /* <!-- #BLAZE_RULE(platform).ATTRIBUTE(exec_properties) -->
+        A map of strings used to configure a remote execution platform. Bazel makes no attempt
+        to interpret this, it is treated as opaque data that's forwarded via the remote execution
+        protocol.
+
+        This includes any data from the parent platform's <code>exec_properties</code> attributes.
+        If the child and parent platform define the same keys, the child's values are kept.
+
+        This attribute is a full replacement for the deprecated
+        <code>remote_execution_properties</code>.
+        <!-- #END_BLAZE_RULE.ATTRIBUTE --> */
+        .add(attr(EXEC_PROPS_ATTR, Type.STRING_DICT))
 
         // Undocumented. Indicates that this platform should auto-configure the platform constraints
         // based on the current host OS and CPU settings.
@@ -130,8 +146,8 @@ more details.
 platform(
     name = "linux_arm",
     constraint_values = [
-        "@bazel_tools//platforms:linux",
-        "@bazel_tools//platforms:arm",
+        "@platforms//os:linux",
+        "@platforms//cpu:arm",
     ],
 )
 </pre>
@@ -177,8 +193,8 @@ platform(
 platform(
     name = "parent",
     constraint_values = [
-        "@bazel_tools//platforms:linux",
-        "@bazel_tools//platforms:arm",
+        "@platforms//os:linux",
+        "@platforms//cpu:arm",
     ],
     remote_execution_properties = """
       parent properties
@@ -188,7 +204,7 @@ platform(
     name = "child_a",
     parents = [":parent"],
     constraint_values = [
-        "@bazel_tools//platforms:x86_64",
+        "@platforms//cpu:x86_64",
     ],
     remote_execution_properties = """
       child a properties
@@ -210,8 +226,8 @@ platform(
 
   <ul>
     <li>
-      "child_a" has the constraint values "@bazel_tools//platforms:linux" (inherited from the
-      parent) and "@bazel_tools//platforms:x86_64" (set directly on the platform). It has the
+      "child_a" has the constraint values "@platforms//os:linux" (inherited from the
+      parent) and "@platforms//cpu:x86_64" (set directly on the platform). It has the
       "remote_execution_properties" set to "child a properties"
     </li>
     <li>

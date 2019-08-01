@@ -25,13 +25,14 @@ import com.google.devtools.build.lib.analysis.OutputGroupInfo;
 import com.google.devtools.build.lib.analysis.TopLevelArtifactContext;
 import com.google.devtools.build.lib.analysis.config.BuildOptions;
 import com.google.devtools.build.lib.analysis.config.InvalidConfigurationException;
+import com.google.devtools.build.lib.buildeventstream.BuildEventProtocolOptions;
 import com.google.devtools.build.lib.exec.ExecutionOptions;
 import com.google.devtools.build.lib.packages.StarlarkSemanticsOptions;
 import com.google.devtools.build.lib.pkgcache.LoadingOptions;
 import com.google.devtools.build.lib.pkgcache.PackageCacheOptions;
-import com.google.devtools.build.lib.runtime.BlazeCommandEventHandler;
 import com.google.devtools.build.lib.runtime.KeepGoingOption;
 import com.google.devtools.build.lib.runtime.LoadingPhaseThreadsOption;
+import com.google.devtools.build.lib.runtime.UiOptions;
 import com.google.devtools.build.lib.util.OptionsUtils;
 import com.google.devtools.build.lib.util.io.OutErr;
 import com.google.devtools.common.options.OptionsBase;
@@ -293,6 +294,7 @@ public class BuildRequest implements OptionsProvider {
   public TopLevelArtifactContext getTopLevelArtifactContext() {
     return new TopLevelArtifactContext(
         getOptions(ExecutionOptions.class).testStrategy.equals("exclusive"),
+        getOptions(BuildEventProtocolOptions.class).expandFilesets,
         OutputGroupInfo.determineOutputGroups(getBuildOptions().outputGroups));
   }
 
@@ -312,7 +314,7 @@ public class BuildRequest implements OptionsProvider {
         commandId, commandStartTime);
 
     // All this, just to pass a global boolean from the client to the server. :(
-    if (options.getOptions(BlazeCommandEventHandler.Options.class).runningInEmacs) {
+    if (options.getOptions(UiOptions.class).runningInEmacs) {
       request.setRunningInEmacs();
     }
 

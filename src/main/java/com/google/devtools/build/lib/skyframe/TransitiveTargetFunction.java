@@ -24,11 +24,9 @@ import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.events.EventHandler;
-import com.google.devtools.build.lib.packages.Aspect;
-import com.google.devtools.build.lib.packages.AspectDefinition;
+import com.google.devtools.build.lib.packages.AdvertisedProviderSet;
 import com.google.devtools.build.lib.packages.Attribute;
 import com.google.devtools.build.lib.packages.ConfigurationFragmentPolicy;
-import com.google.devtools.build.lib.packages.DependencyFilter;
 import com.google.devtools.build.lib.packages.NoSuchPackageException;
 import com.google.devtools.build.lib.packages.NoSuchTargetException;
 import com.google.devtools.build.lib.packages.NoSuchThingException;
@@ -41,7 +39,6 @@ import com.google.devtools.build.lib.skyframe.TransitiveTargetFunction.Transitiv
 import com.google.devtools.build.skyframe.SkyKey;
 import com.google.devtools.build.skyframe.SkyValue;
 import com.google.devtools.build.skyframe.ValueOrException2;
-import java.util.Collection;
 import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Set;
@@ -116,8 +113,7 @@ public class TransitiveTargetFunction
 
       NestedSet<Class<? extends Fragment>> depFragments =
           transitiveTargetValue.getTransitiveConfigFragments();
-      Collection<Class<? extends Fragment>> depFragmentsAsCollection =
-          depFragments.toCollection();
+      ImmutableList<Class<? extends Fragment>> depFragmentsAsList = depFragments.toList();
       // The simplest collection technique would be to unconditionally add all deps' nested
       // sets to the current target's nested set. But when there's large overlap between their
       // fragment needs, this produces unnecessarily bloated nested sets and a lot of references
@@ -125,9 +121,9 @@ public class TransitiveTargetFunction
       // by completely skipping sets that don't offer anything new. More fine-tuned optimization
       // is possible, but this offers a good balance between simplicity and practical efficiency.
       Set<Class<? extends Fragment>> addedConfigFragments = builder.getConfigFragmentsFromDeps();
-      if (!addedConfigFragments.containsAll(depFragmentsAsCollection)) {
+      if (!addedConfigFragments.containsAll(depFragmentsAsList)) {
         builder.getTransitiveConfigFragments().addTransitive(depFragments);
-        addedConfigFragments.addAll(depFragmentsAsCollection);
+        addedConfigFragments.addAll(depFragmentsAsList);
       }
     }
     builder.setSuccessfulTransitiveLoading(successfulTransitiveLoading);
@@ -190,7 +186,7 @@ public class TransitiveTargetFunction
     for (String requiredOption : requiredOptions) {
       Class<? extends BuildConfiguration.Fragment> fragment =
           ruleClassProvider.getConfigurationFragmentForOption(requiredOption);
-      // Null values come from BuildConfiguration.Options, which is implicitly included.
+      // Null values come from CoreOptions, which is implicitly included.
       if (fragment != null) {
         optionsFragments.add(fragment);
       }
@@ -219,44 +215,38 @@ public class TransitiveTargetFunction
     }
   }
 
+  @Nullable
   @Override
-  protected Collection<Label> getAspectLabels(
-      Rule fromRule,
-      ImmutableList<Aspect> aspectsOfAttribute,
+  protected AdvertisedProviderSet getAdvertisedProviderSet(
       Label toLabel,
-      ValueOrException2<NoSuchPackageException, NoSuchTargetException> toVal,
-      final Environment env)
+      @Nullable ValueOrException2<NoSuchPackageException, NoSuchTargetException> toVal,
+      Environment env)
       throws InterruptedException {
     SkyKey packageKey = PackageValue.key(toLabel.getPackageIdentifier());
+    Target toTarget;
     try {
       PackageValue pkgValue =
           (PackageValue) env.getValueOrThrow(packageKey, NoSuchPackageException.class);
       if (pkgValue == null) {
-        return ImmutableList.of();
+        return null;
       }
       Package pkg = pkgValue.getPackage();
       if (pkg.containsErrors()) {
-        // Do nothing. This error was handled when we computed the corresponding
+        // Do nothing interesting. This error was handled when we computed the corresponding
         // TransitiveTargetValue.
-        return ImmutableList.of();
+        return null;
       }
-      Target dependedTarget = pkgValue.getPackage().getTarget(toLabel.getName());
-      return AspectDefinition.visitAspectsIfRequired(
-              fromRule, aspectsOfAttribute, dependedTarget, DependencyFilter.ALL_DEPS)
-          .values();
+      toTarget = pkgValue.getPackage().getTarget(toLabel.getName());
     } catch (NoSuchThingException e) {
-      // Do nothing. This error was handled when we computed the corresponding
+      // Do nothing interesting. This error was handled when we computed the corresponding
       // TransitiveTargetValue.
-      return ImmutableList.of();
+      return null;
     }
-  }
-
-  @Override
-  TargetMarkerValue getTargetMarkerValue(SkyKey targetMarkerKey, Environment env)
-      throws NoSuchTargetException, NoSuchPackageException, InterruptedException {
-    return (TargetMarkerValue)
-        env.getValueOrThrow(
-            targetMarkerKey, NoSuchTargetException.class, NoSuchPackageException.class);
+    if (!(toTarget instanceof Rule)) {
+      // Aspect can be declared only for Rules.
+      return null;
+    }
+    return ((Rule) toTarget).getRuleClassObject().getAdvertisedProviders();
   }
 
   private static void maybeReportErrorAboutMissingEdge(

@@ -25,7 +25,6 @@ import com.google.devtools.build.lib.analysis.FilesToRunProvider;
 import com.google.devtools.build.lib.analysis.RunfilesProvider;
 import com.google.devtools.build.lib.analysis.actions.TemplateExpansionAction;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
-import com.google.devtools.build.lib.packages.util.MockCcSupport;
 import com.google.devtools.build.lib.skyframe.ConfiguredTargetAndData;
 import org.junit.Before;
 import org.junit.Test;
@@ -38,12 +37,7 @@ public class AndroidInstrumentationTestTest extends AndroidBuildViewTestCase {
 
   @Before
   public void setupCcToolchain() throws Exception {
-    getAnalysisMock()
-        .ccSupport()
-        .setupCrosstool(
-            mockToolsConfig,
-            /* appendToCurrentToolchain=*/ false,
-            MockCcSupport.emptyToolchainForCpu("armeabi-v7a"));
+    getAnalysisMock().ccSupport().setupCcToolchainConfigForCpu(mockToolsConfig, "armeabi-v7a");
   }
 
   @Before
@@ -99,6 +93,7 @@ public class AndroidInstrumentationTestTest extends AndroidBuildViewTestCase {
         "  ],",
         ")");
     setupTargetDevice();
+    setSkylarkSemanticsOptions("--experimental_google_legacy_api");
   }
 
   // TODO(ajmichael): Share this with AndroidDeviceTest.java
@@ -138,19 +133,19 @@ public class AndroidInstrumentationTestTest extends AndroidBuildViewTestCase {
             .getDefaultRunfiles()
             .getAllArtifacts();
     assertThat(runfiles)
-        .containsAllIn(
+        .containsAtLeastElementsIn(
             getHostConfiguredTarget("//tools/android/emulated_device:nexus_6")
                 .getProvider(RunfilesProvider.class)
                 .getDefaultRunfiles()
                 .getAllArtifacts());
     assertThat(runfiles)
-        .containsAllIn(
+        .containsAtLeastElementsIn(
             getHostConfiguredTarget("//java/com/server")
                 .getProvider(RunfilesProvider.class)
                 .getDefaultRunfiles()
                 .getAllArtifacts());
     assertThat(runfiles)
-        .containsAllIn(
+        .containsAtLeastElementsIn(
             getHostConfiguredTarget(
                     androidInstrumentationTest
                         .getTarget()
@@ -161,7 +156,7 @@ public class AndroidInstrumentationTestTest extends AndroidBuildViewTestCase {
                 .getDefaultRunfiles()
                 .getAllArtifacts());
     assertThat(runfiles)
-        .containsAllOf(
+        .containsAtLeast(
             getDeviceFixtureScript(getConfiguredTarget("//javatests/com/app:device_fixture")),
             getInstrumentationApk(getConfiguredTarget("//javatests/com/app:instrumentation_app")),
             getTargetApk(getConfiguredTarget("//javatests/com/app:instrumentation_app")),
@@ -263,11 +258,11 @@ public class AndroidInstrumentationTestTest extends AndroidBuildViewTestCase {
   }
 
   private static Artifact getInstrumentationApk(ConfiguredTarget instrumentation) {
-    return instrumentation.get(AndroidInstrumentationInfo.PROVIDER).getInstrumentationApk();
+    return instrumentation.get(AndroidInstrumentationInfo.PROVIDER).getTarget().getApk();
   }
 
   private static Artifact getTargetApk(ConfiguredTarget instrumentation) {
-    return instrumentation.get(AndroidInstrumentationInfo.PROVIDER).getTargetApk();
+    return instrumentation.get(ApkInfo.PROVIDER).getApk();
   }
 
   private String getTestStubContents(ConfiguredTarget androidInstrumentationTest) throws Exception {

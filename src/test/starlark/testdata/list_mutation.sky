@@ -17,6 +17,14 @@ assert_eq(foo, ['f', 'c', 'd', 'a', 'b', 'e'])
 foo.insert(10, 'g')
 assert_eq(foo, ['f', 'c', 'd', 'a', 'b', 'e', 'g'])
 
+# check that list() returns new mutable object
+a = list()
+b = list()
+a.insert(0, 1)
+
+assert_eq(a, [1])
+assert_eq(b, [])
+
 ---
 (1, 2).insert(3) ### type 'tuple' has no method insert\(\)
 ---
@@ -85,3 +93,12 @@ assert_eq(li3, [2, 4])
 [1, 2].pop(3) ### index out of range (index is 3, but sequence has 2 elements)
 ---
 (1, 2).pop() ### type 'tuple' has no method pop()
+---
+
+# clear
+
+foo = [1, 2, 3, 4]
+foo.clear()
+assert_eq(foo, [])
+
+assert_eq(['a', 'b'].clear(), None)

@@ -23,7 +23,6 @@ import com.google.devtools.build.lib.buildeventstream.ArtifactGroupNamer;
 import com.google.devtools.build.lib.buildeventstream.BuildEvent;
 import com.google.devtools.build.lib.buildeventstream.BuildEventContext;
 import com.google.devtools.build.lib.buildeventstream.BuildEventProtocolOptions;
-import com.google.devtools.build.lib.buildeventstream.BuildEventServiceAbruptExitCallback;
 import com.google.devtools.build.lib.buildeventstream.BuildEventStreamProtos;
 import com.google.devtools.build.lib.buildeventstream.BuildEventStreamProtos.BuildStarted;
 import com.google.devtools.build.lib.buildeventstream.BuildEventStreamProtos.Progress;
@@ -44,7 +43,7 @@ import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 import org.junit.runner.RunWith;
 import org.junit.runners.JUnit4;
-import org.mockito.Matchers;
+import org.mockito.ArgumentMatchers;
 import org.mockito.Mock;
 import org.mockito.Mockito;
 import org.mockito.MockitoAnnotations;
@@ -54,7 +53,6 @@ import org.mockito.MockitoAnnotations;
 public class TextFormatFileTransportTest {
   private final BuildEventProtocolOptions defaultOpts =
       Options.getDefaults(BuildEventProtocolOptions.class);
-  private static final BuildEventServiceAbruptExitCallback NO_OP_EXIT_CALLBACK = (e) -> {};
 
   @Rule public TemporaryFolder tmp = new TemporaryFolder();
 
@@ -84,26 +82,25 @@ public class TextFormatFileTransportTest {
         BuildEventStreamProtos.BuildEvent.newBuilder()
             .setStarted(BuildStarted.newBuilder().setCommand("build"))
             .build();
-    when(buildEvent.asStreamProto(Matchers.<BuildEventContext>any())).thenReturn(started);
+    when(buildEvent.asStreamProto(ArgumentMatchers.<BuildEventContext>any())).thenReturn(started);
     TextFormatFileTransport transport =
         new TextFormatFileTransport(
             outputStream,
             defaultOpts,
             new LocalFilesArtifactUploader(),
-            NO_OP_EXIT_CALLBACK,
             artifactGroupNamer);
     transport.sendBuildEvent(buildEvent);
 
     BuildEventStreamProtos.BuildEvent progress =
         BuildEventStreamProtos.BuildEvent.newBuilder().setProgress(Progress.newBuilder()).build();
-    when(buildEvent.asStreamProto(Matchers.<BuildEventContext>any())).thenReturn(progress);
+    when(buildEvent.asStreamProto(ArgumentMatchers.<BuildEventContext>any())).thenReturn(progress);
     transport.sendBuildEvent(buildEvent);
 
     BuildEventStreamProtos.BuildEvent completed =
         BuildEventStreamProtos.BuildEvent.newBuilder()
             .setCompleted(TargetComplete.newBuilder().setSuccess(true))
             .build();
-    when(buildEvent.asStreamProto(Matchers.<BuildEventContext>any())).thenReturn(completed);
+    when(buildEvent.asStreamProto(ArgumentMatchers.<BuildEventContext>any())).thenReturn(completed);
     transport.sendBuildEvent(buildEvent);
 
     transport.close().get();

@@ -1,4 +1,4 @@
-// Copyright 2017 The Bazel Authors. All rights reserved.
+// Copyright 2019 The Bazel Authors. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -11,9 +11,12 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+//
 
 package com.google.devtools.build.lib.packages;
 
+import com.google.common.collect.Interner;
+import com.google.devtools.build.lib.concurrent.BlazeInterners;
 import com.google.devtools.build.lib.syntax.StarlarkSemantics;
 import com.google.devtools.common.options.Converters.CommaSeparatedOptionListConverter;
 import com.google.devtools.common.options.Option;
@@ -60,21 +63,20 @@ public class StarlarkSemanticsOptions extends OptionsBase implements Serializabl
 
   // <== Add new options here in alphabetic order ==>
 
-  /**
-   * This can be overridden by {@link RuleClass.Builder.ThirdPartyLicenseExistencePolicy} and {@link
-   * #incompatibleDisableThirdPartyLicenseChecking}.
-   */
   @Option(
-      name = "check_third_party_targets_have_licenses",
+      name = "experimental_allow_incremental_repository_updates",
       defaultValue = "true",
       documentationCategory = OptionDocumentationCategory.STARLARK_SEMANTICS,
-      effectTags = OptionEffectTag.BUILD_FILE_SEMANTICS,
-      help = "If true, all rules and files under //third_party must declare licenses([])")
-  public boolean checkThirdPartyTargetsHaveLicenses;
+      effectTags = {OptionEffectTag.BAZEL_INTERNAL_CONFIGURATION},
+      metadataTags = {OptionMetadataTag.EXPERIMENTAL},
+      help =
+          "This flag will be removed in Bazel 1.0. Please do not use it.\n"
+              + "Incremental repository updates feature is now enabled without the flag.")
+  public boolean experimentalAllowIncrementalRepositoryUpdates;
 
   @Option(
       name = "experimental_build_setting_api",
-      defaultValue = "false",
+      defaultValue = "true",
       documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,
       effectTags = OptionEffectTag.BUILD_FILE_SEMANTICS,
       help =
@@ -102,6 +104,17 @@ public class StarlarkSemanticsOptions extends OptionsBase implements Serializabl
       help = "If set to true, enables the APIs required to support the Android Starlark migration.")
   public boolean experimentalEnableAndroidMigrationApis;
 
+  @Option(
+      name = "experimental_google_legacy_api",
+      defaultValue = "false",
+      documentationCategory = OptionDocumentationCategory.STARLARK_SEMANTICS,
+      effectTags = {OptionEffectTag.LOADING_AND_ANALYSIS},
+      metadataTags = {OptionMetadataTag.EXPERIMENTAL},
+      help =
+          "If set to true, exposes a number of experimental pieces of Starlark build API "
+              + "pertaining to Google legacy code.")
+  public boolean experimentalGoogleLegacyApi;
+
   // This flag is declared in StarlarkSemanticsOptions instead of JavaOptions because there is no
   // way to retrieve the java configuration from the Java implementation of
   // java_common.create_provider.
@@ -126,11 +139,9 @@ public class StarlarkSemanticsOptions extends OptionsBase implements Serializabl
               + "debugging.")
   public boolean experimentalPlatformsApi;
 
-  // TODO(cparsons): Resolve and finalize the transition() API. The transition implementation
-  // function should accept two mandatory parameters, 'settings' and 'attr'.
   @Option(
       name = "experimental_starlark_config_transitions",
-      defaultValue = "false",
+      defaultValue = "true",
       documentationCategory = OptionDocumentationCategory.STARLARK_SEMANTICS,
       effectTags = {OptionEffectTag.LOADING_AND_ANALYSIS},
       metadataTags = {OptionMetadataTag.EXPERIMENTAL},
@@ -140,20 +151,17 @@ public class StarlarkSemanticsOptions extends OptionsBase implements Serializabl
   public boolean experimentalStarlarkConfigTransitions;
 
   @Option(
-      name = "experimental_transition_whitelist_location",
-      defaultValue = "",
-      documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,
-      effectTags = {OptionEffectTag.LOADING_AND_ANALYSIS},
+      name = "experimental_starlark_unused_inputs_list",
+      defaultValue = "true",
+      documentationCategory = OptionDocumentationCategory.STARLARK_SEMANTICS,
+      effectTags = {OptionEffectTag.CHANGES_INPUTS},
       metadataTags = {OptionMetadataTag.EXPERIMENTAL},
-      help =
-          "If not empty, turns on whitelist checking for starlark-defined split transitions "
-              + "using package groups from the specified location. If empty, starlark-defined split"
-              + "transitions are enabled in all locations.")
-  public String experimentalTransitionWhitelistLocation;
+      help = "If set to true, enables use of 'unused_inputs_list' in starlark action.run().")
+  public boolean experimentalStarlarkUnusedInputsList;
 
   @Option(
       name = "incompatible_bzl_disallow_load_after_statement",
-      defaultValue = "false",
+      defaultValue = "true",
       documentationCategory = OptionDocumentationCategory.STARLARK_SEMANTICS,
       effectTags = {OptionEffectTag.BUILD_FILE_SEMANTICS},
       metadataTags = {
@@ -166,8 +174,38 @@ public class StarlarkSemanticsOptions extends OptionsBase implements Serializabl
   public boolean incompatibleBzlDisallowLoadAfterStatement;
 
   @Option(
-      name = "incompatible_depset_union",
+      name = "incompatible_allow_tags_propagation",
       defaultValue = "false",
+      documentationCategory = OptionDocumentationCategory.STARLARK_SEMANTICS,
+      effectTags = {OptionEffectTag.BUILD_FILE_SEMANTICS},
+      metadataTags = {
+        OptionMetadataTag.INCOMPATIBLE_CHANGE,
+        OptionMetadataTag.TRIGGERED_BY_ALL_INCOMPATIBLE_CHANGES
+      },
+      help =
+          "If set to true, tags will be propagated from a target to the actions' execution"
+              + " requirements; otherwise tags are not propagated. See"
+              + " https://github.com/bazelbuild/bazel/issues/8830 for details.")
+  public boolean incompatibleAllowTagsPropagation;
+
+  @Option(
+      name = "incompatible_assignment_identifiers_have_local_scope",
+      defaultValue = "false",
+      documentationCategory = OptionDocumentationCategory.STARLARK_SEMANTICS,
+      effectTags = {OptionEffectTag.BUILD_FILE_SEMANTICS},
+      metadataTags = {
+        OptionMetadataTag.INCOMPATIBLE_CHANGE,
+        OptionMetadataTag.TRIGGERED_BY_ALL_INCOMPATIBLE_CHANGES
+      },
+      help =
+          "If set to true, LHS identifiers in assignment statements become local to the "
+              + "the block containing the statement, and mask similarly named variables in "
+              + "outer scopes.")
+  public boolean incompatibleAssignmentIdentifiersHaveLocalScope;
+
+  @Option(
+      name = "incompatible_depset_union",
+      defaultValue = "true",
       documentationCategory = OptionDocumentationCategory.STARLARK_SEMANTICS,
       effectTags = {OptionEffectTag.BUILD_FILE_SEMANTICS},
       metadataTags = {
@@ -181,7 +219,7 @@ public class StarlarkSemanticsOptions extends OptionsBase implements Serializabl
 
   @Option(
       name = "incompatible_depset_is_not_iterable",
-      defaultValue = "false",
+      defaultValue = "true",
       documentationCategory = OptionDocumentationCategory.STARLARK_SEMANTICS,
       effectTags = {OptionEffectTag.BUILD_FILE_SEMANTICS},
       metadataTags = {
@@ -195,8 +233,25 @@ public class StarlarkSemanticsOptions extends OptionsBase implements Serializabl
   public boolean incompatibleDepsetIsNotIterable;
 
   @Option(
-      name = "incompatible_disable_deprecated_attr_params",
+      name = "incompatible_disable_target_provider_fields",
       defaultValue = "false",
+      documentationCategory = OptionDocumentationCategory.STARLARK_SEMANTICS,
+      effectTags = {OptionEffectTag.BUILD_FILE_SEMANTICS},
+      metadataTags = {
+        OptionMetadataTag.INCOMPATIBLE_CHANGE,
+        OptionMetadataTag.TRIGGERED_BY_ALL_INCOMPATIBLE_CHANGES
+      },
+      help =
+          "If set to true, disable the ability to access providers on 'target' objects via field "
+              + "syntax. Use provider-key syntax instead. For example, instead of using "
+              + "`ctx.attr.dep.my_info` to access `my_info` from inside a rule implementation "
+              + "function, use `ctx.attr.dep[MyInfo]`. See "
+              + "https://github.com/bazelbuild/bazel/issues/9014 for details.")
+  public boolean incompatibleDisableTargetProviderFields;
+
+  @Option(
+      name = "incompatible_disable_deprecated_attr_params",
+      defaultValue = "true",
       documentationCategory = OptionDocumentationCategory.STARLARK_SEMANTICS,
       effectTags = {OptionEffectTag.BUILD_FILE_SEMANTICS},
       metadataTags = {
@@ -209,21 +264,19 @@ public class StarlarkSemanticsOptions extends OptionsBase implements Serializabl
   public boolean incompatibleDisableDeprecatedAttrParams;
 
   @Option(
-      name = "incompatible_require_feature_configuration_for_pic",
+      name = "incompatible_disable_objc_provider_resources",
       defaultValue = "true",
-      documentationCategory = OptionDocumentationCategory.TOOLCHAIN,
-      effectTags = {OptionEffectTag.LOADING_AND_ANALYSIS},
+      documentationCategory = OptionDocumentationCategory.STARLARK_SEMANTICS,
+      effectTags = {OptionEffectTag.BUILD_FILE_SEMANTICS},
       metadataTags = {
         OptionMetadataTag.INCOMPATIBLE_CHANGE,
         OptionMetadataTag.TRIGGERED_BY_ALL_INCOMPATIBLE_CHANGES
       },
-      help =
-          "If true, cc_toolchain_info.use_pic_for_dynamic_libraries will require "
-              + "feature_configuration argument (see #7007).")
-  public boolean requireFeatureConfigurationForPic;
+      help = "Unused. Will be removed in future versions of Bazel.")
+  public boolean incompatibleDisableObjcProviderResources;
 
   @Option(
-      name = "incompatible_disable_objc_provider_resources",
+      name = "incompatible_disable_partition_default_parameter",
       defaultValue = "false",
       documentationCategory = OptionDocumentationCategory.STARLARK_SEMANTICS,
       effectTags = {OptionEffectTag.BUILD_FILE_SEMANTICS},
@@ -231,50 +284,44 @@ public class StarlarkSemanticsOptions extends OptionsBase implements Serializabl
         OptionMetadataTag.INCOMPATIBLE_CHANGE,
         OptionMetadataTag.TRIGGERED_BY_ALL_INCOMPATIBLE_CHANGES
       },
-      help = "If set to true, disallow use of deprecated resource fields on the Objc provider.")
-  public boolean incompatibleDisableObjcProviderResources;
+      help =
+          "If set to true, the default value `' '` for the parameter `sep` of `string.partion` and"
+              + " `string.rpartition` will be disabled.")
+  public boolean incompatibleDisablePartitionDefaultParameter;
 
-  // Once this migration is complete, instead of removing this flag we need to make it a no-op.
-  // This is because we'll need to keep it around for a while so Google's migration can complete
-  // after Bazel's. This is an example of Bazel's Google roots being methodically torn out:
-  // because this functionality was introduced for Google before Bazel existed, Google's
-  // dependency on it is deeper. We don't want this to add unnecessary baggage to Bazel or slow
-  // down Bazel's development. So this approach, while slightly awkward, relieves Bazel of
-  // Google's technical debt (which shouldn't be Bazel's problem). This means you as a Bazel
-  // user are getting better code than Google has! (for a while, at least)
+  // For Bazel, this flag is a no-op. Bazel doesn't support built-in third party license checking
+  // (see https://github.com/bazelbuild/bazel/issues/7444).
   //
-  // Track migration at https://github.com/bazelbuild/bazel/issues/7444. When we're ready to
-  // remove Bazel support, instead of removing the flag we should do these things:
-  //
-  // 1) BazelRuleClassProvider: set the third party license existence policy to NEVER_CHECK (see
-  //    the related TODO(gregce) comment in that file).
-  // 2) Remove LicenseCheckingModule.
-  // 3) Remove --check_third_party_targets_have_licenses.
+  // For Blaze in Google, this flag is still needed to deprecate the logic that's already been
+  // removed from Bazel. That logic was introduced before Bazel existed, so Google's dependency on
+  // it is deeper. But we don't want that to add unnecessary baggage to Bazel or slow down Bazel's
+  // development. So this flag lets Blaze migrate on a slower timeline without blocking Bazel. This
+  // means you as a Bazel user are getting better code than Google has! (for a while, at least)
   @Option(
       name = "incompatible_disable_third_party_license_checking",
-      defaultValue = "false",
+      defaultValue = "true",
       documentationCategory = OptionDocumentationCategory.STARLARK_SEMANTICS,
       effectTags = OptionEffectTag.BUILD_FILE_SEMANTICS,
       metadataTags = {
         OptionMetadataTag.INCOMPATIBLE_CHANGE,
         OptionMetadataTag.TRIGGERED_BY_ALL_INCOMPATIBLE_CHANGES
       },
-      help =
-          "If true, disables all license checking logic. This overrides "
-              + "--check_third_party_targets_have_licenses")
+      help = "If true, disables all license checking logic")
   public boolean incompatibleDisableThirdPartyLicenseChecking;
 
   @Option(
-      name = "incompatible_disallow_data_transition",
-      defaultValue = "true",
+      name = "incompatible_disallow_dict_lookup_unhashable_keys",
+      defaultValue = "false",
       documentationCategory = OptionDocumentationCategory.STARLARK_SEMANTICS,
       effectTags = {OptionEffectTag.BUILD_FILE_SEMANTICS},
       metadataTags = {
         OptionMetadataTag.INCOMPATIBLE_CHANGE,
         OptionMetadataTag.TRIGGERED_BY_ALL_INCOMPATIBLE_CHANGES
       },
-      help = "If set to true, rule attributes cannot set 'cfg = \"data\"', which is a noop.")
-  public boolean incompatibleDisallowDataTransition;
+      help =
+          "If set to true, dict key lookups using `in` or `dict.get` will fail with unhashable"
+              + " types.")
+  public boolean incompatibleDisallowDictLookupUnhashableKeys;
 
   @Option(
       name = "incompatible_disallow_dict_plus",
@@ -289,16 +336,17 @@ public class StarlarkSemanticsOptions extends OptionsBase implements Serializabl
   public boolean incompatibleDisallowDictPlus;
 
   @Option(
-      name = "incompatible_disallow_filetype",
-      defaultValue = "true",
+      name = "incompatible_disallow_empty_glob",
+      defaultValue = "false",
+      category = "incompatible changes",
       documentationCategory = OptionDocumentationCategory.STARLARK_SEMANTICS,
       effectTags = {OptionEffectTag.BUILD_FILE_SEMANTICS},
       metadataTags = {
         OptionMetadataTag.INCOMPATIBLE_CHANGE,
         OptionMetadataTag.TRIGGERED_BY_ALL_INCOMPATIBLE_CHANGES
       },
-      help = "If set to true, function `FileType` is not available.")
-  public boolean incompatibleDisallowFileType;
+      help = "If set to true, the default value of the `allow_empty` argument of glob() is False.")
+  public boolean incompatibleDisallowEmptyGlob;
 
   @Option(
       name = "incompatible_disallow_legacy_java_provider",
@@ -325,20 +373,8 @@ public class StarlarkSemanticsOptions extends OptionsBase implements Serializabl
   public boolean incompatibleDisallowLegacyJavaInfo;
 
   @Option(
-      name = "incompatible_disallow_load_labels_to_cross_package_boundaries",
-      defaultValue = "false",
-      documentationCategory = OptionDocumentationCategory.STARLARK_SEMANTICS,
-      effectTags = {OptionEffectTag.BUILD_FILE_SEMANTICS},
-      metadataTags = {
-        OptionMetadataTag.INCOMPATIBLE_CHANGE,
-        OptionMetadataTag.TRIGGERED_BY_ALL_INCOMPATIBLE_CHANGES
-      },
-      help = "If set to true, the label argument to 'load' cannot cross a package boundary.")
-  public boolean incompatibleDisallowLoadLabelsToCrossPackageBoundaries;
-
-  @Option(
-      name = "incompatible_disallow_native_in_build_file",
-      defaultValue = "false",
+      name = "incompatible_disallow_rule_execution_platform_constraints_allowed",
+      defaultValue = "False",
       documentationCategory = OptionDocumentationCategory.STARLARK_SEMANTICS,
       effectTags = {OptionEffectTag.BUILD_FILE_SEMANTICS},
       metadataTags = {
@@ -346,9 +382,36 @@ public class StarlarkSemanticsOptions extends OptionsBase implements Serializabl
         OptionMetadataTag.TRIGGERED_BY_ALL_INCOMPATIBLE_CHANGES
       },
       help =
-          "If set to true, the native module is not accessible in BUILD files. "
-              + "Use for example `cc_library` instead of `native.cc_library`.")
-  public boolean incompatibleDisallowNativeInBuildFile;
+          "If set to true, disallow the use of the execution_platform_constraints_allowed "
+              + "attribute on rule().")
+  public boolean incompatibleDisallowRuleExecutionPlatformConstraintsAllowed;
+
+  @Option(
+      name = "incompatible_disallow_split_empty_separator",
+      defaultValue = "false",
+      documentationCategory = OptionDocumentationCategory.STARLARK_SEMANTICS,
+      effectTags = {OptionEffectTag.BUILD_FILE_SEMANTICS},
+      metadataTags = {
+        OptionMetadataTag.INCOMPATIBLE_CHANGE,
+        OptionMetadataTag.TRIGGERED_BY_ALL_INCOMPATIBLE_CHANGES
+      },
+      help = "If set to true, `string.split` will fail if `sep` is the empty string.")
+  public boolean incompatibleDisallowSplitEmptySeparator;
+
+  @Option(
+      name = "incompatible_string_join_requires_strings",
+      defaultValue = "true",
+      documentationCategory = OptionDocumentationCategory.STARLARK_SEMANTICS,
+      effectTags = {OptionEffectTag.BUILD_FILE_SEMANTICS},
+      metadataTags = {
+        OptionMetadataTag.INCOMPATIBLE_CHANGE,
+        OptionMetadataTag.TRIGGERED_BY_ALL_INCOMPATIBLE_CHANGES
+      },
+      help =
+          "If set to true, the argument of `string.join` must be an iterable whose elements are "
+              + "strings. If set to false, elements are first converted to string. "
+              + "See https://github.com/bazelbuild/bazel/issues/7802")
+  public boolean incompatibleStringJoinRequiresStrings;
 
   @Option(
       name = "incompatible_disallow_struct_provider_syntax",
@@ -379,6 +442,18 @@ public class StarlarkSemanticsOptions extends OptionsBase implements Serializabl
   public boolean incompatibleDisallowOldStyleArgsAdd;
 
   @Option(
+      name = "incompatible_disallow_unverified_http_downloads",
+      defaultValue = "false",
+      documentationCategory = OptionDocumentationCategory.STARLARK_SEMANTICS,
+      effectTags = {OptionEffectTag.LOADING_AND_ANALYSIS},
+      metadataTags = {
+        OptionMetadataTag.INCOMPATIBLE_CHANGE,
+        OptionMetadataTag.TRIGGERED_BY_ALL_INCOMPATIBLE_CHANGES
+      },
+      help = "If set, disallow downloads via plain http if no checksum is given")
+  public boolean incompatibleDisallowUnverifiedHttpDownloads;
+
+  @Option(
       name = "incompatible_expand_directories",
       defaultValue = "true",
       category = "incompatible changes",
@@ -395,7 +470,7 @@ public class StarlarkSemanticsOptions extends OptionsBase implements Serializabl
 
   @Option(
       name = "incompatible_new_actions_api",
-      defaultValue = "false",
+      defaultValue = "true",
       documentationCategory = OptionDocumentationCategory.STARLARK_SEMANTICS,
       effectTags = {OptionEffectTag.BUILD_FILE_SEMANTICS},
       metadataTags = {
@@ -409,7 +484,7 @@ public class StarlarkSemanticsOptions extends OptionsBase implements Serializabl
 
   @Option(
       name = "incompatible_no_attr_license",
-      defaultValue = "false",
+      defaultValue = "true",
       documentationCategory = OptionDocumentationCategory.STARLARK_SEMANTICS,
       effectTags = {OptionEffectTag.BUILD_FILE_SEMANTICS},
       metadataTags = {
@@ -421,7 +496,7 @@ public class StarlarkSemanticsOptions extends OptionsBase implements Serializabl
 
   @Option(
       name = "incompatible_no_output_attr_default",
-      defaultValue = "false",
+      defaultValue = "true",
       documentationCategory = OptionDocumentationCategory.STARLARK_SEMANTICS,
       effectTags = {OptionEffectTag.BUILD_FILE_SEMANTICS},
       metadataTags = {
@@ -434,8 +509,20 @@ public class StarlarkSemanticsOptions extends OptionsBase implements Serializabl
   public boolean incompatibleNoOutputAttrDefault;
 
   @Option(
-      name = "incompatible_no_support_tools_in_action_inputs",
+      name = "incompatible_no_rule_outputs_param",
       defaultValue = "false",
+      documentationCategory = OptionDocumentationCategory.STARLARK_SEMANTICS,
+      effectTags = {OptionEffectTag.BUILD_FILE_SEMANTICS},
+      metadataTags = {
+        OptionMetadataTag.INCOMPATIBLE_CHANGE,
+        OptionMetadataTag.TRIGGERED_BY_ALL_INCOMPATIBLE_CHANGES
+      },
+      help = "If set to true, disables the `outputs` parameter of the `rule()` Starlark function.")
+  public boolean incompatibleNoRuleOutputsParam;
+
+  @Option(
+      name = "incompatible_no_support_tools_in_action_inputs",
+      defaultValue = "true",
       documentationCategory = OptionDocumentationCategory.STARLARK_SEMANTICS,
       effectTags = {OptionEffectTag.BUILD_FILE_SEMANTICS},
       metadataTags = {
@@ -463,7 +550,7 @@ public class StarlarkSemanticsOptions extends OptionsBase implements Serializabl
 
   @Option(
       name = "incompatible_no_transitive_loads",
-      defaultValue = "false",
+      defaultValue = "true",
       documentationCategory = OptionDocumentationCategory.STARLARK_SEMANTICS,
       effectTags = {OptionEffectTag.BUILD_FILE_SEMANTICS},
       metadataTags = {
@@ -503,7 +590,42 @@ public class StarlarkSemanticsOptions extends OptionsBase implements Serializabl
   public boolean incompatibleRemoveNativeMavenJar;
 
   @Option(
-      name = "incompatible_strict_argument_ordering",
+      name = "incompatible_run_shell_command_string",
+      defaultValue = "false",
+      documentationCategory = OptionDocumentationCategory.STARLARK_SEMANTICS,
+      effectTags = {OptionEffectTag.BUILD_FILE_SEMANTICS},
+      metadataTags = {
+        OptionMetadataTag.INCOMPATIBLE_CHANGE,
+        OptionMetadataTag.TRIGGERED_BY_ALL_INCOMPATIBLE_CHANGES
+      },
+      help = "If set to true, the command parameter of actions.run_shell will only accept string")
+  public boolean incompatibleRunShellCommandString;
+
+  /** Used in an integration test to confirm that flags are visible to the interpreter. */
+  @Option(
+      name = "internal_skylark_flag_test_canary",
+      defaultValue = "false",
+      documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,
+      effectTags = {OptionEffectTag.UNKNOWN})
+  public boolean internalSkylarkFlagTestCanary;
+
+  @Option(
+      name = "incompatible_do_not_split_linking_cmdline",
+      defaultValue = "true",
+      documentationCategory = OptionDocumentationCategory.BUILD_TIME_OPTIMIZATION,
+      effectTags = {OptionEffectTag.LOADING_AND_ANALYSIS},
+      metadataTags = {
+        OptionMetadataTag.INCOMPATIBLE_CHANGE,
+        OptionMetadataTag.TRIGGERED_BY_ALL_INCOMPATIBLE_CHANGES
+      },
+      help =
+          "When true, Bazel no longer modifies command line flags used for linking, and also "
+              + "doesn't selectively decide which flags go to the param file and which don't.  "
+              + "See https://github.com/bazelbuild/bazel/issues/7670 for details.")
+  public boolean incompatibleDoNotSplitLinkingCmdline;
+
+  @Option(
+      name = "incompatible_objc_framework_cleanup",
       defaultValue = "true",
       documentationCategory = OptionDocumentationCategory.STARLARK_SEMANTICS,
       effectTags = {OptionEffectTag.BUILD_FILE_SEMANTICS},
@@ -512,21 +634,54 @@ public class StarlarkSemanticsOptions extends OptionsBase implements Serializabl
         OptionMetadataTag.TRIGGERED_BY_ALL_INCOMPATIBLE_CHANGES
       },
       help =
-          "If set to true, the order of arguments is stricter in function calls, see "
-              + "https://github.com/bazelbuild/bazel/issues/6611")
-  public boolean incompatibleStricArgumentOrdering;
-
-  /** Used in an integration test to confirm that flags are visible to the interpreter. */
-  @Option(
-    name = "internal_skylark_flag_test_canary",
-    defaultValue = "false",
-    documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,
-    effectTags = {OptionEffectTag.UNKNOWN}
-  )
-  public boolean internalSkylarkFlagTestCanary;
+          "If enabled, use the post-cleanup mode for prebuilt frameworks.  The cleanup changes "
+              + "the objc provider API pertaining to frameworks.  This change is expected to be "
+              + "transparent to most users unless they write their own Starlark rules to handle "
+              + "frameworks.  See https://github.com/bazelbuild/bazel/issues/7944 for details.")
+  public boolean incompatibleObjcFrameworkCleanup;
 
   @Option(
-      name = "incompatible_use_toolchain_providers_in_java_common",
+      name = "incompatible_restrict_named_params",
+      defaultValue = "false",
+      documentationCategory = OptionDocumentationCategory.STARLARK_SEMANTICS,
+      effectTags = {OptionEffectTag.LOADING_AND_ANALYSIS},
+      metadataTags = {
+        OptionMetadataTag.INCOMPATIBLE_CHANGE,
+        OptionMetadataTag.TRIGGERED_BY_ALL_INCOMPATIBLE_CHANGES
+      },
+      help =
+          "If set to true, restricts a number of Starlark built-in function parameters to be "
+              + "only specifiable positionally (and not by keyword).")
+  public boolean incompatibleRestrictNamedParams;
+
+  @Option(
+      name = "incompatible_restrict_attribute_names",
+      defaultValue = "false",
+      documentationCategory = OptionDocumentationCategory.STARLARK_SEMANTICS,
+      effectTags = {OptionEffectTag.LOADING_AND_ANALYSIS},
+      metadataTags = {
+        OptionMetadataTag.INCOMPATIBLE_CHANGE,
+        OptionMetadataTag.TRIGGERED_BY_ALL_INCOMPATIBLE_CHANGES
+      },
+      help = "If set to true, restrict rule attribute names to valid identifiers")
+  public boolean incompatibleRestrictAttributeNames;
+
+  @Option(
+      name = "incompatible_depset_for_libraries_to_link_getter",
+      defaultValue = "true",
+      documentationCategory = OptionDocumentationCategory.STARLARK_SEMANTICS,
+      effectTags = {OptionEffectTag.LOADING_AND_ANALYSIS},
+      metadataTags = {
+        OptionMetadataTag.INCOMPATIBLE_CHANGE,
+        OptionMetadataTag.TRIGGERED_BY_ALL_INCOMPATIBLE_CHANGES
+      },
+      help =
+          "When true, Bazel no longer returns a list from linking_context.libraries_to_link but "
+              + "returns a depset instead.")
+  public boolean incompatibleDepsetForLibrariesToLinkGetter;
+
+  @Option(
+      name = "incompatible_restrict_string_escapes",
       defaultValue = "false",
       documentationCategory = OptionDocumentationCategory.STARLARK_SEMANTICS,
       effectTags = {OptionEffectTag.BUILD_FILE_SEMANTICS},
@@ -534,55 +689,79 @@ public class StarlarkSemanticsOptions extends OptionsBase implements Serializabl
         OptionMetadataTag.INCOMPATIBLE_CHANGE,
         OptionMetadataTag.TRIGGERED_BY_ALL_INCOMPATIBLE_CHANGES
       },
-      help =
-          "If set to true, java_common APIs that take a java_toolchain or host_javabase parameter "
-              + " require a JavaTootoolchainInfo or JavaRuntimeInfo instead of a configured"
-              + " target.")
-  public boolean incompatibleUseToolchainProvidersInJavaCommon;
+      help = "If set to true, unknown string escapes like `\\a` become rejected.")
+  public boolean incompatibleRestrictStringEscapes;
+
+  /**
+   * An interner to reduce the number of StarlarkSemantics instances. A single Blaze instance should
+   * never accumulate a large number of these and being able to shortcut on object identity makes a
+   * comparison later much faster. In particular, the semantics become part of the
+   * MethodDescriptorKey in FuncallExpression and are thus compared for every function call.
+   */
+  private static final Interner<StarlarkSemantics> INTERNER = BlazeInterners.newWeakInterner();
 
   /** Constructs a {@link StarlarkSemantics} object corresponding to this set of option values. */
   public StarlarkSemantics toSkylarkSemantics() {
-    return StarlarkSemantics.builder()
-        // <== Add new options here in alphabetic order ==>
-        .checkThirdPartyTargetsHaveLicenses(checkThirdPartyTargetsHaveLicenses)
-        .experimentalBuildSettingApi(experimentalBuildSettingApi)
-        .experimentalCcSkylarkApiEnabledPackages(experimentalCcSkylarkApiEnabledPackages)
-        .experimentalEnableAndroidMigrationApis(experimentalEnableAndroidMigrationApis)
-        .experimentalJavaCommonCreateProviderEnabledPackages(
-            experimentalJavaCommonCreateProviderEnabledPackages)
-        .experimentalPlatformsApi(experimentalPlatformsApi)
-        .experimentalStarlarkConfigTransitions(experimentalStarlarkConfigTransitions)
-        .experimentalTransitionWhitelistLocation(experimentalTransitionWhitelistLocation)
-        .incompatibleBzlDisallowLoadAfterStatement(incompatibleBzlDisallowLoadAfterStatement)
-        .incompatibleDepsetIsNotIterable(incompatibleDepsetIsNotIterable)
-        .incompatibleDepsetUnion(incompatibleDepsetUnion)
-        .incompatibleDisableThirdPartyLicenseChecking(incompatibleDisableThirdPartyLicenseChecking)
-        .incompatibleDisableDeprecatedAttrParams(incompatibleDisableDeprecatedAttrParams)
-        .incompatibleDisableObjcProviderResources(incompatibleDisableObjcProviderResources)
-        .incompatibleDisallowDataTransition(incompatibleDisallowDataTransition)
-        .incompatibleDisallowDictPlus(incompatibleDisallowDictPlus)
-        .incompatibleDisallowFileType(incompatibleDisallowFileType)
-        .incompatibleDisallowLegacyJavaInfo(incompatibleDisallowLegacyJavaInfo)
-        .incompatibleDisallowLegacyJavaProvider(incompatibleDisallowLegacyJavaProvider)
-        .incompatibleDisallowLoadLabelsToCrossPackageBoundaries(
-            incompatibleDisallowLoadLabelsToCrossPackageBoundaries)
-        .incompatibleDisallowNativeInBuildFile(incompatibleDisallowNativeInBuildFile)
-        .incompatibleDisallowOldStyleArgsAdd(incompatibleDisallowOldStyleArgsAdd)
-        .incompatibleDisallowStructProviderSyntax(incompatibleDisallowStructProviderSyntax)
-        .incompatibleExpandDirectories(incompatibleExpandDirectories)
-        .incompatibleNewActionsApi(incompatibleNewActionsApi)
-        .incompatibleNoAttrLicense(incompatibleNoAttrLicense)
-        .incompatibleNoOutputAttrDefault(incompatibleNoOutputAttrDefault)
-        .incompatibleNoSupportToolsInActionInputs(incompatibleNoSupportToolsInActionInputs)
-        .incompatibleNoTargetOutputGroup(incompatibleNoTargetOutputGroup)
-        .incompatibleNoTransitiveLoads(incompatibleNoTransitiveLoads)
-        .incompatibleRemapMainRepo(incompatibleRemapMainRepo)
-        .incompatibleRemoveNativeMavenJar(incompatibleRemoveNativeMavenJar)
-        .incompatibleRequireFeatureConfigurationForPic(requireFeatureConfigurationForPic)
-        .incompatibleStricArgumentOrdering(incompatibleStricArgumentOrdering)
-        .incompatibleUseToolchainProvidersInJavaCommon(
-            incompatibleUseToolchainProvidersInJavaCommon)
-        .internalSkylarkFlagTestCanary(internalSkylarkFlagTestCanary)
-        .build();
+    StarlarkSemantics semantics =
+        StarlarkSemantics.builder()
+            // <== Add new options here in alphabetic order ==>
+            .experimentalAllowIncrementalRepositoryUpdates(
+                experimentalAllowIncrementalRepositoryUpdates)
+            .experimentalBuildSettingApi(experimentalBuildSettingApi)
+            .experimentalCcSkylarkApiEnabledPackages(experimentalCcSkylarkApiEnabledPackages)
+            .experimentalEnableAndroidMigrationApis(experimentalEnableAndroidMigrationApis)
+            .experimentalGoogleLegacyApi(experimentalGoogleLegacyApi)
+            .experimentalJavaCommonCreateProviderEnabledPackages(
+                experimentalJavaCommonCreateProviderEnabledPackages)
+            .experimentalPlatformsApi(experimentalPlatformsApi)
+            .experimentalStarlarkConfigTransitions(experimentalStarlarkConfigTransitions)
+            .experimentalStarlarkUnusedInputsList(experimentalStarlarkUnusedInputsList)
+            .incompatibleBzlDisallowLoadAfterStatement(incompatibleBzlDisallowLoadAfterStatement)
+            .incompatibleDepsetIsNotIterable(incompatibleDepsetIsNotIterable)
+            .incompatibleDepsetUnion(incompatibleDepsetUnion)
+            .incompatibleDisableTargetProviderFields(incompatibleDisableTargetProviderFields)
+            .incompatibleDisableThirdPartyLicenseChecking(
+                incompatibleDisableThirdPartyLicenseChecking)
+            .incompatibleDisableDeprecatedAttrParams(incompatibleDisableDeprecatedAttrParams)
+            .incompatibleDisableObjcProviderResources(incompatibleDisableObjcProviderResources)
+            .incompatibleDisallowDictPlus(incompatibleDisallowDictPlus)
+            .incompatibleDisallowEmptyGlob(incompatibleDisallowEmptyGlob)
+            .incompatibleDisallowLegacyJavaInfo(incompatibleDisallowLegacyJavaInfo)
+            .incompatibleDisallowLegacyJavaProvider(incompatibleDisallowLegacyJavaProvider)
+            .incompatibleDisallowOldStyleArgsAdd(incompatibleDisallowOldStyleArgsAdd)
+            .incompatibleDisallowStructProviderSyntax(incompatibleDisallowStructProviderSyntax)
+            .incompatibleDisallowRuleExecutionPlatformConstraintsAllowed(
+                incompatibleDisallowRuleExecutionPlatformConstraintsAllowed)
+            .incompatibleDisallowUnverifiedHttpDownloads(
+                incompatibleDisallowUnverifiedHttpDownloads)
+            .incompatibleExpandDirectories(incompatibleExpandDirectories)
+            .incompatibleNewActionsApi(incompatibleNewActionsApi)
+            .incompatibleNoAttrLicense(incompatibleNoAttrLicense)
+            .incompatibleNoOutputAttrDefault(incompatibleNoOutputAttrDefault)
+            .incompatibleNoRuleOutputsParam(incompatibleNoRuleOutputsParam)
+            .incompatibleNoSupportToolsInActionInputs(incompatibleNoSupportToolsInActionInputs)
+            .incompatibleNoTargetOutputGroup(incompatibleNoTargetOutputGroup)
+            .incompatibleNoTransitiveLoads(incompatibleNoTransitiveLoads)
+            .incompatibleObjcFrameworkCleanup(incompatibleObjcFrameworkCleanup)
+            .incompatibleRemapMainRepo(incompatibleRemapMainRepo)
+            .incompatibleRemoveNativeMavenJar(incompatibleRemoveNativeMavenJar)
+            .incompatibleRestrictAttributeNames(incompatibleRestrictAttributeNames)
+            .incompatibleRestrictNamedParams(incompatibleRestrictNamedParams)
+            .incompatibleRunShellCommandString(incompatibleRunShellCommandString)
+            .incompatibleStringJoinRequiresStrings(incompatibleStringJoinRequiresStrings)
+            .internalSkylarkFlagTestCanary(internalSkylarkFlagTestCanary)
+            .incompatibleDoNotSplitLinkingCmdline(incompatibleDoNotSplitLinkingCmdline)
+            .incompatibleDepsetForLibrariesToLinkGetter(incompatibleDepsetForLibrariesToLinkGetter)
+            .incompatibleRestrictStringEscapes(incompatibleRestrictStringEscapes)
+            .incompatibleDisallowSplitEmptySeparator(incompatibleDisallowSplitEmptySeparator)
+            .incompatibleDisallowDictLookupUnhashableKeys(
+                incompatibleDisallowDictLookupUnhashableKeys)
+            .incompatibleDisablePartitionDefaultParameter(
+                incompatibleDisablePartitionDefaultParameter)
+            .incompatibleAllowTagsPropagation(incompatibleAllowTagsPropagation)
+            .incompatibleAssignmentIdentifiersHaveLocalScope(
+                incompatibleAssignmentIdentifiersHaveLocalScope)
+            .build();
+    return INTERNER.intern(semantics);
   }
 }

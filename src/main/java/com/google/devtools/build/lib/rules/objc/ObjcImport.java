@@ -21,8 +21,8 @@ import com.google.devtools.build.lib.analysis.RuleConfiguredTargetFactory;
 import com.google.devtools.build.lib.analysis.RuleContext;
 import com.google.devtools.build.lib.analysis.configuredtargets.RuleConfiguredTarget.Mode;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
+import com.google.devtools.build.lib.rules.cpp.CcCommon;
 import com.google.devtools.build.lib.rules.cpp.CppModuleMap;
-import com.google.devtools.build.lib.rules.objc.ObjcCommon.ResourceAttributes;
 import com.google.devtools.build.lib.syntax.Type;
 
 /**
@@ -32,19 +32,16 @@ public class ObjcImport implements RuleConfiguredTargetFactory {
   @Override
   public ConfiguredTarget create(RuleContext ruleContext)
       throws InterruptedException, RuleErrorException, ActionConflictException {
+    CcCommon.checkRuleLoadedThroughMacro(ruleContext);
     ObjcCommon common =
         new ObjcCommon.Builder(ruleContext)
             .setCompilationAttributes(
                 CompilationAttributes.Builder.fromRuleContext(ruleContext).build())
-            .setResourceAttributes(new ResourceAttributes(ruleContext))
             .setIntermediateArtifacts(ObjcRuleClasses.intermediateArtifacts(ruleContext))
             .setAlwayslink(ruleContext.attributes().get("alwayslink", Type.BOOLEAN))
             .setHasModuleMap()
             .addExtraImportLibraries(
                 ruleContext.getPrerequisiteArtifacts("archives", Mode.TARGET).list())
-            .addDepObjcProviders(
-                ruleContext.getPrerequisites(
-                    "bundles", Mode.TARGET, ObjcProvider.SKYLARK_CONSTRUCTOR))
             .build();
 
     NestedSetBuilder<Artifact> filesToBuild = NestedSetBuilder.stableOrder();
@@ -62,8 +59,6 @@ public class ObjcImport implements RuleConfiguredTargetFactory {
         .build()
         .registerGenerateModuleMapAction(moduleMap, publicHeaders)
         .validateAttributes();
-
-    new ResourceSupport(ruleContext).validateAttributes();
 
     return ObjcRuleClasses.ruleConfiguredTarget(ruleContext, filesToBuild.build())
         .addNativeDeclaredProvider(common.getObjcProvider())

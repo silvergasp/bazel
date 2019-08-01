@@ -1224,8 +1224,8 @@ public class JavacTurbineTest extends AbstractJavacTurbineCompilationTest {
     addSourceLines(
         "Hello.java",
         "import " + Lib.class.getCanonicalName() + ";",
-        "import no.such.Class;",
         "class Hello extends Lib {",
+        "  no.such.Class f;",
         "}");
 
     optionsBuilder.addClassPathEntries(ImmutableList.of(lib.toString()));
@@ -1487,11 +1487,10 @@ public class JavacTurbineTest extends AbstractJavacTurbineCompilationTest {
   }
 
   private static Set<String> filterManifestEntries(Set<String> entries) {
-    return entries
-        .stream()
+    return entries.stream()
         .filter(
             name ->
-                !(name.equals(JavacTurbine.MANIFEST_DIR)
+                !(name.startsWith(JavacTurbine.MANIFEST_DIR)
                     || name.equals(JavacTurbine.MANIFEST_NAME)))
         .collect(toSet());
   }

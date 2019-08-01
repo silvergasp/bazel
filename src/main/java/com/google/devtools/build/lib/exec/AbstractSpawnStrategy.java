@@ -33,11 +33,14 @@ import com.google.devtools.build.lib.actions.SpawnActionContext;
 import com.google.devtools.build.lib.actions.SpawnResult;
 import com.google.devtools.build.lib.actions.SpawnResult.Status;
 import com.google.devtools.build.lib.actions.Spawns;
+import com.google.devtools.build.lib.actions.cache.MetadataHandler;
 import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.events.ExtendedEventHandler;
 import com.google.devtools.build.lib.exec.SpawnCache.CacheHandle;
 import com.google.devtools.build.lib.exec.SpawnRunner.ProgressStatus;
 import com.google.devtools.build.lib.exec.SpawnRunner.SpawnExecutionContext;
+import com.google.devtools.build.lib.profiler.Profiler;
+import com.google.devtools.build.lib.profiler.SilentCloseable;
 import com.google.devtools.build.lib.util.CommandFailureUtils;
 import com.google.devtools.build.lib.util.io.FileOutErr;
 import com.google.devtools.build.lib.vfs.Path;
@@ -51,9 +54,17 @@ import java.util.concurrent.atomic.AtomicReference;
 
 /** Abstract common ancestor for spawn strategies implementing the common parts. */
 public abstract class AbstractSpawnStrategy implements SandboxedSpawnActionContext {
+
+  /**
+   * Last unique identifier assigned to a spawn by this strategy.
+   *
+   * <p>These identifiers must be unique per strategy within the context of a Bazel server instance
+   * to avoid cross-contamination across actions in case we perform asynchronous deletions.
+   */
+  private static final AtomicInteger execCount = new AtomicInteger();
+
   private final SpawnInputExpander spawnInputExpander;
   private final SpawnRunner spawnRunner;
-  private final AtomicInteger execCount = new AtomicInteger();
 
   public AbstractSpawnStrategy(Path execRoot, SpawnRunner spawnRunner) {
     this.spawnInputExpander = new SpawnInputExpander(execRoot, false);
@@ -115,7 +126,7 @@ public abstract class AbstractSpawnStrategy implements SandboxedSpawnActionConte
         }
       }
     } catch (IOException e) {
-      throw new EnvironmentalExecException("Unexpected IO error", e);
+      throw new EnvironmentalExecException(e);
     } catch (SpawnExecException e) {
       ex = e;
       spawnResult = e.getSpawnResult();
@@ -201,6 +212,11 @@ public abstract class AbstractSpawnStrategy implements SandboxedSpawnActionConte
     }
 
     @Override
+    public MetadataHandler getMetadataInjector() {
+      return actionExecutionContext.getMetadataHandler();
+    }
+
+    @Override
     public ArtifactExpander getArtifactExpander() {
       return actionExecutionContext.getArtifactExpander();
     }
@@ -239,13 +255,16 @@ public abstract class AbstractSpawnStrategy implements SandboxedSpawnActionConte
     public SortedMap<PathFragment, ActionInput> getInputMapping(
         boolean expandTreeArtifactsInRunfiles) throws IOException {
       if (lazyInputMapping == null) {
-        lazyInputMapping =
-            spawnInputExpander.getInputMapping(
-                spawn,
-                actionExecutionContext.getArtifactExpander(),
-                actionExecutionContext.getPathResolver(),
-                actionExecutionContext.getMetadataProvider(),
-                expandTreeArtifactsInRunfiles);
+        try (SilentCloseable c =
+            Profiler.instance().profile("AbstractSpawnStrategy.getInputMapping")) {
+          lazyInputMapping =
+              spawnInputExpander.getInputMapping(
+                  spawn,
+                  actionExecutionContext.getArtifactExpander(),
+                  actionExecutionContext.getPathResolver(),
+                  actionExecutionContext.getMetadataProvider(),
+                  expandTreeArtifactsInRunfiles);
+        }
       }
       return lazyInputMapping;
     }

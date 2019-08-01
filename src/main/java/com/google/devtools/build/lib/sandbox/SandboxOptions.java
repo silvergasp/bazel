@@ -18,15 +18,19 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
+import com.google.devtools.build.lib.actions.LocalHostCapacity;
+import com.google.devtools.build.lib.util.ResourceConverter;
 import com.google.devtools.build.lib.vfs.FileSystem;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.common.options.Converter;
+import com.google.devtools.common.options.Converters.TriStateConverter;
 import com.google.devtools.common.options.Option;
 import com.google.devtools.common.options.OptionDocumentationCategory;
 import com.google.devtools.common.options.OptionEffectTag;
 import com.google.devtools.common.options.OptionMetadataTag;
 import com.google.devtools.common.options.OptionsBase;
 import com.google.devtools.common.options.OptionsParsingException;
+import com.google.devtools.common.options.TriState;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
@@ -174,15 +178,17 @@ public class SandboxOptions extends OptionsBase {
   public List<ImmutableMap.Entry<String, String>> sandboxAdditionalMounts;
 
   @Option(
-    name = "experimental_use_sandboxfs",
-    defaultValue = "false",
-    documentationCategory = OptionDocumentationCategory.EXECUTION_STRATEGY,
-    effectTags = {OptionEffectTag.UNKNOWN},
-    help =
-        "Use sandboxfs to create the actions' execroot directories instead of building a symlink "
-            + "tree."
-  )
-  public boolean useSandboxfs;
+      name = "experimental_use_sandboxfs",
+      converter = TriStateConverter.class,
+      defaultValue = "false",
+      documentationCategory = OptionDocumentationCategory.EXECUTION_STRATEGY,
+      effectTags = {OptionEffectTag.UNKNOWN},
+      help =
+          "Use sandboxfs to create the actions' execroot directories instead of building a symlink "
+              + "tree. If \"yes\", the binary provided by --experimental_sandboxfs_path must be "
+              + "valid and correspond to a supported version of sandboxfs. If \"auto\", the binary "
+              + "may be missing or not compatible.")
+  public TriState useSandboxfs;
 
   @Option(
     name = "experimental_sandboxfs_path",
@@ -194,6 +200,40 @@ public class SandboxOptions extends OptionsBase {
             + "bare name, use the first binary of that name found in the PATH."
   )
   public String sandboxfsPath;
+
+  @Option(
+      name = "experimental_sandboxfs_map_symlink_targets",
+      defaultValue = "false",
+      documentationCategory = OptionDocumentationCategory.EXECUTION_STRATEGY,
+      effectTags = {OptionEffectTag.UNKNOWN},
+      help =
+          "If true, maps the targets of symbolic links specified as action inputs into the "
+              + "sandbox. This feature exists purely to workaround buggy rules that do not do "
+              + "this on their own and should be removed once all such rules are fixed.")
+  public boolean sandboxfsMapSymlinkTargets;
+
+  @Option(
+      name = "experimental_use_windows_sandbox",
+      converter = TriStateConverter.class,
+      defaultValue = "false",
+      documentationCategory = OptionDocumentationCategory.EXECUTION_STRATEGY,
+      effectTags = {OptionEffectTag.UNKNOWN},
+      help =
+          "Use Windows sandbox to run actions. "
+              + "If \"yes\", the binary provided by --experimental_windows_sandbox_path must be "
+              + "valid and correspond to a supported version of sandboxfs. If \"auto\", the binary "
+              + "may be missing or not compatible.")
+  public TriState useWindowsSandbox;
+
+  @Option(
+      name = "experimental_windows_sandbox_path",
+      defaultValue = "BazelSandbox.exe",
+      documentationCategory = OptionDocumentationCategory.EXECUTION_STRATEGY,
+      effectTags = {OptionEffectTag.UNKNOWN},
+      help =
+          "Path to the Windows sandbox binary to use when --experimental_use_windows_sandbox is"
+              + " true. If a bare name, use the first binary of that name found in the PATH.")
+  public String windowsSandboxPath;
 
   public ImmutableSet<Path> getInaccessiblePaths(FileSystem fs) {
     List<Path> inaccessiblePaths = new ArrayList<>();
@@ -287,7 +327,7 @@ public class SandboxOptions extends OptionsBase {
 
   @Option(
       name = "incompatible_symlinked_sandbox_expands_tree_artifacts_in_runfiles_tree",
-      defaultValue = "false",
+      defaultValue = "true",
       documentationCategory = OptionDocumentationCategory.EXECUTION_STRATEGY,
       effectTags = {OptionEffectTag.EXECUTION},
       metadataTags = {
@@ -298,4 +338,27 @@ public class SandboxOptions extends OptionsBase {
           "If enabled, the sandbox will expand tree artifacts in runfiles, thus the files that "
               + "are contained in the tree artifact will be symlinked as individual files.")
   public boolean symlinkedSandboxExpandsTreeArtifactsInRunfilesTree;
+
+  @Option(
+      name = "experimental_sandbox_async_tree_delete_idle_threads",
+      defaultValue = "0",
+      converter = AsyncTreeDeletesConverter.class,
+      documentationCategory = OptionDocumentationCategory.EXECUTION_STRATEGY,
+      effectTags = {OptionEffectTag.EXECUTION},
+      help =
+          "If 0, delete sandbox trees as soon as an action completes (causing completion of the "
+              + "action to be delayed). If greater than zero, execute the deletion of such threes"
+              + " on an asynchronous thread pool that has size 1 when the build is running and"
+              + " grows to the size specified by this flag when the server is idle.")
+  public int asyncTreeDeleteIdleThreads;
+
+  /** Converter for the number of threads used for asynchronous tree deletion. */
+  public static final class AsyncTreeDeletesConverter extends ResourceConverter {
+    public AsyncTreeDeletesConverter() {
+      super(
+          () -> (int) Math.ceil(LocalHostCapacity.getLocalHostCapacity().getCpuUsage()),
+          0,
+          Integer.MAX_VALUE);
+    }
+  }
 }

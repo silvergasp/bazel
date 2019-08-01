@@ -29,7 +29,7 @@ import com.google.devtools.build.lib.analysis.Runfiles;
 import com.google.devtools.build.lib.analysis.actions.ActionConstructionContext;
 import com.google.devtools.build.lib.analysis.actions.CustomCommandLine;
 import com.google.devtools.build.lib.analysis.actions.SpawnAction;
-import com.google.devtools.build.lib.analysis.config.BuildConfiguration.StrictDepsMode;
+import com.google.devtools.build.lib.analysis.config.CoreOptionConverters.StrictDepsMode;
 import com.google.devtools.build.lib.analysis.skylark.SkylarkActionFactory;
 import com.google.devtools.build.lib.analysis.skylark.SkylarkRuleContext;
 import com.google.devtools.build.lib.cmdline.Label;
@@ -374,6 +374,8 @@ final class JavaInfoBuildHelper {
       SkylarkList<JavaInfo> exports,
       SkylarkList<JavaInfo> plugins,
       SkylarkList<JavaInfo> exportedPlugins,
+      SkylarkList<Artifact> annotationProcessorAdditionalInputs,
+      SkylarkList<Artifact> annotationProcessorAdditionalOutputs,
       String strictDepsMode,
       JavaToolchainProvider javaToolchain,
       JavaRuntimeInfo hostJavabase,
@@ -384,6 +386,7 @@ final class JavaInfoBuildHelper {
       Location location,
       Environment environment)
       throws EvalException {
+
     if (sourceJars.isEmpty()
         && sourceFiles.isEmpty()
         && exports.isEmpty()
@@ -402,9 +405,10 @@ final class JavaInfoBuildHelper {
             .addSourceFiles(sourceFiles)
             .addResources(resources)
             .setSourcePathEntries(sourcepathEntries)
+            .addAdditionalOutputs(annotationProcessorAdditionalOutputs)
             .setJavacOpts(
                 ImmutableList.<String>builder()
-                    .addAll(toolchainProvider.getJavacOptions())
+                    .addAll(toolchainProvider.getJavacOptions(skylarkRuleContext.getRuleContext()))
                     .addAll(
                         javaSemantics.getCompatibleJavacOptions(
                             skylarkRuleContext.getRuleContext(), toolchainProvider))
@@ -432,7 +436,6 @@ final class JavaInfoBuildHelper {
             javaSemantics,
             toolchainProvider,
             hostJavabase,
-            SkylarkList.createImmutable(ImmutableList.of()),
             outputJarsBuilder,
             /*createOutputSourceJar=*/ true,
             outputSourceJar,
@@ -441,7 +444,8 @@ final class JavaInfoBuildHelper {
             // added to javaInfoBuilder for this target.
             NestedSetBuilder.wrap(
                 Order.STABLE_ORDER,
-                JavaInfo.fetchProvidersFromList(concat(deps, exports), JavaGenJarsProvider.class)));
+                JavaInfo.fetchProvidersFromList(concat(deps, exports), JavaGenJarsProvider.class)),
+            annotationProcessorAdditionalInputs.getImmutableList());
 
     JavaCompilationArgsProvider javaCompilationArgsProvider =
         helper.buildCompilationArgsProvider(artifacts, true, neverlink);

@@ -34,12 +34,12 @@ import com.google.common.collect.Multimaps;
 import com.google.common.collect.Sets;
 import com.google.devtools.build.lib.actions.Action;
 import com.google.devtools.build.lib.actions.ActionAnalysisMetadata;
+import com.google.devtools.build.lib.actions.ActionKeyContext;
 import com.google.devtools.build.lib.actions.ActionLookupValue;
 import com.google.devtools.build.lib.actions.ActionOwner;
 import com.google.devtools.build.lib.actions.ActionRegistry;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.Artifact.SpecialArtifact;
-import com.google.devtools.build.lib.actions.ArtifactOwner;
 import com.google.devtools.build.lib.actions.ArtifactRoot;
 import com.google.devtools.build.lib.analysis.AliasProvider.TargetMode;
 import com.google.devtools.build.lib.analysis.ConfiguredRuleClassProvider.PrerequisiteValidator;
@@ -49,11 +49,12 @@ import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration.Fragment;
 import com.google.devtools.build.lib.analysis.config.BuildOptions;
 import com.google.devtools.build.lib.analysis.config.ConfigMatchingProvider;
+import com.google.devtools.build.lib.analysis.config.CoreOptions;
 import com.google.devtools.build.lib.analysis.config.FragmentCollection;
 import com.google.devtools.build.lib.analysis.config.transitions.ConfigurationTransition;
 import com.google.devtools.build.lib.analysis.config.transitions.NoTransition;
-import com.google.devtools.build.lib.analysis.config.transitions.PatchTransition;
 import com.google.devtools.build.lib.analysis.config.transitions.SplitTransition;
+import com.google.devtools.build.lib.analysis.config.transitions.TransitionFactory;
 import com.google.devtools.build.lib.analysis.configuredtargets.RuleConfiguredTarget.Mode;
 import com.google.devtools.build.lib.analysis.constraints.ConstraintSemantics;
 import com.google.devtools.build.lib.analysis.platform.PlatformInfo;
@@ -70,6 +71,7 @@ import com.google.devtools.build.lib.packages.Aspect;
 import com.google.devtools.build.lib.packages.AspectDescriptor;
 import com.google.devtools.build.lib.packages.Attribute;
 import com.google.devtools.build.lib.packages.AttributeMap;
+import com.google.devtools.build.lib.packages.AttributeTransitionData;
 import com.google.devtools.build.lib.packages.BuildType;
 import com.google.devtools.build.lib.packages.BuiltinProvider;
 import com.google.devtools.build.lib.packages.ConfigurationFragmentPolicy;
@@ -184,7 +186,7 @@ public final class RuleContext extends TargetContext
   private final ConfigurationFragmentPolicy configurationFragmentPolicy;
   private final ImmutableList<Class<? extends BuildConfiguration.Fragment>> universalFragments;
   private final RuleErrorConsumer reporter;
-  @Nullable private final ToolchainContext toolchainContext;
+  @Nullable private final ResolvedToolchainContext toolchainContext;
   private final ConstraintSemantics constraintSemantics;
 
   private ActionOwner actionOwner;
@@ -203,7 +205,7 @@ public final class RuleContext extends TargetContext
       String ruleClassNameForLogging,
       ActionLookupValue.ActionLookupKey actionLookupKey,
       ImmutableMap<String, Attribute> aspectAttributes,
-      @Nullable ToolchainContext toolchainContext,
+      @Nullable ResolvedToolchainContext toolchainContext,
       ConstraintSemantics constraintSemantics) {
     super(
         builder.env,
@@ -375,7 +377,7 @@ public final class RuleContext extends TargetContext
 
   @Override
   public boolean hasErrors() {
-    return getAnalysisEnvironment().hasErrors();
+    return reporter.hasErrors();
   }
 
   /**
@@ -411,6 +413,16 @@ public final class RuleContext extends TargetContext
           createActionOwner(rule, aspectDescriptors, getConfiguration(), getExecutionPlatform());
     }
     return actionOwner;
+  }
+
+  /**
+   * We have to re-implement this method here because it is declared in the interface {@link
+   * ActionConstructionContext}. This class inherits from {@link TargetContext} which doesn't
+   * implement the {@link ActionConstructionContext} interface.
+   */
+  @Override
+  public ActionKeyContext getActionKeyContext() {
+    return super.getActionKeyContext();
   }
 
   /**
@@ -486,12 +498,14 @@ public final class RuleContext extends TargetContext
   }
 
   @Override
-  public ArtifactOwner getOwner() {
+  public ActionLookupValue.ActionLookupKey getOwner() {
     return getAnalysisEnvironment().getOwner();
   }
 
   public ImmutableList<Artifact> getBuildInfo(BuildInfoKey key) throws InterruptedException {
-    return getAnalysisEnvironment().getBuildInfo(this, key, getConfiguration());
+    return getAnalysisEnvironment()
+        .getBuildInfo(
+            AnalysisUtils.isStampingEnabled(this, getConfiguration()), key, getConfiguration());
   }
 
   @VisibleForTesting
@@ -642,22 +656,6 @@ public final class RuleContext extends TargetContext
    * Creates an artifact in a directory that is unique to the package that contains the rule, thus
    * guaranteeing that it never clashes with artifacts created by rules in other packages.
    */
-  public Artifact getPackageRelativeArtifact(String relative, ArtifactRoot root) {
-    return getPackageRelativeArtifact(PathFragment.create(relative), root);
-  }
-
-  /**
-   * Creates an artifact in a directory that is unique to the package that contains the rule, thus
-   * guaranteeing that it never clashes with artifacts created by rules in other packages.
-   */
-  public Artifact getPackageRelativeTreeArtifact(String relative, ArtifactRoot root) {
-    return getPackageRelativeTreeArtifact(PathFragment.create(relative), root);
-  }
-
-  /**
-   * Creates an artifact in a directory that is unique to the package that contains the rule, thus
-   * guaranteeing that it never clashes with artifacts created by rules in other packages.
-   */
   public Artifact getBinArtifact(String relative) {
     return getBinArtifact(PathFragment.create(relative));
   }
@@ -686,8 +684,37 @@ public final class RuleContext extends TargetContext
   }
 
   @Override
-  public Artifact getPackageRelativeArtifact(PathFragment relative, ArtifactRoot root) {
-    return getDerivedArtifact(getPackageDirectory().getRelative(relative), root);
+  public Artifact.DerivedArtifact getPackageRelativeArtifact(
+      PathFragment relative, ArtifactRoot root) {
+    return getPackageRelativeArtifact(relative, root, /*contentBasedPath=*/ false);
+  }
+
+  /**
+   * Same as {@link #getPackageRelativeArtifact(PathFragment, ArtifactRoot)} but includes the option
+   * option to use a content-based path for this artifact (see {@link
+   * BuildConfiguration#useContentBasedOutputPaths()}).
+   */
+  private Artifact.DerivedArtifact getPackageRelativeArtifact(
+      PathFragment relative, ArtifactRoot root, boolean contentBasedPath) {
+    return getDerivedArtifact(getPackageDirectory().getRelative(relative), root, contentBasedPath);
+  }
+
+  /**
+   * Creates an artifact in a directory that is unique to the package that contains the rule, thus
+   * guaranteeing that it never clashes with artifacts created by rules in other packages.
+   */
+  public Artifact getPackageRelativeArtifact(String relative, ArtifactRoot root) {
+    return getPackageRelativeArtifact(relative, root, /*contentBasedPath=*/ false);
+  }
+
+  /**
+   * Same as {@link #getPackageRelativeArtifact(String, ArtifactRoot)} but includes the option to
+   * use a content-based path for this artifact (see {@link
+   * BuildConfiguration#useContentBasedOutputPaths()}).
+   */
+  private Artifact getPackageRelativeArtifact(
+      String relative, ArtifactRoot root, boolean contentBasedPath) {
+    return getPackageRelativeArtifact(PathFragment.create(relative), root, contentBasedPath);
   }
 
   @Override
@@ -703,11 +730,22 @@ public final class RuleContext extends TargetContext
    * method.
    */
   @Override
-  public Artifact getDerivedArtifact(PathFragment rootRelativePath, ArtifactRoot root) {
+  public Artifact.DerivedArtifact getDerivedArtifact(
+      PathFragment rootRelativePath, ArtifactRoot root) {
+    return getDerivedArtifact(rootRelativePath, root, /*contentBasedPath=*/ false);
+  }
+
+  /**
+   * Same as {@link #getDerivedArtifact(PathFragment, ArtifactRoot)} but includes the option to use
+   * a content-based path for this artifact (see {@link
+   * BuildConfiguration#useContentBasedOutputPaths()}).
+   */
+  public Artifact.DerivedArtifact getDerivedArtifact(
+      PathFragment rootRelativePath, ArtifactRoot root, boolean contentBasedPath) {
     Preconditions.checkState(rootRelativePath.startsWith(getPackageDirectory()),
         "Output artifact '%s' not under package directory '%s' for target '%s'",
         rootRelativePath, getPackageDirectory(), getLabel());
-    return getAnalysisEnvironment().getDerivedArtifact(rootRelativePath, root);
+    return getAnalysisEnvironment().getDerivedArtifact(rootRelativePath, root, contentBasedPath);
   }
 
   @Override
@@ -799,7 +837,7 @@ public final class RuleContext extends TargetContext
   public List<ConfiguredTargetAndData> getPrerequisiteConfiguredTargetAndTargets(
       String attributeName, Mode mode) {
     Attribute attributeDefinition = attributes().getAttributeDefinition(attributeName);
-    if ((mode == Mode.TARGET) && (attributeDefinition.hasSplitConfigurationTransition())) {
+    if ((mode == Mode.TARGET) && (attributeDefinition.getTransitionFactory().isSplit())) {
       // TODO(bazel-team): If you request a split-configured attribute in the target configuration,
       // we return only the list of configured targets for the first architecture; this is for
       // backwards compatibility with existing code in cases where the call to getPrerequisites is
@@ -823,9 +861,16 @@ public final class RuleContext extends TargetContext
       getSplitPrerequisiteConfiguredTargetAndTargets(String attributeName) {
     checkAttribute(attributeName, Mode.SPLIT);
     Attribute attributeDefinition = attributes().getAttributeDefinition(attributeName);
+    Preconditions.checkState(attributeDefinition.getTransitionFactory().isSplit());
     SplitTransition transition =
-        attributeDefinition.getSplitTransition(
-            ConfiguredAttributeMapper.of(rule, configConditions));
+        (SplitTransition)
+            attributeDefinition
+                .getTransitionFactory()
+                .create(
+                    AttributeTransitionData.builder()
+                        .attributes(ConfiguredAttributeMapper.of(rule, configConditions))
+                        .executionPlatform(getToolchainContext().executionPlatform().label())
+                        .build());
     BuildOptions fromOptions = getConfiguration().getOptions();
     List<BuildOptions> splitOptions = transition.split(fromOptions);
     List<ConfiguredTargetAndData> deps = getConfiguredTargetAndTargetDeps(attributeName);
@@ -839,7 +884,7 @@ public final class RuleContext extends TargetContext
     for (BuildOptions options : splitOptions) {
       // This method should only be called when the split config is enabled on the command line, in
       // which case this cpu can't be null.
-      cpus.add(options.get(BuildConfiguration.Options.class).cpu);
+      cpus.add(options.get(CoreOptions.class).cpu);
     }
 
     // Use an ImmutableListMultimap.Builder here to preserve ordering.
@@ -1057,6 +1102,15 @@ public final class RuleContext extends TargetContext
   }
 
   /**
+   * Returns all the providers of the specified type that are listed under the specified attribute
+   * of this target in the BUILD file, and that contain the specified provider.
+   */
+  public <C extends Info> Iterable<? extends TransitiveInfoCollection> getPrerequisitesIf(
+      String attributeName, Mode mode, final BuiltinProvider<C> classType) {
+    return AnalysisUtils.filterByProvider(getPrerequisites(attributeName, mode), classType);
+  }
+
+  /**
    * Returns the prerequisite referred to by the specified attribute. Also checks whether
    * the attribute is marked as executable and that the target referred to can actually be
    * executed.
@@ -1115,6 +1169,10 @@ public final class RuleContext extends TargetContext
     return new Expander(this, getConfigurationMakeVariableContext());
   }
 
+  public Expander getExpander(ImmutableMap<Label, ImmutableCollection<Artifact>> labelMap) {
+    return new Expander(this, getConfigurationMakeVariableContext(), labelMap);
+  }
+
   /**
    * Returns a cached context that maps Make variable names (string) to values (string) without any
    * extra {@link MakeVariableSupplier}.
@@ -1127,7 +1185,7 @@ public final class RuleContext extends TargetContext
   }
 
   @Nullable
-  public ToolchainContext getToolchainContext() {
+  public ResolvedToolchainContext getToolchainContext() {
     return toolchainContext;
   }
 
@@ -1154,15 +1212,16 @@ public final class RuleContext extends TargetContext
       throw new IllegalStateException(getRuleClassNameForLogging() + " attribute " + attributeName
         + " is not a label type attribute");
     }
-    ConfigurationTransition transition = attributeDefinition.getConfigurationTransition();
+    TransitionFactory<AttributeTransitionData> transitionFactory =
+        attributeDefinition.getTransitionFactory();
     if (mode == Mode.HOST) {
-      if (!(transition instanceof PatchTransition)) {
+      if (transitionFactory.isSplit()) {
         throw new IllegalStateException(getRule().getLocation() + ": "
             + getRuleClassNameForLogging() + " attribute " + attributeName
             + " is not configured for the host configuration");
       }
     } else if (mode == Mode.TARGET) {
-      if (!(transition instanceof PatchTransition) && transition != NoTransition.INSTANCE) {
+      if (transitionFactory.isSplit() && !NoTransition.isInstance(transitionFactory)) {
         throw new IllegalStateException(getRule().getLocation() + ": "
             + getRuleClassNameForLogging() + " attribute " + attributeName
             + " is not configured for the target configuration");
@@ -1172,7 +1231,7 @@ public final class RuleContext extends TargetContext
           + getRuleClassNameForLogging() + " attribute " + attributeName
           + ": DATA transition no longer supported"); // See b/80157700.
     } else if (mode == Mode.SPLIT) {
-      if (!(attributeDefinition.hasSplitConfigurationTransition())) {
+      if (!(attributeDefinition.getTransitionFactory().isSplit())) {
         throw new IllegalStateException(getRule().getLocation() + ": "
             + getRuleClassNameForLogging() + " attribute " + attributeName
             + " is not configured for a split transition");
@@ -1322,6 +1381,16 @@ public final class RuleContext extends TargetContext
   @Override
   public Artifact getImplicitOutputArtifact(ImplicitOutputsFunction function)
       throws InterruptedException {
+    return getImplicitOutputArtifact(function, /*contentBasedPath=*/ false);
+  }
+
+  /**
+   * Same as {@link #getImplicitOutputArtifact(ImplicitOutputsFunction)} but includes the option to
+   * use a content-based path for this artifact (see {@link
+   * BuildConfiguration#useContentBasedOutputPaths()}).
+   */
+  public Artifact getImplicitOutputArtifact(
+      ImplicitOutputsFunction function, boolean contentBasedPath) throws InterruptedException {
     Iterable<String> result;
     try {
       result =
@@ -1331,14 +1400,23 @@ public final class RuleContext extends TargetContext
       // It's ok as long as we don't use this method from Skylark.
       throw new IllegalStateException(e);
     }
-    return getImplicitOutputArtifact(Iterables.getOnlyElement(result));
+    return getImplicitOutputArtifact(Iterables.getOnlyElement(result), contentBasedPath);
   }
 
   /**
    * Only use from Skylark. Returns the implicit output artifact for a given output path.
    */
   public Artifact getImplicitOutputArtifact(String path) {
-    return getPackageRelativeArtifact(path, getBinOrGenfilesDirectory());
+    return getImplicitOutputArtifact(path, /*contentBasedPath=*/ false);
+  }
+
+  /**
+   * Same as {@link #getImplicitOutputArtifact(String)} but includes the option to use a a
+   * content-based path for this artifact (see {@link
+   * BuildConfiguration#useContentBasedOutputPaths()}).
+   */
+  private Artifact getImplicitOutputArtifact(String path, boolean contentBasedPath) {
+    return getPackageRelativeArtifact(path, getBinOrGenfilesDirectory(), contentBasedPath);
   }
 
   /**
@@ -1394,7 +1472,8 @@ public final class RuleContext extends TargetContext
   }
 
   @Override
-  public final Artifact getRelatedArtifact(PathFragment pathFragment, String extension) {
+  public final Artifact.DerivedArtifact getRelatedArtifact(
+      PathFragment pathFragment, String extension) {
     PathFragment file = FileSystemUtils.replaceExtension(pathFragment, extension);
     return getDerivedArtifact(file, getConfiguration().getBinDirectory(rule.getRepository()));
   }
@@ -1470,7 +1549,7 @@ public final class RuleContext extends TargetContext
     private NestedSet<PackageGroupContents> visibility;
     private ImmutableMap<String, Attribute> aspectAttributes;
     private ImmutableList<Aspect> aspects;
-    private ToolchainContext toolchainContext;
+    private ResolvedToolchainContext toolchainContext;
     private ConstraintSemantics constraintSemantics;
 
     @VisibleForTesting
@@ -1577,8 +1656,8 @@ public final class RuleContext extends TargetContext
       return this;
     }
 
-    /** Sets the {@link ToolchainContext} used to access toolchains used by this rule. */
-    public Builder setToolchainContext(ToolchainContext toolchainContext) {
+    /** Sets the {@link ResolvedToolchainContext} used to access toolchains used by this rule. */
+    public Builder setToolchainContext(ResolvedToolchainContext toolchainContext) {
       this.toolchainContext = toolchainContext;
       return this;
     }

@@ -24,6 +24,7 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.MutableActionGraph.ActionConflictException;
+import com.google.devtools.build.lib.analysis.AnalysisUtils;
 import com.google.devtools.build.lib.analysis.ConfiguredAspect;
 import com.google.devtools.build.lib.analysis.ConfiguredAspectFactory;
 import com.google.devtools.build.lib.analysis.OutputGroupInfo;
@@ -53,7 +54,6 @@ import com.google.devtools.build.lib.rules.cpp.CcToolchain;
 import com.google.devtools.build.lib.rules.cpp.CcToolchainFeatures.FeatureConfiguration;
 import com.google.devtools.build.lib.rules.cpp.CcToolchainProvider;
 import com.google.devtools.build.lib.rules.cpp.CppConfiguration;
-import com.google.devtools.build.lib.rules.cpp.CppDebugFileProvider;
 import com.google.devtools.build.lib.rules.cpp.CppHelper;
 import com.google.devtools.build.lib.rules.cpp.CppRuleClasses;
 import com.google.devtools.build.lib.rules.cpp.CppSemantics;
@@ -107,7 +107,7 @@ public abstract class CcProtoAspect extends NativeAspectClass implements Configu
 
     try {
       ConfiguredAspect.Builder result = new ConfiguredAspect.Builder(this, parameters, ruleContext);
-      new Impl(ruleContext, protoInfo, cppSemantics).addProviders(result);
+      new Impl(ruleContext, protoInfo, cppSemantics, ccToolchainType).addProviders(result);
       return result.build();
     } catch (RuleErrorException e) {
       ruleContext.ruleError(e.getMessage());
@@ -145,12 +145,18 @@ public abstract class CcProtoAspect extends NativeAspectClass implements Configu
     private final ProtoInfo protoInfo;
     private final CppSemantics cppSemantics;
     private final NestedSetBuilder<Artifact> filesBuilder;
+    private final Label ccToolchainType;
 
-    Impl(RuleContext ruleContext, ProtoInfo protoInfo, CppSemantics cppSemantics)
+    Impl(
+        RuleContext ruleContext,
+        ProtoInfo protoInfo,
+        CppSemantics cppSemantics,
+        Label ccToolchainType)
         throws RuleErrorException, InterruptedException {
       this.ruleContext = ruleContext;
       this.protoInfo = protoInfo;
       this.cppSemantics = cppSemantics;
+      this.ccToolchainType = ccToolchainType;
       FeatureConfiguration featureConfiguration = getFeatureConfiguration();
       ProtoConfiguration protoConfiguration = ruleContext.getFragment(ProtoConfiguration.class);
 
@@ -225,16 +231,16 @@ public abstract class CcProtoAspect extends NativeAspectClass implements Configu
           ccLinkingHelper.buildCcLinkingContextFromLibrariesToLink(
               libraryToLink, compilationInfo.getCcCompilationContext());
 
-      CppDebugFileProvider cppDebugFileProvider =
-          CcCompilationHelper.buildCppDebugFileProvider(
-              compilationInfo.getCcCompilationOutputs(), deps);
       ccLibraryProviders =
           new TransitiveInfoProviderMapBuilder()
-              .add(cppDebugFileProvider)
               .put(
                   CcInfo.builder()
                       .setCcCompilationContext(compilationInfo.getCcCompilationContext())
                       .setCcLinkingContext(ccLinkingContext)
+                      .setCcDebugInfoContext(
+                          CppHelper.mergeCcDebugInfoContexts(
+                              compilationInfo.getCcCompilationOutputs(),
+                              AnalysisUtils.getProviders(deps, CcInfo.PROVIDER)))
                       .build())
               .add(ccNativeLibraryProvider)
               .build();
@@ -269,7 +275,7 @@ public abstract class CcProtoAspect extends NativeAspectClass implements Configu
     private boolean areSrcsBlacklisted() {
       return !new ProtoSourceFileBlacklist(
               ruleContext, getProtoToolchainProvider().blacklistedProtos())
-          .checkSrcs(protoInfo.getDirectProtoSources(), "cc_proto_library");
+          .checkSrcs(protoInfo.getOriginalDirectProtoSources(), "cc_proto_library");
     }
 
     private FeatureConfiguration getFeatureConfiguration() {
@@ -308,10 +314,32 @@ public abstract class CcProtoAspect extends NativeAspectClass implements Configu
                   toolchain.getFdoContext())
               .addCcCompilationContexts(CppHelper.getCompilationContextsFromDeps(deps))
               .addCcCompilationContexts(
-                  ImmutableList.of(CcCompilationHelper.getStlCcCompilationContext(ruleContext)))
-              .addQuoteIncludeDirs(cppSemantics.getQuoteIncludes(ruleContext));
+                  ImmutableList.of(CcCompilationHelper.getStlCcCompilationContext(ruleContext)));
       // Don't instrument the generated C++ files even when --collect_code_coverage is set.
       helper.setCodeCoverageEnabled(false);
+
+      String protoRoot = protoInfo.getDirectProtoSourceRoot();
+      PathFragment repositoryRoot =
+          ruleContext.getLabel().getPackageIdentifier().getRepository().getSourceRoot();
+      if (protoRoot.equals(".") || protoRoot.equals(repositoryRoot.getPathString())) {
+        return helper;
+      }
+
+      PathFragment protoRootFragment = PathFragment.create(protoRoot);
+      PathFragment binOrGenfiles = ruleContext.getBinOrGenfilesDirectory().getExecPath();
+      if (protoRootFragment.startsWith(binOrGenfiles)) {
+        protoRootFragment = protoRootFragment.relativeTo(binOrGenfiles);
+      }
+      PathFragment repositoryPath =
+          ruleContext.getLabel().getPackageIdentifier().getRepository().getPathUnderExecRoot();
+      if (protoRootFragment.startsWith(repositoryPath)) {
+        protoRootFragment = protoRootFragment.relativeTo(repositoryPath);
+      }
+
+      String stripIncludePrefix =
+          PathFragment.create("//").getRelative(protoRootFragment).toString();
+      helper.setStripIncludePrefix(stripIncludePrefix);
+
       return helper;
     }
 
@@ -320,12 +348,19 @@ public abstract class CcProtoAspect extends NativeAspectClass implements Configu
       CcToolchainProvider toolchain = ccToolchain(ruleContext);
       CcLinkingHelper helper =
           new CcLinkingHelper(
-              ruleContext,
-              cppSemantics,
-              featureConfiguration,
-              toolchain,
-              toolchain.getFdoContext(),
-              ruleContext.getConfiguration());
+                  ruleContext,
+                  ruleContext.getLabel(),
+                  ruleContext,
+                  ruleContext,
+                  cppSemantics,
+                  featureConfiguration,
+                  toolchain,
+                  toolchain.getFdoContext(),
+                  ruleContext.getConfiguration(),
+                  ruleContext.getFragment(CppConfiguration.class),
+                  ruleContext.getSymbolGenerator())
+              .setGrepIncludes(CppHelper.getGrepIncludes(ruleContext))
+              .setTestOrTestOnlyTarget(ruleContext.isTestOnlyTarget());
       helper.addCcLinkingContexts(CppHelper.getLinkingContextsFromDeps(deps));
       // TODO(dougk): Configure output artifact with action_config
       // once proto compile action is configurable from the crosstool.
@@ -335,10 +370,11 @@ public abstract class CcProtoAspect extends NativeAspectClass implements Configu
       return helper;
     }
 
-    private static CcToolchainProvider ccToolchain(RuleContext ruleContext) {
+    private CcToolchainProvider ccToolchain(RuleContext ruleContext) {
       return CppHelper.getToolchain(
           ruleContext,
-          ruleContext.getPrerequisite(CcToolchain.CC_TOOLCHAIN_DEFAULT_ATTRIBUTE_NAME, TARGET));
+          ruleContext.getPrerequisite(CcToolchain.CC_TOOLCHAIN_DEFAULT_ATTRIBUTE_NAME, TARGET),
+          ccToolchainType);
     }
 
     private ImmutableSet<Artifact> getOutputFiles(Iterable<String> suffixes) {
@@ -376,13 +412,14 @@ public abstract class CcProtoAspect extends NativeAspectClass implements Configu
     }
 
     private void createProtoCompileAction(Collection<Artifact> outputs) {
-      String protoRoot = protoInfo.getDirectProtoSourceRoot();
-      String genfilesPath =
-          ruleContext
-              .getConfiguration()
-              .getGenfilesFragment()
-              .getRelative(protoRoot)
-              .getPathString();
+      PathFragment protoRootFragment = PathFragment.create(protoInfo.getDirectProtoSourceRoot());
+      String genfilesPath;
+      PathFragment genfilesFragment = ruleContext.getConfiguration().getGenfilesFragment();
+      if (protoRootFragment.startsWith(genfilesFragment)) {
+        genfilesPath = protoRootFragment.getPathString();
+      } else {
+        genfilesPath = genfilesFragment.getRelative(protoRootFragment).getPathString();
+      }
 
       ImmutableList.Builder<ToolchainInvocation> invocations = ImmutableList.builder();
       invocations.add(

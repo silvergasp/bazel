@@ -29,7 +29,6 @@ import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.ArtifactRoot;
 import com.google.devtools.build.lib.analysis.RuleContext;
 import com.google.devtools.build.lib.analysis.actions.ActionConstructionContext;
-import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.Immutable;
 import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
@@ -72,7 +71,8 @@ public final class SolibSymlinkAction extends AbstractAction {
               + symlink.prettyPrint()
               + "' to target '"
               + getPrimaryInput()
-              + "'",
+              + "': "
+              + e.getMessage(),
           e,
           this,
           false);
@@ -119,8 +119,7 @@ public final class SolibSymlinkAction extends AbstractAction {
       String solibDir,
       final Artifact library,
       boolean preserveName,
-      boolean prefixConsumer,
-      BuildConfiguration configuration) {
+      boolean prefixConsumer) {
     PathFragment mangledName =
         getMangledName(
             actionRegistry.getOwner().getLabel(),
@@ -141,8 +140,7 @@ public final class SolibSymlinkAction extends AbstractAction {
       RuleContext ruleContext,
       Artifact library,
       String toolchainProvidedSolibDir,
-      String solibDirOverride,
-      BuildConfiguration configuration) {
+      String solibDirOverride) {
     PathFragment solibDir =
         PathFragment.create(
             solibDirOverride != null ? solibDirOverride : toolchainProvidedSolibDir);

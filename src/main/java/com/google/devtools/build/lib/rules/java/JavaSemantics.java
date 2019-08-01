@@ -42,7 +42,6 @@ import com.google.devtools.build.lib.rules.cpp.CcToolchainFeatures.FeatureConfig
 import com.google.devtools.build.lib.rules.cpp.CcToolchainProvider;
 import com.google.devtools.build.lib.rules.java.DeployArchiveBuilder.Compression;
 import com.google.devtools.build.lib.rules.java.JavaCompilationArgsProvider.ClasspathType;
-import com.google.devtools.build.lib.rules.java.JavaConfiguration.JavaOptimizationMode;
 import com.google.devtools.build.lib.rules.java.JavaConfiguration.OneVersionEnforcementLevel;
 import com.google.devtools.build.lib.rules.java.proto.GeneratedExtensionRegistryProvider;
 import com.google.devtools.build.lib.skyframe.serialization.autocodec.AutoCodec;
@@ -173,12 +172,10 @@ public interface JavaSemantics {
           JavaConfiguration.class,
           (rule, attributes, javaConfig) -> {
             // Use a modicum of smarts to avoid implicit dependencies where we don't need them.
-            JavaOptimizationMode optMode = javaConfig.getJavaOptimizationMode();
             boolean hasProguardSpecs =
                 attributes.has("proguard_specs")
                     && !attributes.get("proguard_specs", LABEL_LIST).isEmpty();
-            if (optMode == JavaOptimizationMode.NOOP
-                || (optMode == JavaOptimizationMode.LEGACY && !hasProguardSpecs)) {
+            if (!hasProguardSpecs) {
               return ImmutableList.<Label>of();
             }
             return ImmutableList.copyOf(
@@ -355,30 +352,7 @@ public interface JavaSemantics {
    *
    * @return new main class
    */
-  String addCoverageSupport(
-      JavaCompilationHelper helper,
-      JavaTargetAttributes.Builder attributes,
-      Artifact executable,
-      Artifact instrumentationMetadata,
-      JavaCompilationArtifacts.Builder javaArtifactsBuilder,
-      String mainClass)
-      throws InterruptedException;
-
-  /**
-   * Same as {@link #addCoverageSupport(JavaCompilationHelper, JavaTargetAttributes.Builder,
-   * Artifact, Artifact, JavaCompilationArtifacts.Builder, String)}.
-   *
-   * <p>In *experimental* coverage mode omits dealing with instrumentation metadata and does not
-   * create the instrumented jar.
-   */
-  String addCoverageSupport(
-      JavaCompilationHelper helper,
-      JavaTargetAttributes.Builder attributes,
-      Artifact executable,
-      Artifact instrumentationMetadata,
-      JavaCompilationArtifacts.Builder javaArtifactsBuilder,
-      String mainClass,
-      boolean isExperimentalCoverage)
+  String addCoverageSupport(JavaCompilationHelper helper, Artifact executable)
       throws InterruptedException;
 
   /** Return the JVM flags to be used in a Java binary. */
@@ -485,4 +459,6 @@ public interface JavaSemantics {
    * even if the java_proto_library rule sets strict_deps = 0.
    */
   boolean isJavaProtoLibraryStrictDeps(RuleContext ruleContext);
+
+  void checkDependencyRuleKinds(RuleContext ruleContext);
 }

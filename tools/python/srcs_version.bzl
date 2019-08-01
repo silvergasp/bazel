@@ -82,10 +82,10 @@ root. Paths are represented as depsets with `preorder` order.
 )
 
 def _join_lines(nodes):
-    return "\n".join(nodes) if nodes else "<None>"
+    return "\n".join([str(n) for n in nodes]) if nodes else "<None>"
 
 def _str_path(path):
-    return " -> ".join(path.to_list())
+    return " -> ".join([str(p) for p in path.to_list()])
 
 def _str_tv_info(tv_info):
     """Returns a string representation of a `_TransitiveVersionInfo`."""
@@ -125,9 +125,9 @@ def _has_version_requirement(target, version):
         _PY3: "has_py3_only_sources",
     }[version]
 
-    if not hasattr(target, "py"):
+    if not PyInfo in target:
         return False
-    field_value = getattr(target.py, field, False)
+    field_value = getattr(target[PyInfo], field, False)
     if not type(field_value) == "bool":
         fail("Invalid type for provider field '%s': %r" % (field, field_value))
     return field_value
@@ -176,10 +176,13 @@ def _introduces_version_requirement(target, target_attr, version):
             fail("Illegal state")
 
     # No good, check the direct deps' provider fields.
-    return not any([
-        _has_version_requirement(dep, version)
-        for dep in target_attr.deps
-    ])
+    if not hasattr(target_attr, "deps"):
+        return True
+    else:
+        return not any([
+            _has_version_requirement(dep, version)
+            for dep in target_attr.deps
+        ])
 
 def _empty_depswithpaths():
     """Initializes an empty `_DepsWithPathsInfo` object."""
@@ -235,11 +238,14 @@ def _find_requirements_impl(target, ctx):
     # Determine whether this target introduces a requirement. If so, any deps
     # that introduce that requirement are not propagated, though they might
     # still be considered top-most if an alternate path exists.
-    dep_tv_infos = [
-        d[_TransitiveVersionInfo]
-        for d in ctx.rule.attr.deps
-        if _TransitiveVersionInfo in d
-    ]
+    if not hasattr(ctx.rule.attr, "deps"):
+        dep_tv_infos = []
+    else:
+        dep_tv_infos = [
+            d[_TransitiveVersionInfo]
+            for d in ctx.rule.attr.deps
+            if _TransitiveVersionInfo in d
+        ]
 
     if not _has_version_requirement(target, "PY2"):
         new_py2 = _empty_depswithpaths()

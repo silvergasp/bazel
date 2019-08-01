@@ -17,25 +17,24 @@ package com.google.devtools.build.lib.runtime;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.eventbus.EventBus;
-import com.google.devtools.build.lib.actions.PackageRootResolver;
 import com.google.devtools.build.lib.actions.cache.ActionCache;
 import com.google.devtools.build.lib.analysis.AnalysisOptions;
 import com.google.devtools.build.lib.analysis.BlazeDirectories;
-import com.google.devtools.build.lib.analysis.SkyframePackageRootResolver;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
+import com.google.devtools.build.lib.analysis.config.CoreOptions;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.events.Reporter;
 import com.google.devtools.build.lib.packages.StarlarkSemanticsOptions;
 import com.google.devtools.build.lib.pkgcache.PackageCacheOptions;
 import com.google.devtools.build.lib.pkgcache.PackageManager;
 import com.google.devtools.build.lib.pkgcache.PathPackageLocator;
-import com.google.devtools.build.lib.pkgcache.TargetPatternPreloader;
 import com.google.devtools.build.lib.profiler.Profiler;
 import com.google.devtools.build.lib.profiler.ProfilerTask;
 import com.google.devtools.build.lib.profiler.SilentCloseable;
 import com.google.devtools.build.lib.runtime.proto.InvocationPolicyOuterClass.InvocationPolicy;
 import com.google.devtools.build.lib.skyframe.SkyframeBuildView;
 import com.google.devtools.build.lib.skyframe.SkyframeExecutor;
+import com.google.devtools.build.lib.skyframe.TopDownActionCache;
 import com.google.devtools.build.lib.util.AbruptExitException;
 import com.google.devtools.build.lib.util.ExitCode;
 import com.google.devtools.build.lib.util.io.OutErr;
@@ -77,6 +76,7 @@ public final class CommandEnvironment {
   private final Set<String> visibleActionEnv = new TreeSet<>();
   private final Set<String> visibleTestEnv = new TreeSet<>();
   private final Map<String, String> actionClientEnv = new TreeMap<>();
+  private final Map<String, String> repoEnv = new TreeMap<>();
   private final TimestampGranularityMonitor timestampGranularityMonitor;
   private final Thread commandThread;
   private final Command command;
@@ -88,8 +88,10 @@ public final class CommandEnvironment {
   private PathFragment relativeWorkingDirectory = PathFragment.EMPTY_FRAGMENT;
   private long commandStartTime;
   private OutputService outputService;
+  private TopDownActionCache topDownActionCache;
   private Path workingDirectory;
   private String workspaceName;
+  private boolean haveSetupPackageCache = false;
 
   private AtomicReference<AbruptExitException> pendingException = new AtomicReference<>();
 
@@ -187,7 +189,7 @@ public final class CommandEnvironment {
       // Compute the set of environment variables that are whitelisted on the commandline
       // for inheritance.
       for (Map.Entry<String, String> entry :
-          options.getOptions(BuildConfiguration.Options.class).actionEnvironment) {
+          options.getOptions(CoreOptions.class).actionEnvironment) {
         if (entry.getValue() == null) {
           visibleActionEnv.add(entry.getKey());
         } else {
@@ -196,10 +198,18 @@ public final class CommandEnvironment {
         }
       }
       for (Map.Entry<String, String> entry :
-          options.getOptions(BuildConfiguration.Options.class).testEnvironment) {
+          options.getOptions(CoreOptions.class).testEnvironment) {
         if (entry.getValue() == null) {
           visibleTestEnv.add(entry.getKey());
         }
+      }
+    }
+
+    repoEnv.putAll(actionClientEnv);
+    CoreOptions configOpts = options.getOptions(CoreOptions.class);
+    if (configOpts != null) {
+      for (Map.Entry<String, String> entry : configOpts.repositoryEnvironment) {
+        repoEnv.put(entry.getKey(), entry.getValue());
       }
     }
   }
@@ -377,17 +387,6 @@ public final class CommandEnvironment {
   }
 
   /**
-   * Creates and returns a new target pattern preloader.
-   */
-  public TargetPatternPreloader newTargetPatternPreloader() {
-    return getPackageManager().newTargetPatternPreloader();
-  }
-
-  public PackageRootResolver getPackageRootResolver() {
-    return new SkyframePackageRootResolver(getSkyframeExecutor(), reporter);
-  }
-
-  /**
    * Returns the UUID that Blaze uses to identify everything logged from the current build command.
    * It's also used to invalidate Skyframe nodes that are specific to a certain invocation, such as
    * the build info.
@@ -431,6 +430,7 @@ public final class CommandEnvironment {
   public void setWorkspaceName(String workspaceName) {
     Preconditions.checkState(this.workspaceName == null, "workspace name can only be set once");
     this.workspaceName = workspaceName;
+    eventBus.post(new ExecRootEvent(getExecRoot()));
   }
   /**
    * Returns if the client passed a valid workspace to be used for the build.
@@ -477,15 +477,24 @@ public final class CommandEnvironment {
     return workingDirectory;
   }
 
-  /**
-   * @return the OutputService in use, or null if none.
-   */
+  /** @return the OutputService in use, or null if none. */
+  @Nullable
   public OutputService getOutputService() {
     return outputService;
   }
 
+  @VisibleForTesting
+  public void setOutputServiceForTesting(@Nullable OutputService outputService) {
+    this.outputService = outputService;
+  }
+
   public ActionCache getPersistentActionCache() throws IOException {
     return workspace.getPersistentActionCache(reporter);
+  }
+
+  /** Returns the top-down action cache to use, or null. */
+  public TopDownActionCache getTopDownActionCache() {
+    return topDownActionCache;
   }
 
   /**
@@ -570,6 +579,15 @@ public final class CommandEnvironment {
    */
   public void setupPackageCache(OptionsProvider options)
       throws InterruptedException, AbruptExitException {
+    // We want to ensure that we're never calling #setupPackageCache twice in the same build because
+    // it does the very expensive work of diffing the cache between incremental builds.
+    // {@link SequencedSkyframeExecutor#handleDiffs} is the particular method we don't want to be
+    // calling twice. We could feasibly factor it out of this call.
+    if (this.haveSetupPackageCache) {
+      throw new IllegalStateException(
+          "We should never call this method more than once over the course of a single command");
+    }
+    this.haveSetupPackageCache = true;
     getSkyframeExecutor()
         .sync(
             reporter,
@@ -580,19 +598,6 @@ public final class CommandEnvironment {
             clientEnv,
             timestampGranularityMonitor,
             options);
-  }
-
-  public void syncPackageLoading(
-      PackageCacheOptions packageCacheOptions, StarlarkSemanticsOptions starlarkSemanticsOptions)
-      throws AbruptExitException {
-    getSkyframeExecutor()
-        .syncPackageLoading(
-            packageCacheOptions,
-            packageLocator,
-            starlarkSemanticsOptions,
-            getCommandId(),
-            clientEnv,
-            timestampGranularityMonitor);
   }
 
   public void recordLastExecutionTime() {
@@ -622,15 +627,11 @@ public final class CommandEnvironment {
   /**
    * Hook method called by the BlazeCommandDispatcher prior to the dispatch of each command.
    *
-   * @param commonOptions The CommonCommandOptions used by every command.
    * @throws AbruptExitException if this command is unsuitable to be run as specified
    */
-  void beforeCommand(
-      OptionsParsingResult options,
-      CommonCommandOptions commonOptions,
-      long waitTimeInMs,
-      InvocationPolicy invocationPolicy)
+  void beforeCommand(long waitTimeInMs, InvocationPolicy invocationPolicy)
       throws AbruptExitException {
+    CommonCommandOptions commonOptions = options.getOptions(CommonCommandOptions.class);
     commandStartTime -= commonOptions.startupTime;
 
     eventBus.post(
@@ -639,6 +640,8 @@ public final class CommandEnvironment {
 
     outputService = null;
     BlazeModule outputModule = null;
+    topDownActionCache = null;
+    BlazeModule topDownCachingModule = null;
     if (command.builds()) {
       for (BlazeModule module : runtime.getBlazeModules()) {
         OutputService moduleService = module.getOutputService();
@@ -652,6 +655,18 @@ public final class CommandEnvironment {
           outputService = moduleService;
           outputModule = module;
         }
+
+        TopDownActionCache moduleCache = module.getTopDownActionCache();
+        if (moduleCache != null) {
+          if (topDownActionCache != null) {
+            throw new IllegalStateException(
+                String.format(
+                    "More than one module (%s and %s) returns a top down action cache",
+                    module.getClass(), topDownCachingModule.getClass()));
+          }
+          topDownActionCache = moduleCache;
+          topDownCachingModule = module;
+        }
       }
     }
 
@@ -663,6 +678,10 @@ public final class CommandEnvironment {
     Path workspace = getWorkspace();
     Path workingDirectory;
     if (inWorkspace()) {
+      if (commonOptions.clientCwd.containsUplevelReferences()) {
+        throw new AbruptExitException(
+            "Client cwd contains uplevel references", ExitCode.COMMAND_LINE_ERROR);
+      }
       workingDirectory = workspace.getRelative(commonOptions.clientCwd);
     } else {
       workspace = FileSystemUtils.getWorkingDirectory(getRuntime().getFileSystem());
@@ -686,6 +705,9 @@ public final class CommandEnvironment {
     eventBus.post(new CommandStartEvent(
         command.name(), getCommandId(), getClientEnv(), workingDirectory, getDirectories(),
         waitTimeInMs + commonOptions.waitTime));
+
+    // Modules that are subscribed to CommandStartEvents may create pending exceptions.
+    throwPendingException();
   }
 
   /** Returns the name of the file system we are writing output to. */
@@ -707,5 +729,10 @@ public final class CommandEnvironment {
    */
   public Map<String, String> getActionClientEnv() {
     return Collections.unmodifiableMap(actionClientEnv);
+  }
+
+  /** Returns the client environment with all settings from --action_env and --repo_env. */
+  public Map<String, String> getRepoEnv() {
+    return Collections.unmodifiableMap(repoEnv);
   }
 }

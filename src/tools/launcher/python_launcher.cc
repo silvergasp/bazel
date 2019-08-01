@@ -26,9 +26,26 @@ using std::wstring;
 
 static constexpr const char* PYTHON_BIN_PATH = "python_bin_path";
 static constexpr const char* USE_ZIP_FILE = "use_zip_file";
+static constexpr const char* WINDOWS_STYLE_ESCAPE_JVM_FLAGS = "escape_args";
 
 ExitCode PythonBinaryLauncher::Launch() {
   wstring python_binary = this->GetLaunchInfoByKey(PYTHON_BIN_PATH);
+
+  // There are three kinds of values for `python_binary`:
+  // 1. An absolute path to a system interpreter. This is the case if
+  // `--python_path` is set by the
+  //    user, or if a `py_runtime` is used that has `interpreter_path` set.
+  // 2. A runfile path to an in-workspace interpreter. This is the case if a
+  // `py_runtime` is used that has `interpreter` set.
+  // 3. The special constant, "python". This is the default case if neither of
+  // the above apply. Rlocation resolves runfiles paths to absolute paths, and
+  // if given an absolute path it leaves it alone, so it's suitable for cases 1
+  // and 2.
+  if (GetBinaryPathWithoutExtension(python_binary) != L"python") {
+    // Rlocation returns the original path if python_binary is an absolute path.
+    python_binary = this->Rlocation(python_binary, true);
+  }
+
   // If specified python binary path doesn't exist, then fall back to
   // python.exe and hope it's in PATH.
   if (!DoesFilePathExist(python_binary.c_str())) {
@@ -47,9 +64,13 @@ ExitCode PythonBinaryLauncher::Launch() {
   // Replace the first argument with python file path
   args[0] = python_file;
 
-  // Escape arguments that has spaces
+  wstring (*const escape_arg_func)(const wstring&) =
+      this->GetLaunchInfoByKey(WINDOWS_STYLE_ESCAPE_JVM_FLAGS) == L"1"
+          ? WindowsEscapeArg2
+          : WindowsEscapeArg;
+
   for (int i = 1; i < args.size(); i++) {
-    args[i] = WindowsEscapeArg(args[i]);
+    args[i] = escape_arg_func(args[i]);
   }
 
   return this->LaunchProcess(python_binary, args);

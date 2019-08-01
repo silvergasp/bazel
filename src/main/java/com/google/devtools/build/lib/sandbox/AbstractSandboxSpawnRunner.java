@@ -30,6 +30,7 @@ import com.google.devtools.build.lib.actions.UserExecException;
 import com.google.devtools.build.lib.exec.BinTools;
 import com.google.devtools.build.lib.exec.ExecutionOptions;
 import com.google.devtools.build.lib.exec.SpawnRunner;
+import com.google.devtools.build.lib.exec.TreeDeleter;
 import com.google.devtools.build.lib.runtime.CommandEnvironment;
 import com.google.devtools.build.lib.shell.AbnormalTerminationException;
 import com.google.devtools.build.lib.shell.Command;
@@ -37,6 +38,7 @@ import com.google.devtools.build.lib.shell.CommandException;
 import com.google.devtools.build.lib.shell.CommandResult;
 import com.google.devtools.build.lib.shell.ExecutionStatistics;
 import com.google.devtools.build.lib.util.CommandFailureUtils;
+import com.google.devtools.build.lib.util.OS;
 import com.google.devtools.build.lib.util.io.OutErr;
 import com.google.devtools.build.lib.vfs.FileSystem;
 import com.google.devtools.build.lib.vfs.Path;
@@ -67,7 +69,7 @@ abstract class AbstractSandboxSpawnRunner implements SpawnRunner {
 
   @Override
   public SpawnResult exec(Spawn spawn, SpawnExecutionContext context)
-      throws ExecException, InterruptedException {
+      throws ExecException, IOException, InterruptedException {
     ActionExecutionMetadata owner = spawn.getResourceOwner();
     context.report(ProgressStatus.SCHEDULING, getName());
     try (ResourceHandle ignored =
@@ -228,7 +230,13 @@ abstract class AbstractSandboxSpawnRunner implements SpawnRunner {
       throws IOException {
     // We have to make the TEST_TMPDIR directory writable if it is specified.
     ImmutableSet.Builder<Path> writablePaths = ImmutableSet.builder();
-    writablePaths.add(sandboxExecRoot);
+
+    // On Windows, sandboxExecRoot is actually the main execroot. We will specify
+    // exactly which output path is writable.
+    if (OS.getCurrent() != OS.WINDOWS) {
+      writablePaths.add(sandboxExecRoot);
+    }
+
     String testTmpdir = env.get("TEST_TMPDIR");
     if (testTmpdir != null) {
       addWritablePath(
@@ -237,23 +245,37 @@ abstract class AbstractSandboxSpawnRunner implements SpawnRunner {
           testTmpdir,
           "Cannot resolve symlinks in TEST_TMPDIR because it doesn't exist: \"%s\"");
     }
-    addWritablePath(
-        sandboxExecRoot,
-        writablePaths,
-        // As of 2018-01-09:
-        // - every caller of `getWritableDirs` passes a LocalEnvProvider-processed environment as
-        //   `env`, and in every case that's either PosixLocalEnvProvider or XcodeLocalEnvProvider,
-        //   therefore `env` surely has an entry for TMPDIR
-        // - Bazel-on-Windows does not yet support sandboxing, so we don't need to add env[TMP] and
-        //   env[TEMP] as writable paths.
-        Preconditions.checkNotNull(env.get("TMPDIR")),
-        "Cannot resolve symlinks in TMPDIR because it doesn't exist: \"%s\"");
+    // As of 2019-07-08:
+    // - every caller of `getWritableDirs` passes a LocalEnvProvider-processed environment as
+    //   `env`, therefore `env` surely has an entry for TMPDIR on Unix and TEMP/TMP on Windows.
+    if (OS.getCurrent() == OS.WINDOWS) {
+      addWritablePath(
+          sandboxExecRoot,
+          writablePaths,
+          Preconditions.checkNotNull(env.get("TEMP")),
+          "Cannot resolve symlinks in TEMP because it doesn't exist: \"%s\"");
+      addWritablePath(
+          sandboxExecRoot,
+          writablePaths,
+          Preconditions.checkNotNull(env.get("TMP")),
+          "Cannot resolve symlinks in TMP because it doesn't exist: \"%s\"");
+    } else {
+      addWritablePath(
+          sandboxExecRoot,
+          writablePaths,
+          Preconditions.checkNotNull(env.get("TMPDIR")),
+          "Cannot resolve symlinks in TMPDIR because it doesn't exist: \"%s\"");
+    }
 
     FileSystem fileSystem = sandboxExecRoot.getFileSystem();
     for (String writablePath : sandboxOptions.sandboxWritablePath) {
       Path path = fileSystem.getPath(writablePath);
       writablePaths.add(path);
-      writablePaths.add(path.resolveSymbolicLinks());
+      // TODO(laszlocsomor): Remove if guard when path.resolveSymbolicLinks supports non-symlink
+      // TODO(laszlocsomor): Figure out why OS.getCurrent() != OS.WINDOWS is required, and remove it
+      if (OS.getCurrent() != OS.WINDOWS || path.isSymbolicLink()) {
+        writablePaths.add(path.resolveSymbolicLinks());
+      }
     }
 
     return writablePaths.build();
@@ -275,7 +297,14 @@ abstract class AbstractSandboxSpawnRunner implements SpawnRunner {
       // If `path` itself is a symlink, then adding it to `writablePaths` would result in making
       // the symlink itself writable, not what it points to. Therefore we need to resolve symlinks
       // in `path`, however for that we need `path` to exist.
-      writablePaths.add(path.resolveSymbolicLinks());
+      //
+      // TODO(laszlocsomor): Remove if guard when path.resolveSymbolicLinks supports non-symlink
+      // TODO(laszlocsomor): Figure out why OS.getCurrent() != OS.WINDOWS is required, and remove it
+      if (OS.getCurrent() != OS.WINDOWS || path.isSymbolicLink()) {
+        writablePaths.add(path.resolveSymbolicLinks());
+      } else {
+        writablePaths.add(path);
+      }
     } else {
       throw new IOException(String.format(pathDoesNotExistErrorTemplate, path.getPathString()));
     }
@@ -287,5 +316,15 @@ abstract class AbstractSandboxSpawnRunner implements SpawnRunner {
 
   protected SandboxOptions getSandboxOptions() {
     return sandboxOptions;
+  }
+
+  @Override
+  public void cleanupSandboxBase(Path sandboxBase, TreeDeleter treeDeleter) throws IOException {
+    Path root = sandboxBase.getChild(getName());
+    if (root.exists()) {
+      for (Path child : root.getDirectoryEntries()) {
+        treeDeleter.deleteTree(child);
+      }
+    }
   }
 }

@@ -27,6 +27,7 @@ import com.google.devtools.build.lib.analysis.config.TransitionResolver;
 import com.google.devtools.build.lib.analysis.config.transitions.ConfigurationTransition;
 import com.google.devtools.build.lib.analysis.config.transitions.NoTransition;
 import com.google.devtools.build.lib.analysis.config.transitions.NullTransition;
+import com.google.devtools.build.lib.analysis.config.transitions.TransitionFactory;
 import com.google.devtools.build.lib.causes.Cause;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
@@ -37,6 +38,7 @@ import com.google.devtools.build.lib.packages.AspectDescriptor;
 import com.google.devtools.build.lib.packages.Attribute;
 import com.google.devtools.build.lib.packages.Attribute.LateBoundDefault;
 import com.google.devtools.build.lib.packages.AttributeMap;
+import com.google.devtools.build.lib.packages.AttributeTransitionData;
 import com.google.devtools.build.lib.packages.BuildType;
 import com.google.devtools.build.lib.packages.ConfiguredAttributeMapper;
 import com.google.devtools.build.lib.packages.EnvironmentGroup;
@@ -45,7 +47,6 @@ import com.google.devtools.build.lib.packages.OutputFile;
 import com.google.devtools.build.lib.packages.PackageGroup;
 import com.google.devtools.build.lib.packages.Rule;
 import com.google.devtools.build.lib.packages.RuleClass;
-import com.google.devtools.build.lib.packages.RuleTransitionFactory;
 import com.google.devtools.build.lib.packages.Target;
 import com.google.devtools.build.lib.syntax.EvalException;
 import com.google.devtools.build.lib.util.OrderedSetMultimap;
@@ -176,7 +177,7 @@ public abstract class DependencyResolver {
    *     This is needed to support {@link LateBoundDefault#useHostConfiguration()}.
    * @param aspect the aspect applied to this target (if any)
    * @param configConditions resolver for config_setting labels
-   * @param toolchainLabels required toolchain labels
+   * @param toolchainContext the toolchain context for this target
    * @param trimmingTransitionFactory the transition factory used to trim rules (note: this is a
    *     temporary feature; see the corresponding methods in ConfiguredRuleClassProvider)
    * @return a mapping of each attribute in this rule or aspects to its dependent nodes
@@ -186,8 +187,8 @@ public abstract class DependencyResolver {
       BuildConfiguration hostConfig,
       @Nullable Aspect aspect,
       ImmutableMap<Label, ConfigMatchingProvider> configConditions,
-      ImmutableSet<Label> toolchainLabels,
-      @Nullable RuleTransitionFactory trimmingTransitionFactory)
+      @Nullable ToolchainContext toolchainContext,
+      @Nullable TransitionFactory<Rule> trimmingTransitionFactory)
       throws EvalException, InterruptedException, InconsistentAspectOrderException {
     NestedSetBuilder<Cause> rootCauses = NestedSetBuilder.stableOrder();
     OrderedSetMultimap<DependencyKind, Dependency> outgoingEdges =
@@ -196,7 +197,7 @@ public abstract class DependencyResolver {
             hostConfig,
             aspect != null ? ImmutableList.of(aspect) : ImmutableList.<Aspect>of(),
             configConditions,
-            toolchainLabels,
+            toolchainContext,
             rootCauses,
             trimmingTransitionFactory);
     if (!rootCauses.isEmpty()) {
@@ -230,7 +231,7 @@ public abstract class DependencyResolver {
    *     This is needed to support {@link LateBoundDefault#useHostConfiguration()}.
    * @param aspects the aspects applied to this target (if any)
    * @param configConditions resolver for config_setting labels
-   * @param toolchainLabels required toolchain labels
+   * @param toolchainContext the toolchain context for this target
    * @param trimmingTransitionFactory the transition factory used to trim rules (note: this is a
    *     temporary feature; see the corresponding methods in ConfiguredRuleClassProvider)
    * @param rootCauses collector for dep labels that can't be (loading phase) loaded
@@ -241,9 +242,9 @@ public abstract class DependencyResolver {
       BuildConfiguration hostConfig,
       Iterable<Aspect> aspects,
       ImmutableMap<Label, ConfigMatchingProvider> configConditions,
-      ImmutableSet<Label> toolchainLabels,
+      @Nullable ToolchainContext toolchainContext,
       NestedSetBuilder<Cause> rootCauses,
-      @Nullable RuleTransitionFactory trimmingTransitionFactory)
+      @Nullable TransitionFactory<Rule> trimmingTransitionFactory)
       throws EvalException, InterruptedException, InconsistentAspectOrderException {
     Target target = node.getTarget();
     BuildConfiguration config = node.getConfiguration();
@@ -259,7 +260,7 @@ public abstract class DependencyResolver {
     } else if (target instanceof EnvironmentGroup) {
       visitTargetVisibility(node, outgoingLabels);
     } else if (target instanceof Rule) {
-      visitRule(node, hostConfig, aspects, configConditions, toolchainLabels, outgoingLabels);
+      visitRule(node, hostConfig, aspects, configConditions, toolchainContext, outgoingLabels);
     } else if (target instanceof PackageGroup) {
       outgoingLabels.putAll(VISIBILITY_DEPENDENCY, ((PackageGroup) target).getIncludes());
     } else {
@@ -277,7 +278,8 @@ public abstract class DependencyResolver {
     }
 
     OrderedSetMultimap<DependencyKind, PartiallyResolvedDependency> partiallyResolvedDeps =
-        partiallyResolveDependencies(outgoingLabels, fromRule, attributeMap, aspects);
+        partiallyResolveDependencies(
+            outgoingLabels, fromRule, attributeMap, toolchainContext, aspects);
 
     OrderedSetMultimap<DependencyKind, Dependency> outgoingEdges =
         fullyResolveDependencies(
@@ -299,6 +301,7 @@ public abstract class DependencyResolver {
           OrderedSetMultimap<DependencyKind, Label> outgoingLabels,
           Rule fromRule,
           ConfiguredAttributeMapper attributeMap,
+          @Nullable ToolchainContext toolchainContext,
           Iterable<Aspect> aspects) {
     OrderedSetMultimap<DependencyKind, PartiallyResolvedDependency> partiallyResolvedDeps =
         OrderedSetMultimap.create();
@@ -342,10 +345,17 @@ public abstract class DependencyResolver {
       collectPropagatingAspects(
           aspects, attribute.getName(), entry.getKey().getOwningAspect(), propagatingAspects);
 
+      Label executionPlatformLabel = null;
+      if (toolchainContext != null && toolchainContext.executionPlatform() != null) {
+        executionPlatformLabel = toolchainContext.executionPlatform().label();
+      }
+      AttributeTransitionData attributeTransitionData =
+          AttributeTransitionData.builder()
+              .attributes(attributeMap)
+              .executionPlatform(executionPlatformLabel)
+              .build();
       ConfigurationTransition attributeTransition =
-          attribute.hasSplitConfigurationTransition()
-              ? attribute.getSplitTransition(attributeMap)
-              : attribute.getConfigurationTransition();
+          attribute.getTransitionFactory().create(attributeTransitionData);
       partiallyResolvedDeps.put(
           entry.getKey(),
           PartiallyResolvedDependency.of(toLabel, attributeTransition, propagatingAspects.build()));
@@ -367,7 +377,7 @@ public abstract class DependencyResolver {
       OrderedSetMultimap<DependencyKind, PartiallyResolvedDependency> partiallyResolvedDeps,
       Map<Label, Target> targetMap,
       BuildConfiguration originalConfiguration,
-      @Nullable RuleTransitionFactory trimmingTransitionFactory)
+      @Nullable TransitionFactory<Rule> trimmingTransitionFactory)
       throws InconsistentAspectOrderException {
     OrderedSetMultimap<DependencyKind, Dependency> outgoingEdges = OrderedSetMultimap.create();
 
@@ -378,8 +388,7 @@ public abstract class DependencyResolver {
       Target toTarget = targetMap.get(dep.getLabel());
       if (toTarget == null) {
         // Dependency pointing to non-existent target. This error was reported in getTargets(), so
-        // we can just ignore this dependency. Toolchain dependencies always have toTarget == null
-        // since we do not depend on their package.
+        // we can just ignore this dependency.
         continue;
       }
 
@@ -392,9 +401,7 @@ public abstract class DependencyResolver {
 
       outgoingEdges.put(
           entry.getKey(),
-          transition == NullTransition.INSTANCE
-              ? Dependency.withNullConfiguration(dep.getLabel())
-              : Dependency.withTransitionAndAspects(dep.getLabel(), transition, requiredAspects));
+          Dependency.withTransitionAndAspects(dep.getLabel(), transition, requiredAspects));
     }
     return outgoingEdges;
   }
@@ -404,7 +411,7 @@ public abstract class DependencyResolver {
       BuildConfiguration hostConfig,
       Iterable<Aspect> aspects,
       ImmutableMap<Label, ConfigMatchingProvider> configConditions,
-      ImmutableSet<Label> toolchainLabels,
+      @Nullable ToolchainContext toolchainContext,
       OrderedSetMultimap<DependencyKind, Label> outgoingLabels)
       throws EvalException {
     Preconditions.checkArgument(node.getTarget() instanceof Rule, node);
@@ -458,7 +465,9 @@ public abstract class DependencyResolver {
           rule.getPackage().getDefaultRestrictedTo());
     }
 
-    outgoingLabels.putAll(TOOLCHAIN_DEPENDENCY, toolchainLabels);
+    if (toolchainContext != null) {
+      outgoingLabels.putAll(TOOLCHAIN_DEPENDENCY, toolchainContext.resolvedToolchainLabels());
+    }
   }
 
   private void resolveAttributes(
@@ -471,7 +480,14 @@ public abstract class DependencyResolver {
     Label ruleLabel = rule.getLabel();
     for (AttributeDependencyKind dependencyKind : getAttributes(rule, aspects)) {
       Attribute attribute = dependencyKind.getAttribute();
-      if (!attribute.getCondition().apply(attributeMap)) {
+      if (!attribute.getCondition().apply(attributeMap)
+          // Not only is resolving CONFIG_SETTING_DEPS_ATTRIBUTE deps here wasteful, since the only
+          // place they're used is in ConfiguredTargetFunction.getConfigConditions, but it actually
+          // breaks trimming as shown by
+          // FeatureFlagManualTrimmingTest#featureFlagInUnusedSelectBranchButNotInTransitiveConfigs_DoesNotError
+          // because it resolves a dep that trimming (correctly) doesn't account for because it's
+          // part of an unchosen select() branch.
+          || attribute.getName().equals(RuleClass.CONFIG_SETTING_DEPS_ATTRIBUTE)) {
         continue;
       }
 
@@ -532,7 +548,7 @@ public abstract class DependencyResolver {
       Attribute attribute,
       BuildConfiguration ruleConfig,
       BuildConfiguration hostConfig) {
-    Preconditions.checkState(!attribute.hasSplitConfigurationTransition());
+    Preconditions.checkState(!attribute.getTransitionFactory().isSplit());
     @SuppressWarnings("unchecked")
     LateBoundDefault<FragmentT, ?> lateBoundDefault =
         (LateBoundDefault<FragmentT, ?>) attribute.getLateBoundDefault();
@@ -631,9 +647,9 @@ public abstract class DependencyResolver {
    * Filter the set of aspects that are to be propagated according to the set of advertised
    * providers of the dependency.
    */
-  private AspectCollection filterPropagatingAspects(Iterable<Aspect> aspects, Target toTarget)
+  private AspectCollection filterPropagatingAspects(ImmutableList<Aspect> aspects, Target toTarget)
       throws InconsistentAspectOrderException {
-    if (!(toTarget instanceof Rule)) {
+    if (!(toTarget instanceof Rule) || aspects.isEmpty()) {
       return AspectCollection.EMPTY;
     }
 

@@ -121,6 +121,36 @@ def _impl(ctx):
 
 As mentioned above, support for `len(<depset>)` is deprecated.
 
+### Reduce the number of calls to `depset`
+
+Calling `depset` inside a loop is often a mistake. It can lead to depsets with
+very deep nesting, which perform poorly. For example:
+
+```python
+x = depset()
+for i in inputs:
+    # Do not do that.
+    x = depset(transitive = [x, i.deps])
+```
+
+This code can be replaced easily. First, collect the transitive depsets and
+merge them all at once:
+
+```python
+transitive = []
+
+for i in inputs:
+    transitive.append(i.deps)
+
+x = depset(transitive = transitive])
+```
+
+This can sometimes be reduced using a list comprehension:
+
+```python
+x = depset(transitive = [i.deps for i in inputs])
+```
+
 ## Use `ctx.actions.args()` for command lines
 
 When building command lines you should use [ctx.actions.args()](lib/Args.html).
@@ -423,7 +453,7 @@ $ bazel $(STARTUP_FLAGS) dump --skylark_memory=$HOME/prof.gz
 Next, we use the `pprof` tool to investigate the heap. A good starting point is
 getting a flame graph by using `pprof -flame $HOME/prof.gz`.
 
-  You can get `pprof` from https://github.com/google/pprof.
+  You can get `pprof` from [https://github.com/google/pprof](https://github.com/google/pprof).
 
 In this case we get a text dump of the hottest call sites annotated with lines:
 

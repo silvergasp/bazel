@@ -41,13 +41,6 @@ class BazelStartupOptions : public StartupOptions {
   bool use_home_rc;
   // TODO(b/36168162): Remove the master rc flag.
   bool use_master_bazelrc_;
-
-  // Whether Windows-style subprocess argument escaping is enabled on Windows,
-  // or the (buggy) Bash-style is used.
-  // This flag only affects builds on Windows, and it's a no-op on other
-  // platforms.
-  // See https://github.com/bazelbuild/bazel/issues/7122
-  bool incompatible_windows_style_arg_escaping;
 };
 
 }  // namespace blaze

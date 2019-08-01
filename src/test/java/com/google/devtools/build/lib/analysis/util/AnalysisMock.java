@@ -26,10 +26,11 @@ import com.google.devtools.build.lib.packages.util.LoadingMock;
 import com.google.devtools.build.lib.packages.util.MockCcSupport;
 import com.google.devtools.build.lib.packages.util.MockPythonSupport;
 import com.google.devtools.build.lib.packages.util.MockToolsConfig;
-import com.google.devtools.build.lib.rules.cpp.CcSkyframeSupportFunction;
-import com.google.devtools.build.lib.rules.cpp.CcSkyframeSupportValue;
+import com.google.devtools.build.lib.rules.cpp.CcSkyframeFdoSupportFunction;
+import com.google.devtools.build.lib.rules.cpp.CcSkyframeFdoSupportValue;
 import com.google.devtools.build.lib.rules.repository.LocalRepositoryFunction;
 import com.google.devtools.build.lib.rules.repository.LocalRepositoryRule;
+import com.google.devtools.build.lib.rules.repository.ManagedDirectoriesKnowledge;
 import com.google.devtools.build.lib.rules.repository.RepositoryDelegatorFunction;
 import com.google.devtools.build.lib.rules.repository.RepositoryFunction;
 import com.google.devtools.build.lib.rules.repository.RepositoryLoaderFunction;
@@ -39,7 +40,6 @@ import com.google.devtools.build.lib.testutil.TestConstants;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.skyframe.SkyFunction;
 import com.google.devtools.build.skyframe.SkyFunctionName;
-import com.google.devtools.common.options.InvocationPolicyEnforcer;
 import java.io.IOException;
 import java.lang.reflect.Field;
 import java.util.List;
@@ -74,11 +74,6 @@ public abstract class AnalysisMock extends LoadingMock {
         .setExtraSkyFunctions(getSkyFunctions(directories));
   }
 
-  @Override
-  public InvocationPolicyEnforcer getInvocationPolicyEnforcer() {
-    return new InvocationPolicyEnforcer(TestConstants.TEST_INVOCATION_POLICY);
-  }
-
   /**
    * This is called from test setup to create the mock directory layout needed to create the
    * configuration.
@@ -102,6 +97,11 @@ public abstract class AnalysisMock extends LoadingMock {
    */
   public abstract void setupMockWorkspaceFiles(Path embeddedBinariesRoot) throws IOException;
 
+  /** Creates a mock tools repository. */
+  public void setupMockToolsRepository(MockToolsConfig config) throws IOException {
+    // Do nothing by default.
+  }
+
   /** Returns the default factories for configuration fragments used in tests. */
   public abstract List<ConfigurationFragmentFactory> getDefaultConfigurationFragmentFactories();
 
@@ -113,10 +113,6 @@ public abstract class AnalysisMock extends LoadingMock {
   public abstract MockCcSupport ccSupport();
 
   public abstract MockPythonSupport pySupport();
-
-  public void setupCcSupport(MockToolsConfig config) throws IOException {
-    get().ccSupport().setup(config);
-  }
 
   public ImmutableMap<SkyFunctionName, SkyFunction> getSkyFunctions(BlazeDirectories directories) {
     // Some tests require the local_repository rule so we need the appropriate SkyFunctions.
@@ -135,11 +131,12 @@ public abstract class AnalysisMock extends LoadingMock {
             null,
             new AtomicBoolean(true),
             ImmutableMap::of,
-            directories),
+            directories,
+            ManagedDirectoriesKnowledge.NO_MANAGED_DIRECTORIES),
         SkyFunctions.REPOSITORY,
         new RepositoryLoaderFunction(),
-        CcSkyframeSupportValue.SKYFUNCTION,
-        new CcSkyframeSupportFunction(directories));
+        CcSkyframeFdoSupportValue.SKYFUNCTION,
+        new CcSkyframeFdoSupportFunction(directories));
   }
 
   // Allow subclasses to add extra repository functions.
@@ -175,6 +172,11 @@ public abstract class AnalysisMock extends LoadingMock {
     }
 
     @Override
+    public void setupMockToolsRepository(MockToolsConfig config) throws IOException {
+      delegate.setupMockToolsRepository(config);
+    }
+
+    @Override
     public List<ConfigurationFragmentFactory> getDefaultConfigurationFragmentFactories() {
       return delegate.getDefaultConfigurationFragmentFactories();
     }
@@ -182,11 +184,6 @@ public abstract class AnalysisMock extends LoadingMock {
     @Override
     public ConfiguredRuleClassProvider createRuleClassProvider() {
       return delegate.createRuleClassProvider();
-    }
-
-    @Override
-    public InvocationPolicyEnforcer getInvocationPolicyEnforcer() {
-      return delegate.getInvocationPolicyEnforcer();
     }
 
     @Override

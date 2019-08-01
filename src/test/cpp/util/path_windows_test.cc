@@ -11,9 +11,14 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+
 #include <stdio.h>
 #include <string.h>
-#include <windows.h>
 
 #include <algorithm>
 #include <memory>
@@ -39,91 +44,6 @@ namespace blaze_util {
 using std::string;
 using std::unique_ptr;
 using std::wstring;
-
-TEST(PathWindowsTest, TestNormalizeWindowsPath) {
-#define ASSERT_NORMALIZE(x, y)                                           \
-  {                                                                      \
-    std::string result;                                                  \
-    EXPECT_TRUE(                                                         \
-        blaze_util::testing::TestOnly_NormalizeWindowsPath(x, &result)); \
-    EXPECT_EQ(result, y);                                                \
-  }
-
-  ASSERT_NORMALIZE("", "");
-  ASSERT_NORMALIZE("a", "a");
-  ASSERT_NORMALIZE("foo/bar", "foo\\bar");
-  ASSERT_NORMALIZE("foo/../bar", "bar");
-  ASSERT_NORMALIZE("a/", "a");
-  ASSERT_NORMALIZE("foo", "foo");
-  ASSERT_NORMALIZE("foo/", "foo");
-  ASSERT_NORMALIZE(".", ".");
-  ASSERT_NORMALIZE("./", ".");
-  ASSERT_NORMALIZE("..", "..");
-  ASSERT_NORMALIZE("../", "..");
-  ASSERT_NORMALIZE("./..", "..");
-  ASSERT_NORMALIZE("./../", "..");
-  ASSERT_NORMALIZE("../.", "..");
-  ASSERT_NORMALIZE(".././", "..");
-  ASSERT_NORMALIZE("...", "...");
-  ASSERT_NORMALIZE(".../", "...");
-  ASSERT_NORMALIZE("a/", "a");
-  ASSERT_NORMALIZE(".a", ".a");
-  ASSERT_NORMALIZE("..a", "..a");
-  ASSERT_NORMALIZE("...a", "...a");
-  ASSERT_NORMALIZE("./a", "a");
-  ASSERT_NORMALIZE("././a", "a");
-  ASSERT_NORMALIZE("./../a", "..\\a");
-  ASSERT_NORMALIZE(".././a", "..\\a");
-  ASSERT_NORMALIZE("../../a", "..\\..\\a");
-  ASSERT_NORMALIZE("../.../a", "..\\...\\a");
-  ASSERT_NORMALIZE(".../../a", "a");
-  ASSERT_NORMALIZE("a/..", "");
-  ASSERT_NORMALIZE("a/../", "");
-  ASSERT_NORMALIZE("a/./../", "");
-
-  ASSERT_NORMALIZE("c:/", "c:\\");
-  ASSERT_NORMALIZE("c:/a", "c:\\a");
-  ASSERT_NORMALIZE("c:/foo/bar", "c:\\foo\\bar");
-  ASSERT_NORMALIZE("c:/foo/../bar", "c:\\bar");
-  ASSERT_NORMALIZE("d:/a/", "d:\\a");
-  ASSERT_NORMALIZE("D:/foo", "D:\\foo");
-  ASSERT_NORMALIZE("c:/foo/", "c:\\foo");
-  ASSERT_NORMALIZE("c:/.", "c:\\");
-  ASSERT_NORMALIZE("c:/./", "c:\\");
-  ASSERT_NORMALIZE("c:/..", "c:\\");
-  ASSERT_NORMALIZE("c:/../", "c:\\");
-  ASSERT_NORMALIZE("c:/./..", "c:\\");
-  ASSERT_NORMALIZE("c:/./../", "c:\\");
-  ASSERT_NORMALIZE("c:/../.", "c:\\");
-  ASSERT_NORMALIZE("c:/.././", "c:\\");
-  ASSERT_NORMALIZE("c:/...", "c:\\...");
-  ASSERT_NORMALIZE("c:/.../", "c:\\...");
-  ASSERT_NORMALIZE("c:/.a", "c:\\.a");
-  ASSERT_NORMALIZE("c:/..a", "c:\\..a");
-  ASSERT_NORMALIZE("c:/...a", "c:\\...a");
-  ASSERT_NORMALIZE("c:/./a", "c:\\a");
-  ASSERT_NORMALIZE("c:/././a", "c:\\a");
-  ASSERT_NORMALIZE("c:/./../a", "c:\\a");
-  ASSERT_NORMALIZE("c:/.././a", "c:\\a");
-  ASSERT_NORMALIZE("c:/../../a", "c:\\a");
-  ASSERT_NORMALIZE("c:/../.../a", "c:\\...\\a");
-  ASSERT_NORMALIZE("c:/.../../a", "c:\\a");
-  ASSERT_NORMALIZE("c:/a/..", "c:\\");
-  ASSERT_NORMALIZE("c:/a/../", "c:\\");
-  ASSERT_NORMALIZE("c:/a/./../", "c:\\");
-
-  ASSERT_NORMALIZE("foo", "foo");
-  ASSERT_NORMALIZE("foo/", "foo");
-  ASSERT_NORMALIZE("foo//bar", "foo\\bar");
-  ASSERT_NORMALIZE("../..//foo/./bar", "..\\..\\foo\\bar");
-  ASSERT_NORMALIZE("../foo/baz/../bar", "..\\foo\\bar");
-  ASSERT_NORMALIZE("c:", "c:\\");
-  ASSERT_NORMALIZE("c:/", "c:\\");
-  ASSERT_NORMALIZE("c:\\", "c:\\");
-  ASSERT_NORMALIZE("c:\\..//foo/./bar/", "c:\\foo\\bar");
-  ASSERT_NORMALIZE("../foo", "..\\foo");
-#undef ASSERT_NORMALIZE
-}
 
 TEST(PathWindowsTest, TestDirname) {
   ASSERT_EQ("", Dirname(""));
@@ -392,7 +312,7 @@ TEST(PathWindowsTest, MakeAbsolute) {
   EXPECT_EQ("", MakeAbsolute(""));
 }
 
-TEST(PathWindowsTest, MakeAbsoluteAndResolveWindowsEnvvars_WithTmpdir) {
+TEST(PathWindowsTest, MakeAbsoluteAndResolveEnvvars_WithTmpdir) {
   // We cannot test the system-default paths like %ProgramData% because these
   // are wiped from the test environment. TestTmpdir is set by Bazel though,
   // so serves as a fine substitute.
@@ -402,20 +322,20 @@ TEST(PathWindowsTest, MakeAbsoluteAndResolveWindowsEnvvars_WithTmpdir) {
   const std::string expected_tmpdir_bar = ConvertPath(tmpdir + "\\bar");
 
   EXPECT_EQ(expected_tmpdir_bar,
-            MakeAbsoluteAndResolveWindowsEnvvars("%TEST_TMPDIR%\\bar"));
+            MakeAbsoluteAndResolveEnvvars("%TEST_TMPDIR%\\bar"));
   EXPECT_EQ(expected_tmpdir_bar,
-            MakeAbsoluteAndResolveWindowsEnvvars("%Test_Tmpdir%\\bar"));
+            MakeAbsoluteAndResolveEnvvars("%Test_Tmpdir%\\bar"));
   EXPECT_EQ(expected_tmpdir_bar,
-            MakeAbsoluteAndResolveWindowsEnvvars("%test_tmpdir%\\bar"));
+            MakeAbsoluteAndResolveEnvvars("%test_tmpdir%\\bar"));
   EXPECT_EQ(expected_tmpdir_bar,
-            MakeAbsoluteAndResolveWindowsEnvvars("%test_tmpdir%/bar"));
+            MakeAbsoluteAndResolveEnvvars("%test_tmpdir%/bar"));
 }
 
-TEST(PathWindowsTest, MakeAbsoluteAndResolveWindowsEnvvars_LongPaths) {
+TEST(PathWindowsTest, MakeAbsoluteAndResolveEnvvars_LongPaths) {
   const std::string long_path = "c:\\" + std::string(MAX_PATH, 'a');
   blaze::SetEnv("long", long_path);
 
-  EXPECT_EQ(long_path, MakeAbsoluteAndResolveWindowsEnvvars("%long%"));
+  EXPECT_EQ(long_path, MakeAbsoluteAndResolveEnvvars("%long%"));
 }
 
 }  // namespace blaze_util

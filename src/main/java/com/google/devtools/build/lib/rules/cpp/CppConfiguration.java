@@ -20,9 +20,9 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.devtools.build.lib.analysis.config.AutoCpuConverter;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
-import com.google.devtools.build.lib.analysis.config.BuildConfiguration.Options;
 import com.google.devtools.build.lib.analysis.config.BuildOptions;
 import com.google.devtools.build.lib.analysis.config.CompilationMode;
+import com.google.devtools.build.lib.analysis.config.CoreOptions;
 import com.google.devtools.build.lib.analysis.config.InvalidConfigurationException;
 import com.google.devtools.build.lib.analysis.config.PerLabelOptions;
 import com.google.devtools.build.lib.analysis.skylark.annotations.SkylarkConfigurationField;
@@ -139,13 +139,15 @@ public final class CppConfiguration extends BuildConfiguration.Fragment
 
   private final String transformedCpuFromOptions;
   // TODO(lberki): desiredCpu *should* be always the same as targetCpu, except that we don't check
-  // that the CPU we get from the toolchain matches BuildConfiguration.Options.cpu . So we store
+  // that the CPU we get from the toolchain matches CoreOptions.cpu . So we store
   // it here so that the output directory doesn't depend on the CToolchain. When we will eventually
   // verify that the two are the same, we can remove one of desiredCpu and targetCpu.
   private final String desiredCpu;
 
   private final PathFragment fdoPath;
   private final Label fdoOptimizeLabel;
+
+  private final PathFragment csFdoAbsolutePath;
 
   private final ImmutableList<String> conlyopts;
 
@@ -162,12 +164,13 @@ public final class CppConfiguration extends BuildConfiguration.Fragment
   private final boolean stripBinaries;
   private final CompilationMode compilationMode;
   private final boolean collectCodeCoverage;
+  private final boolean isThisHostConfigurationDoNotUseWillBeRemovedFor129045294;
 
   static CppConfiguration create(CpuTransformer cpuTransformer, BuildOptions options)
       throws InvalidConfigurationException {
     CppOptions cppOptions = options.get(CppOptions.class);
 
-    Options commonOptions = options.get(Options.class);
+    CoreOptions commonOptions = options.get(CoreOptions.class);
     CompilationMode compilationMode = commonOptions.compilationMode;
 
     ImmutableList.Builder<String> linkoptsBuilder = ImmutableList.builder();
@@ -196,6 +199,22 @@ public final class CppConfiguration extends BuildConfiguration.Fragment
       }
     }
 
+    PathFragment csFdoAbsolutePath = null;
+    if (cppOptions.csFdoAbsolutePathForBuild != null) {
+      csFdoAbsolutePath = PathFragment.create(cppOptions.csFdoAbsolutePathForBuild);
+      if (!csFdoAbsolutePath.isAbsolute()) {
+        throw new InvalidConfigurationException(
+            "Path of '"
+                + csFdoAbsolutePath.getPathString()
+                + "' in --cs_fdo_absolute_path is not an absolute path.");
+      }
+      try {
+        FileSystemUtils.checkBaseName(csFdoAbsolutePath.getBaseName());
+      } catch (IllegalArgumentException e) {
+        throw new InvalidConfigurationException(e);
+      }
+    }
+
     return new CppConfiguration(
         cppOptions.doNotUseCpuTransformer
             ? commonOptions.cpu
@@ -203,6 +222,7 @@ public final class CppConfiguration extends BuildConfiguration.Fragment
         Preconditions.checkNotNull(commonOptions.cpu),
         fdoPath,
         fdoProfileLabel,
+        csFdoAbsolutePath,
         ImmutableList.copyOf(cppOptions.conlyoptList),
         ImmutableList.copyOf(cppOptions.coptList),
         ImmutableList.copyOf(cppOptions.cxxoptList),
@@ -214,7 +234,8 @@ public final class CppConfiguration extends BuildConfiguration.Fragment
             || (cppOptions.stripBinaries == StripMode.SOMETIMES
                 && compilationMode == CompilationMode.FASTBUILD)),
         compilationMode,
-        commonOptions.collectCodeCoverage);
+        commonOptions.collectCodeCoverage,
+        commonOptions.isHost);
   }
 
   private CppConfiguration(
@@ -222,6 +243,7 @@ public final class CppConfiguration extends BuildConfiguration.Fragment
       String desiredCpu,
       PathFragment fdoPath,
       Label fdoOptimizeLabel,
+      PathFragment csFdoAbsolutePath,
       ImmutableList<String> conlyopts,
       ImmutableList<String> copts,
       ImmutableList<String> cxxopts,
@@ -231,11 +253,13 @@ public final class CppConfiguration extends BuildConfiguration.Fragment
       CppOptions cppOptions,
       boolean stripBinaries,
       CompilationMode compilationMode,
-      boolean collectCodeCoverage) {
+      boolean collectCodeCoverage,
+      boolean isHostConfiguration) {
     this.transformedCpuFromOptions = transformedCpuFromOptions;
     this.desiredCpu = desiredCpu;
     this.fdoPath = fdoPath;
     this.fdoOptimizeLabel = fdoOptimizeLabel;
+    this.csFdoAbsolutePath = csFdoAbsolutePath;
     this.conlyopts = conlyopts;
     this.copts = copts;
     this.cxxopts = cxxopts;
@@ -246,6 +270,7 @@ public final class CppConfiguration extends BuildConfiguration.Fragment
     this.stripBinaries = stripBinaries;
     this.compilationMode = compilationMode;
     this.collectCodeCoverage = collectCodeCoverage;
+    this.isThisHostConfigurationDoNotUseWillBeRemovedFor129045294 = isHostConfiguration;
   }
 
   /** Returns the label of the <code>cc_compiler</code> rule for the C++ configuration. */
@@ -258,10 +283,7 @@ public final class CppConfiguration extends BuildConfiguration.Fragment
     return cppOptions.crosstoolTop;
   }
 
-  /**
-   * Returns the configured current compilation mode. Rules should not call this directly, but
-   * instead use {@code CcToolchainProvider.getCompilationMode}.
-   */
+  /** Returns the configured current compilation mode. */
   public CompilationMode getCompilationMode() {
     return compilationMode;
   }
@@ -293,12 +315,12 @@ public final class CppConfiguration extends BuildConfiguration.Fragment
     return cppOptions.dynamicMode;
   }
 
-  public boolean getLinkCompileOutputSeparately() {
-    return cppOptions.linkCompileOutputSeparately;
-  }
-
   public boolean isFdo() {
     return cppOptions.isFdo();
+  }
+
+  public boolean isCSFdo() {
+    return cppOptions.isCSFdo();
   }
 
   /**
@@ -420,6 +442,14 @@ public final class CppConfiguration extends BuildConfiguration.Fragment
   /** Returns flags passed to Bazel by --copt option. */
   @Override
   public ImmutableList<String> getCopts() {
+    if (isOmitfp()) {
+      return ImmutableList.<String>builder()
+          .add("-fomit-frame-pointer")
+          .add("-fasynchronous-unwind-tables")
+          .add("-DNO_FRAME_POINTER")
+          .addAll(copts)
+          .build();
+    }
     return copts;
   }
 
@@ -480,7 +510,7 @@ public final class CppConfiguration extends BuildConfiguration.Fragment
 
     // This is an assertion check vs. user error because users can't trigger this state.
     Verify.verify(
-        !(buildOptions.get(BuildConfiguration.Options.class).isHost && cppOptions.isFdo()),
+        !(buildOptions.get(CoreOptions.class).isHost && cppOptions.isFdo()),
         "FDO state should not propagate to the host configuration");
   }
 
@@ -505,27 +535,76 @@ public final class CppConfiguration extends BuildConfiguration.Fragment
     return cppOptions.strictSystemIncludes;
   }
 
-  public String getFdoInstrument() {
+  String getFdoInstrument() {
+    if (isThisHostConfigurationDoNotUseWillBeRemovedFor129045294()) {
+      // We don't want FDO in the host configuration
+      return null;
+    }
     return cppOptions.fdoInstrumentForBuild;
   }
 
-  public PathFragment getFdoPath() {
+  /**
+   * @deprecated Unsafe because it returns a value from target configuration even in the host
+   *     configuration.
+   */
+  @Deprecated
+  PathFragment getFdoPathUnsafeSinceItCanReturnValueFromWrongConfiguration() {
     return fdoPath;
   }
 
-  public Label getFdoOptimizeLabel() {
+  /**
+   * @deprecated Unsafe because it returns a value from target configuration even in the host
+   *     configuration.
+   */
+  @Deprecated
+  Label getFdoOptimizeLabelUnsafeSinceItCanReturnValueFromWrongConfiguration() {
     return fdoOptimizeLabel;
   }
 
-  public Label getFdoPrefetchHintsLabel() {
+  public String getCSFdoInstrument() {
+    return cppOptions.csFdoInstrumentForBuild;
+  }
+
+  public PathFragment getCSFdoAbsolutePath() {
+    return csFdoAbsolutePath;
+  }
+
+  Label getFdoPrefetchHintsLabel() {
+    if (isThisHostConfigurationDoNotUseWillBeRemovedFor129045294()) {
+      // We don't want FDO in the host configuration
+      return null;
+    }
+    return getFdoPrefetchHintsLabelUnsafeSinceItCanReturnValueFromWrongConfiguration();
+  }
+
+  /**
+   * @deprecated Unsafe because it returns a value from target configuration even in the host
+   *     configuration.
+   */
+  @Deprecated
+  Label getFdoPrefetchHintsLabelUnsafeSinceItCanReturnValueFromWrongConfiguration() {
     return cppOptions.getFdoPrefetchHintsLabel();
   }
 
-  public Label getFdoProfileLabel() {
+  /**
+   * @deprecated Unsafe because it returns a value from target configuration even in the host
+   *     configuration.
+   */
+  @Deprecated
+  Label getFdoProfileLabelUnsafeSinceItCanReturnValueFromWrongConfiguration() {
     return cppOptions.fdoProfileLabel;
   }
 
-  public Label getXFdoProfileLabel() {
+  public Label getCSFdoProfileLabel() {
+    return cppOptions.csFdoProfileLabel;
+  }
+
+  /**
+   * @deprecated Unsafe because it returns a value from target configuration even in the host
+   *     configuration.
+   */
+  @Deprecated
+  Label getXFdoProfileLabelUnsafeSinceItCanReturnValueFromWrongConfiguration() {
     if (cppOptions.fdoOptimizeForBuild != null
         || cppOptions.fdoInstrumentForBuild != null
         || cppOptions.fdoProfileLabel != null
@@ -542,26 +621,6 @@ public final class CppConfiguration extends BuildConfiguration.Fragment
 
   public boolean useLLVMCoverageMapFormat() {
     return cppOptions.useLLVMCoverageMapFormat;
-  }
-
-  public boolean disableLegacyCrosstoolFields() {
-    return cppOptions.disableLegacyCrosstoolFields;
-  }
-
-  public boolean disableExpandIfAllAvailableInFlagSet() {
-    return cppOptions.disableExpandIfAllAvailableInFlagSet;
-  }
-
-  public static String getLegacyCrosstoolFieldErrorMessage(String field) {
-    Preconditions.checkNotNull(field);
-    return field
-        + " is disabled by --incompatible_disable_legacy_crosstool_fields, please "
-        + "migrate your CROSSTOOL (see https://github.com/bazelbuild/bazel/issues/6861 for "
-        + "migration instructions).";
-  }
-
-  public boolean disableDepsetInUserFlags() {
-    return cppOptions.disableDepsetInUserFlags;
   }
 
   public boolean removeCpuCompilerCcToolchainAttributes() {
@@ -586,19 +645,57 @@ public final class CppConfiguration extends BuildConfiguration.Fragment
     return cppOptions.libcTopLabel;
   }
 
-  public boolean disableGenruleCcToolchainDependency() {
-    return cppOptions.disableGenruleCcToolchainDependency;
+  /**
+   * Returns the value of the libc top-level directory (--grte_top) as specified on the command line
+   */
+  public Label getTargetLibcTopLabel() {
+    return cppOptions.targetLibcTopLabel;
   }
 
   public boolean enableLegacyCcProvider() {
     return !cppOptions.disableLegacyCcProvider;
   }
 
-  public boolean disableCrosstool() {
-    return cppOptions.disableCrosstool;
-  }
-
   public boolean dontEnableHostNonhost() {
     return cppOptions.dontEnableHostNonhost;
+  }
+
+  public boolean requireCtxInConfigureFeatures() {
+    return cppOptions.requireCtxInConfigureFeatures;
+  }
+
+  public boolean collectCodeCoverage() {
+    return collectCodeCoverage;
+  }
+
+  /** @deprecated this is only a temporary workaround, will be removed by b/129045294. */
+  // TODO(b/129045294): Remove at first opportunity
+  @Deprecated
+  boolean isThisHostConfigurationDoNotUseWillBeRemovedFor129045294() {
+    return isThisHostConfigurationDoNotUseWillBeRemovedFor129045294;
+  }
+
+  public boolean enableCcToolchainResolution() {
+    return cppOptions.enableCcToolchainResolution;
+  }
+
+  public boolean saveFeatureState() {
+    return cppOptions.saveFeatureState;
+  }
+
+  public boolean useStandaloneLtoIndexingCommandLines() {
+    return cppOptions.useStandaloneLtoIndexingCommandLines;
+  }
+
+  public boolean useSpecificToolFiles() {
+    return cppOptions.useSpecificToolFiles;
+  }
+
+  public boolean disableNoCopts() {
+    return cppOptions.disableNoCopts;
+  }
+
+  public boolean loadCcRulesFromBzl() {
+    return cppOptions.loadCcRulesFromBzl;
   }
 }

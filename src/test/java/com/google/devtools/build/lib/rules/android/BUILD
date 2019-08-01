@@ -34,11 +34,24 @@ java_test(
     srcs = ["AndroidSkylarkTest.java"],
     deps = [
         "//src/main/java/com/google/devtools/build/lib:build-base",
+        "//src/main/java/com/google/devtools/build/lib:packages-internal",
         "//src/main/java/com/google/devtools/build/lib:syntax",
         "//src/main/java/com/google/devtools/build/lib/cmdline",
         "//src/test/java/com/google/devtools/build/lib:analysis_testutil",
         "//src/test/java/com/google/devtools/build/lib:packages_testutil",
         "//third_party:guava",
+        "//third_party:junit4",
+        "//third_party:truth",
+    ],
+)
+
+java_test(
+    name = "AndroidSkylarkCommonTest",
+    srcs = ["AndroidSkylarkCommonTest.java"],
+    deps = [
+        ":AndroidBuildViewTestCase",
+        "//src/main/java/com/google/devtools/build/lib/rules/java:java-compilation",
+        "//src/test/java/com/google/devtools/build/lib:packages_testutil",
         "//third_party:junit4",
         "//third_party:truth",
     ],

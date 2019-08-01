@@ -336,7 +336,7 @@ public class BazelCppRuleClasses {
            <li> STATIC with fully_static_link feature, in which everything is linked statically;
              e.g. "<code>gcc -static foo.o libbar.a libbaz.a -lm</code>".<br/>
              This mode is enabled by specifying <code>fully_static_link</code> in the
-             <a href="#cc_binary.features"><code>features</code></a> attribute.</li>
+             <a href="${link common-definitions#features}"><code>features</code></a> attribute.</li>
            <li> STATIC, in which all user libraries are linked statically (if a static
              version is available), but where system libraries (excluding C/C++ runtime libraries)
              are linked dynamically, e.g. "<code>gcc foo.o libfoo.a libbaz.a -lm</code>".<br/>
@@ -361,7 +361,7 @@ public class BazelCppRuleClasses {
           .add(attr("linkstatic", BOOLEAN).value(true))
           .add(
               attr("$def_parser", LABEL)
-                  .cfg(HostTransition.INSTANCE)
+                  .cfg(HostTransition.createFactory())
                   .singleArtifact()
                   .value(
                       new Attribute.ComputedDefault() {
@@ -472,6 +472,18 @@ public class BazelCppRuleClasses {
     @Override
     public RuleClass build(RuleClass.Builder builder, RuleDefinitionEnvironment env) {
       return builder
+          /*<!-- #BLAZE_RULE($cc_binary_base).ATTRIBUTE(additional_linker_inputs) -->
+           Pass these files to the C++ linker command.
+           <p>
+           For example, compiled Windows .res files can be provided here to be embedded in
+           the binary target.
+           </p>
+          <!-- #END_BLAZE_RULE.ATTRIBUTE -->*/
+          .add(
+              attr("additional_linker_inputs", LABEL_LIST)
+                  .orderIndependent()
+                  .direct_compile_time_input()
+                  .allowedFileTypes(FileTypeSet.ANY_FILE))
           /*<!-- #BLAZE_RULE($cc_binary_base).ATTRIBUTE(malloc) -->
           Override the default dependency on malloc.
           <p>

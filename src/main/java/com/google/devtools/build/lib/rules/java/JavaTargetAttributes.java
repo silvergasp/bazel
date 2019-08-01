@@ -20,7 +20,7 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import com.google.devtools.build.lib.actions.Artifact;
-import com.google.devtools.build.lib.analysis.config.BuildConfiguration.StrictDepsMode;
+import com.google.devtools.build.lib.analysis.config.CoreOptionConverters.StrictDepsMode;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
@@ -71,7 +71,6 @@ public class JavaTargetAttributes {
     private final Map<PathFragment, Artifact> resources = new LinkedHashMap<>();
     private final NestedSetBuilder<Artifact> resourceJars = NestedSetBuilder.stableOrder();
     private final List<Artifact> messages = new ArrayList<>();
-    private final List<Artifact> instrumentationMetadata = new ArrayList<>();
     private final List<Artifact> sourceJars = new ArrayList<>();
 
     private final List<Artifact> classPathResources = new ArrayList<>();
@@ -131,7 +130,6 @@ public class JavaTargetAttributes {
       Preconditions.checkArgument(!built);
       addCompileTimeClassPathEntries(context.getTransitiveCompileTimeJars());
       addRuntimeClassPathEntries(context.getRuntimeJars());
-      addInstrumentationMetadataEntries(context.getInstrumentationMetadata());
       return this;
     }
 
@@ -157,6 +155,12 @@ public class JavaTargetAttributes {
     public Builder addRuntimeClassPathEntries(NestedSet<Artifact> classPathEntries) {
       Preconditions.checkArgument(!built);
       runtimeClassPath.addTransitive(classPathEntries);
+      return this;
+    }
+
+    public Builder addCompileTimeClassPathEntry(Artifact entry) {
+      Preconditions.checkArgument(!built);
+      compileTimeClassPath.add(entry);
       return this;
     }
 
@@ -235,15 +239,15 @@ public class JavaTargetAttributes {
       return this;
     }
 
-    public Builder addCompileTimeDependencyArtifacts(NestedSet<Artifact> dependencyArtifacts) {
+    public Builder addDirectJar(Artifact directJar) {
       Preconditions.checkArgument(!built);
-      compileTimeDependencyArtifacts.addTransitive(dependencyArtifacts);
+      this.directJars.add(directJar);
       return this;
     }
 
-    public Builder addInstrumentationMetadataEntries(Iterable<Artifact> metadataEntries) {
+    public Builder addCompileTimeDependencyArtifacts(NestedSet<Artifact> dependencyArtifacts) {
       Preconditions.checkArgument(!built);
-      Iterables.addAll(instrumentationMetadata, metadataEntries);
+      compileTimeDependencyArtifacts.addTransitive(dependencyArtifacts);
       return this;
     }
 
@@ -364,15 +368,6 @@ public class JavaTargetAttributes {
     @Deprecated
     public boolean hasSourceFiles() {
       return !sourceFiles.isEmpty();
-    }
-
-    /**
-     * @deprecated prefer to use a built {@link JavaTargetAttributes} instead of accessing mutable
-     *     state in the {@link Builder}.
-     */
-    @Deprecated
-    public List<Artifact> getInstrumentationMetadata() {
-      return instrumentationMetadata;
     }
 
     /**

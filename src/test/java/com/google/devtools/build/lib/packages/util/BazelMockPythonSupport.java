@@ -33,11 +33,14 @@ public class BazelMockPythonSupport extends MockPythonSupport {
     addTool(config, "tools/python/python_version.bzl");
     addTool(config, "tools/python/srcs_version.bzl");
     addTool(config, "tools/python/toolchain.bzl");
+    addTool(config, "tools/python/utils.bzl");
+    addTool(config, "tools/python/private/defs.bzl");
 
     config.create(
         TestConstants.TOOLS_REPOSITORY_SCRATCH + "tools/python/BUILD",
         "package(default_visibility=['//visibility:public'])",
         "load(':python_version.bzl', 'define_python_version_flag')",
+        "load('//tools/python:toolchain.bzl', 'py_runtime_pair')",
         "define_python_version_flag(",
         "    name = 'python_version',",
         ")",
@@ -52,6 +55,27 @@ public class BazelMockPythonSupport extends MockPythonSupport {
         "toolchain_type(name = 'toolchain_type')",
         "constraint_setting(name = 'py2_interpreter_path')",
         "constraint_setting(name = 'py3_interpreter_path')",
+        "py_runtime(",
+        "    name = 'py2_interpreter',",
+        "    interpreter_path = '/usr/bin/mockpython2',",
+        "    python_version = 'PY2',",
+        ")",
+        "py_runtime(",
+        "    name = 'py3_interpreter',",
+        "    interpreter_path = '/usr/bin/mockpython3',",
+        "    python_version = 'PY3',",
+        ")",
+        "py_runtime_pair(",
+        "    name = 'default_py_runtime_pair',",
+        "    py2_runtime = ':py2_interpreter',",
+        "    py3_runtime = ':py3_interpreter',",
+        ")",
+        "toolchain(",
+        "    # The Python workspace suffix looks to register a toolchain of this name.",
+        "    name = 'autodetecting_toolchain',",
+        "    toolchain = ':default_py_runtime_pair',",
+        "    toolchain_type = ':toolchain_type',",
+        ")",
         "exports_files(['precompile.py'])",
         "sh_binary(name='2to3', srcs=['2to3.sh'])");
   }

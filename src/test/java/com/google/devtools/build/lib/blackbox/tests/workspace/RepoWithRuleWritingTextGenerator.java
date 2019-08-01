@@ -4,13 +4,14 @@
 // you may not use this file except in compliance with the License.
 // You may obtain a copy of the License at
 //
-// http://www.apache.org/licenses/LICENSE-2.0
+//    http://www.apache.org/licenses/LICENSE-2.0
 //
 // Unless required by applicable law or agreed to in writing, software
 // distributed under the License is distributed on an "AS IS" BASIS,
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+//
 
 package com.google.devtools.build.lib.blackbox.tests.workspace;
 
@@ -33,13 +34,13 @@ import java.nio.file.Path;
  */
 public class RepoWithRuleWritingTextGenerator {
 
-  private static final String HELPER_FILE = "helper.bzl";
-  private static final String RULE_NAME = "write_to_file";
+  static final String HELPER_FILE = "helper.bzl";
+  static final String RULE_NAME = "write_to_file";
   static final String HELLO = "HELLO";
   static final String TARGET = "write_text";
   static final String OUT_FILE = "out";
 
-  private static final String WRITE_TEXT_TO_FILE =
+  static final String WRITE_TEXT_TO_FILE =
       "def _impl(ctx):\n"
           + "  out = ctx.actions.declare_file(ctx.attr.filename)\n"
           + "  ctx.actions.write(out, ctx.attr.text)\n"
@@ -58,6 +59,7 @@ public class RepoWithRuleWritingTextGenerator {
   private String target;
   private String outputText;
   private String outFile;
+  private boolean generateBuildFile;
 
   /**
    * Generator constructor
@@ -69,6 +71,7 @@ public class RepoWithRuleWritingTextGenerator {
     this.target = TARGET;
     this.outputText = HELLO;
     this.outFile = OUT_FILE;
+    generateBuildFile = true;
   }
 
   /**
@@ -105,6 +108,16 @@ public class RepoWithRuleWritingTextGenerator {
   }
 
   /**
+   * Specifies that BUILD file should not be generated
+   *
+   * @return this generator
+   */
+  RepoWithRuleWritingTextGenerator skipBuildFile() {
+    generateBuildFile = false;
+    return this;
+  }
+
+  /**
    * Generates the repository: WORKSPACE, BUILD, and helper.bzl files.
    *
    * @return repository directory
@@ -113,13 +126,15 @@ public class RepoWithRuleWritingTextGenerator {
   Path setupRepository() throws IOException {
     Path workspace = PathUtils.writeFileInDir(root, "WORKSPACE");
     PathUtils.writeFileInDir(root, HELPER_FILE, WRITE_TEXT_TO_FILE);
-    PathUtils.writeFileInDir(
-        root,
-        "BUILD",
-        "load(\"@bazel_tools//tools/build_defs/pkg:pkg.bzl\", \"pkg_tar\")",
-        loadRule(""),
-        callRule(target, outFile, outputText),
-        String.format("pkg_tar(name = \"%s\", srcs = glob([\"*\"]),)", getPkgTarTarget()));
+    if (generateBuildFile) {
+      PathUtils.writeFileInDir(
+          root,
+          "BUILD",
+          "load(\"@bazel_tools//tools/build_defs/pkg:pkg.bzl\", \"pkg_tar\")",
+          loadRule(""),
+          callRule(target, outFile, outputText),
+          String.format("pkg_tar(name = \"%s\", srcs = glob([\"*\"]),)", getPkgTarTarget()));
+    }
     return workspace.getParent();
   }
 

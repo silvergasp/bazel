@@ -21,16 +21,17 @@
 """Convenience macro for skydoc tests."""
 
 load("@bazel_skylib//:bzl_library.bzl", "bzl_library")
-load("@skydoc//stardoc:stardoc.bzl", "stardoc")
+load("@io_bazel_skydoc//stardoc:stardoc.bzl", "stardoc")
 
 def skydoc_test(
         name,
         input_file,
         golden_file,
-        skydoc,
         deps = [],
         whitelisted_symbols = [],
-        semantic_flags = []):
+        semantic_flags = [],
+        format = "markdown",
+        **kwargs):
     """Creates a test target and golden-file regeneration target for skydoc testing.
 
     The test target is named "{name}_e2e_test".
@@ -53,7 +54,10 @@ def skydoc_test(
           <code>//foo:bar.bzl</code> does not build except when a user would specify
           <code>--incompatible_foo_semantic=false</code>, then this attribute should contain
           "--incompatible_foo_semantic=false"
-    """
+      format: The format of the output file.
+      **kwargs: A dictionary of input template names mapped to template file path for which documentation is generated.
+      """
+
     actual_generated_doc = "%s_output.txt" % name
 
     # Skydoc requires an absolute input file label to both load the target file and
@@ -85,6 +89,9 @@ def skydoc_test(
         input = input_file,
         symbol_names = whitelisted_symbols,
         deps = ["%s_lib" % name],
-        stardoc = skydoc,
+        renderer = Label("//src/main/java/com/google/devtools/build/skydoc/renderer:renderer"),
+        stardoc = Label("//src/main/java/com/google/devtools/build/skydoc:skydoc"),
         semantic_flags = semantic_flags,
+        format = format,
+        **kwargs
     )

@@ -24,7 +24,9 @@ import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.events.Location;
 import com.google.devtools.build.lib.packages.Provider;
+import com.google.devtools.build.lib.skylarkbuildapi.ProviderApi;
 import com.google.devtools.build.lib.skylarkbuildapi.java.JavaCommonApi;
+import com.google.devtools.build.lib.skylarkbuildapi.java.JavaToolchainSkylarkApiProviderApi;
 import com.google.devtools.build.lib.syntax.Environment;
 import com.google.devtools.build.lib.syntax.EvalException;
 import com.google.devtools.build.lib.syntax.Runtime;
@@ -62,7 +64,7 @@ public class JavaSkylarkCommon
       checkCallPathInWhitelistedPackages(
           environment.getSemantics(),
           location,
-          environment.getCallerLabel().getPackageFragment().toString());
+          environment.getGlobals().getLabel().getPackageName());
     }
     return JavaInfoBuildHelper.getInstance()
         .create(
@@ -99,6 +101,8 @@ public class JavaSkylarkCommon
       SkylarkList<JavaInfo> exports,
       SkylarkList<JavaInfo> plugins,
       SkylarkList<JavaInfo> exportedPlugins,
+      SkylarkList<Artifact> annotationProcessorAdditionalInputs,
+      SkylarkList<Artifact> annotationProcessorAdditionalOutputs,
       String strictDepsMode,
       JavaToolchainProvider javaToolchain,
       JavaRuntimeInfo hostJavabase,
@@ -121,6 +125,8 @@ public class JavaSkylarkCommon
             exports,
             plugins,
             exportedPlugins,
+            annotationProcessorAdditionalInputs,
+            annotationProcessorAdditionalOutputs,
             strictDepsMode,
             javaToolchain,
             hostJavabase,
@@ -191,7 +197,8 @@ public class JavaSkylarkCommon
   // delete
   public ImmutableList<String> getDefaultJavacOpts(
       JavaToolchainProvider javaToolchain, Location location) throws EvalException {
-    return javaToolchain.getJavacOptions();
+    // We don't have a rule context if the default_javac_opts.java_toolchain parameter is set
+    return ((JavaToolchainProvider) javaToolchain).getJavacOptions(/* ruleContext= */ null);
   }
 
   @Override
@@ -258,5 +265,49 @@ public class JavaSkylarkCommon
         .getOptions()
         .get(PlatformOptions.class)
         .useToolchainResolutionForJavaRules;
+  }
+
+  @Override
+  public ProviderApi getMessageBundleInfo() {
+    // No implementation in Bazel. This method not callable in Starlark except through
+    // (discouraged) use of --experimental_google_legacy_api.
+    return null;
+  }
+
+  @Override
+  public JavaInfo addConstraints(JavaInfo javaInfo, SkylarkList<String> constraints) {
+    // No implementation in Bazel. This method not callable in Starlark except through
+    // (discouraged) use of --experimental_google_legacy_api.
+    return null;
+  }
+
+  @Override
+  public JavaInfo removeAnnotationProcessors(JavaInfo javaInfo) {
+    // No implementation in Bazel. This method not callable in Starlark except through
+    // (discouraged) use of --experimental_google_legacy_api.
+    return null;
+  }
+
+  @Override
+  public NestedSet<Artifact> getCompileTimeJavaDependencyArtifacts(JavaInfo javaInfo) {
+    // No implementation in Bazel. This method not callable in Starlark except through
+    // (discouraged) use of --experimental_google_legacy_api.
+    return null;
+  }
+
+  @Override
+  public JavaInfo addCompileTimeJavaDependencyArtifacts(
+      JavaInfo javaInfo, SkylarkList<Artifact> compileTimeJavaDependencyArtifacts) {
+    // No implementation in Bazel. This method not callable in Starlark except through
+    // (discouraged) use of --experimental_google_legacy_api.
+    return null;
+  }
+
+  @Override
+  public Label getJavaToolchainLabel(
+      JavaToolchainSkylarkApiProviderApi toolchain, Location location) throws EvalException {
+    // No implementation in Bazel. This method not callable in Starlark except through
+    // (discouraged) use of --experimental_google_legacy_api.
+    return null;
   }
 }

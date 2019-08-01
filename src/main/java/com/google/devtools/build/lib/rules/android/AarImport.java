@@ -38,13 +38,17 @@ import com.google.devtools.build.lib.rules.java.JavaCommon;
 import com.google.devtools.build.lib.rules.java.JavaCompilationArgsProvider;
 import com.google.devtools.build.lib.rules.java.JavaCompilationArtifacts;
 import com.google.devtools.build.lib.rules.java.JavaConfiguration;
+import com.google.devtools.build.lib.rules.java.JavaConfiguration.ImportDepsCheckingLevel;
 import com.google.devtools.build.lib.rules.java.JavaInfo;
 import com.google.devtools.build.lib.rules.java.JavaRuleOutputJarsProvider;
 import com.google.devtools.build.lib.rules.java.JavaRuntimeInfo;
 import com.google.devtools.build.lib.rules.java.JavaSemantics;
 import com.google.devtools.build.lib.rules.java.JavaSkylarkApiProvider;
+import com.google.devtools.build.lib.rules.java.JavaSourceInfoProvider;
+import com.google.devtools.build.lib.rules.java.JavaSourceJarsProvider;
 import com.google.devtools.build.lib.rules.java.JavaToolchainProvider;
 import com.google.devtools.build.lib.vfs.PathFragment;
+import javax.annotation.Nullable;
 
 /**
  * An implementation for the aar_import rule.
@@ -61,21 +65,16 @@ public class AarImport implements RuleConfiguredTargetFactory {
 
   private final JavaSemantics javaSemantics;
   private final AndroidSemantics androidSemantics;
-  private final AndroidMigrationSemantics androidMigrationSemantics;
 
-  protected AarImport(
-      JavaSemantics javaSemantics,
-      AndroidSemantics androidSemantics,
-      AndroidMigrationSemantics androidMigrationSemantics) {
+  protected AarImport(JavaSemantics javaSemantics, AndroidSemantics androidSemantics) {
     this.javaSemantics = javaSemantics;
     this.androidSemantics = androidSemantics;
-    this.androidMigrationSemantics = androidMigrationSemantics;
   }
 
   @Override
   public ConfiguredTarget create(RuleContext ruleContext)
       throws InterruptedException, RuleErrorException, ActionConflictException {
-    androidMigrationSemantics.validateRuleContext(ruleContext);
+    androidSemantics.checkForMigrationTag(ruleContext);
     AndroidSdkProvider.verifyPresence(ruleContext);
 
     RuleConfiguredTargetBuilder ruleBuilder = new RuleConfiguredTargetBuilder(ruleContext);
@@ -152,25 +151,35 @@ public class AarImport implements RuleConfiguredTargetFactory {
             /* bothDeps = */ targets);
     javaSemantics.checkRule(ruleContext, common);
 
-    Artifact jdepsArtifact = createAarArtifact(ruleContext, "jdeps.proto");
-
-    common.setJavaCompilationArtifacts(
-        new JavaCompilationArtifacts.Builder()
-            .addRuntimeJar(mergedJar)
-            .addCompileTimeJarAsFullJar(mergedJar)
-            .setCompileTimeDependencies(jdepsArtifact)
-            .build());
-
     JavaConfiguration javaConfig = ruleContext.getFragment(JavaConfiguration.class);
-    ImportDepsCheckActionBuilder.newBuilder()
-        .bootclasspath(getBootclasspath(ruleContext))
-        .declareDeps(getCompileTimeJarsFromCollection(targets, /*isDirect=*/ true))
-        .transitiveDeps(getCompileTimeJarsFromCollection(targets, /*isDirect=*/ false))
-        .checkJars(NestedSetBuilder.<Artifact>stableOrder().add(mergedJar).build())
-        .importDepsCheckingLevel(javaConfig.getImportDepsCheckingLevel())
-        .jdepsOutputArtifact(jdepsArtifact)
-        .ruleLabel(ruleContext.getLabel())
-        .buildAndRegister(ruleContext);
+    JavaCompilationArtifacts.Builder javaCompilationArtifactsBuilder =
+        new JavaCompilationArtifacts.Builder();
+
+    javaCompilationArtifactsBuilder
+        .addRuntimeJar(mergedJar)
+        .addCompileTimeJarAsFullJar(mergedJar)
+        // Allow direct dependents to compile against un-merged R classes
+        .addCompileTimeJarAsFullJar(
+            ruleContext.getImplicitOutputArtifact(AndroidRuleClasses.ANDROID_RESOURCES_CLASS_JAR));
+
+    Artifact jdepsArtifact = null;
+    // Don't register import deps checking actions if the level is off. Since it's off, the
+    // check isn't useful anyway, so don't waste resources running it.
+    if (javaConfig.getImportDepsCheckingLevel() != ImportDepsCheckingLevel.OFF) {
+      jdepsArtifact = createAarArtifact(ruleContext, "jdeps.proto");
+      javaCompilationArtifactsBuilder.setCompileTimeDependencies(jdepsArtifact);
+      ImportDepsCheckActionBuilder.newBuilder()
+          .bootclasspath(getBootclasspath(ruleContext))
+          .declareDeps(getCompileTimeJarsFromCollection(targets, /*isDirect=*/ true))
+          .transitiveDeps(getCompileTimeJarsFromCollection(targets, /*isDirect=*/ false))
+          .checkJars(NestedSetBuilder.<Artifact>stableOrder().add(mergedJar).build())
+          .importDepsCheckingLevel(javaConfig.getImportDepsCheckingLevel())
+          .jdepsOutputArtifact(jdepsArtifact)
+          .ruleLabel(ruleContext.getLabel())
+          .buildAndRegister(ruleContext);
+    }
+
+    common.setJavaCompilationArtifacts(javaCompilationArtifactsBuilder.build());
 
     // We pass jdepsArtifact to create the action of extracting ANDROID_MANIFEST. Note that
     // this action does not need jdepsArtifact. The only reason is that we need to check the
@@ -185,12 +194,36 @@ public class AarImport implements RuleConfiguredTargetFactory {
             /* isNeverLink = */ JavaCommon.isNeverLink(ruleContext),
             /* srcLessDepsExport = */ false);
 
+    // Wire up the source jar for the current target and transitive source jars from dependencies.
+    ImmutableList<Artifact> srcJars = ImmutableList.of();
+    Artifact srcJar = ruleContext.getPrerequisiteArtifact("srcjar", Mode.TARGET);
+    NestedSetBuilder<Artifact> transitiveJavaSourceJarBuilder = NestedSetBuilder.stableOrder();
+    if (srcJar != null) {
+      srcJars = ImmutableList.of(srcJar);
+      transitiveJavaSourceJarBuilder.add(srcJar);
+    }
+    for (JavaSourceJarsProvider other :
+        JavaInfo.getProvidersFromListOfTargets(
+            JavaSourceJarsProvider.class, ruleContext.getPrerequisites("exports", Mode.TARGET))) {
+      transitiveJavaSourceJarBuilder.addTransitive(other.getTransitiveSourceJars());
+    }
+    NestedSet<Artifact> transitiveJavaSourceJars = transitiveJavaSourceJarBuilder.build();
+    JavaSourceJarsProvider javaSourceJarsProvider =
+        JavaSourceJarsProvider.create(transitiveJavaSourceJars, srcJars);
+    JavaSourceInfoProvider javaSourceInfoProvider =
+        new JavaSourceInfoProvider.Builder()
+            .setJarFiles(ImmutableList.of(mergedJar))
+            .setSourceJarsForJarFiles(srcJars)
+            .build();
+
     JavaInfo.Builder javaInfoBuilder =
         JavaInfo.Builder.create()
             .setRuntimeJars(ImmutableList.of(mergedJar))
             .setJavaConstraints(ImmutableList.of("android"))
             .setNeverlink(JavaCommon.isNeverLink(ruleContext))
             .addProvider(JavaCompilationArgsProvider.class, javaCompilationArgsProvider)
+            .addProvider(JavaSourceJarsProvider.class, javaSourceJarsProvider)
+            .addProvider(JavaSourceInfoProvider.class, javaSourceInfoProvider)
             .addProvider(JavaRuleOutputJarsProvider.class, jarProviderBuilder.build());
 
     common.addTransitiveInfoProviders(
@@ -252,7 +285,7 @@ public class AarImport implements RuleConfiguredTargetFactory {
       RuleContext ruleContext,
       Artifact aar,
       String filename,
-      Artifact jdepsOutputArtifact,
+      @Nullable Artifact jdepsOutputArtifact,
       Artifact outputArtifact) {
     SpawnAction.Builder builder =
         new SpawnAction.Builder()

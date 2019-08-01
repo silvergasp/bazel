@@ -45,6 +45,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Consumer;
 import java.util.logging.Logger;
 
 /**
@@ -174,9 +175,6 @@ public final class GraphBackedRecursivePackageProvider extends AbstractRecursive
       return ImmutableList.of();
     }
 
-    PathFragment.checkAllPathsAreUnder(blacklistedSubdirectories, directory);
-    PathFragment.checkAllPathsAreUnder(excludedSubdirectories, directory);
-
     // Check that this package is covered by at least one of our universe patterns.
     boolean inUniverse = false;
     for (TargetPatternKey patternKey : universeTargetPatternKeys) {
@@ -210,7 +208,8 @@ public final class GraphBackedRecursivePackageProvider extends AbstractRecursive
   }
 
   @Override
-  public Iterable<PathFragment> getPackagesUnderDirectory(
+  public void streamPackagesUnderDirectory(
+      Consumer<PackageIdentifier> results,
       ExtendedEventHandler eventHandler,
       RepositoryName repository,
       PathFragment directory,
@@ -220,7 +219,9 @@ public final class GraphBackedRecursivePackageProvider extends AbstractRecursive
     List<Root> roots =
         checkValidDirectoryAndGetRoots(
             repository, directory, blacklistedSubdirectories, excludedSubdirectories);
-    return rootPackageExtractor.getPackagesFromRoots(
+
+    rootPackageExtractor.streamPackagesFromRoots(
+        path -> results.accept(PackageIdentifier.create(repository, path)),
         graph,
         roots,
         eventHandler,

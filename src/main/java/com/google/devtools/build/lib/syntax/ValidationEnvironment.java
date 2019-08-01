@@ -15,6 +15,7 @@
 package com.google.devtools.build.lib.syntax;
 
 import com.google.common.base.Preconditions;
+import com.google.common.collect.ImmutableSet;
 import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.events.EventHandler;
 import com.google.devtools.build.lib.events.Location;
@@ -88,11 +89,14 @@ public final class ValidationEnvironment extends SyntaxTreeVisitor {
   private final Environment env;
   private Block block;
   private int loopCount;
+  /** In BUILD files, we have a slightly different behavior for legacy reasons. */
+  private final boolean isBuildFile;
 
   /** Create a ValidationEnvironment for a given global Environment (containing builtins). */
-  ValidationEnvironment(Environment env) {
+  private ValidationEnvironment(Environment env, boolean isBuildFile) {
     Preconditions.checkArgument(env.isGlobal());
     this.env = env;
+    this.isBuildFile = isBuildFile;
     block = new Block(Scope.Universe, null);
     Set<String> builtinVariables = env.getVariableNames();
     block.variables.addAll(builtinVariables);
@@ -112,10 +116,10 @@ public final class ValidationEnvironment extends SyntaxTreeVisitor {
   private void collectDefinitions(Statement stmt) {
     switch (stmt.kind()) {
       case ASSIGNMENT:
-        collectDefinitions(((AssignmentStatement) stmt).getLValue());
+        collectDefinitions(((AssignmentStatement) stmt).getLHS());
         break;
       case AUGMENTED_ASSIGNMENT:
-        collectDefinitions(((AugmentedAssignmentStatement) stmt).getLValue());
+        collectDefinitions(((AugmentedAssignmentStatement) stmt).getLHS());
         break;
       case IF:
         IfStatement ifStmt = (IfStatement) stmt;
@@ -126,7 +130,7 @@ public final class ValidationEnvironment extends SyntaxTreeVisitor {
         break;
       case FOR:
         ForStatement forStmt = (ForStatement) stmt;
-        collectDefinitions(forStmt.getVariable());
+        collectDefinitions(forStmt.getLHS());
         collectDefinitions(forStmt.getBlock());
         break;
       case FUNCTION_DEF:
@@ -147,21 +151,26 @@ public final class ValidationEnvironment extends SyntaxTreeVisitor {
     }
   }
 
-  private void collectDefinitions(LValue left) {
-    for (Identifier id : left.boundIdentifiers()) {
+  private void collectDefinitions(Expression lhs) {
+    for (Identifier id : boundIdentifiers(lhs)) {
       declare(id.getName(), id.getLocation());
     }
   }
 
-  private void validateLValue(Location loc, Expression expr) {
-    if (expr instanceof IndexExpression) {
-      visit(expr);
-    } else if (expr instanceof ListLiteral) {
-      for (Expression e : ((ListLiteral) expr).getElements()) {
-        validateLValue(loc, e);
+  private void assign(Expression lhs) {
+    if (lhs instanceof Identifier) {
+      if (!isBuildFile && env.getSemantics().incompatibleAssignmentIdentifiersHaveLocalScope()) {
+        ((Identifier) lhs).setScope(block.scope);
       }
-    } else if (!(expr instanceof Identifier)) {
-      throw new ValidationException(loc, "cannot assign to '" + expr + "'");
+      // no-op
+    } else if (lhs instanceof IndexExpression) {
+      visit(lhs);
+    } else if (lhs instanceof ListLiteral) {
+      for (Expression elem : ((ListLiteral) lhs).getElements()) {
+        assign(elem);
+      }
+    } else {
+      throw new ValidationException(lhs.getLocation(), "cannot assign to '" + lhs + "'");
     }
   }
 
@@ -173,28 +182,16 @@ public final class ValidationEnvironment extends SyntaxTreeVisitor {
       // If this is the case, output a more helpful error message than 'not found'.
       FlagGuardedValue result = env.getRestrictedBindings().get(node.getName());
       if (result != null) {
-        throw new ValidationException(result.getEvalExceptionFromAttemptingAccess(
-            node.getLocation(), env.getSemantics(), node.getName()));
+        throw new ValidationException(
+            result.getEvalExceptionFromAttemptingAccess(
+                node.getLocation(), env.getSemantics(), node.getName()));
       }
       throw new ValidationException(node.createInvalidIdentifierException(getAllSymbols()));
     }
-    node.setScope(b.scope);
-  }
-
-  @Override
-  public void visit(LValue node) {
-    validateLValue(node.getLocation(), node.getExpression());
-  }
-
-  @Override
-  public void visit(FuncallExpression node) {
-    super.visit(node);
-    try {
-      if (env.getSemantics().incompatibleStricArgumentOrdering()) {
-        Argument.validateFuncallArguments(node.getArguments());
-      }
-    } catch (Argument.ArgumentException e) {
-      throw new ValidationException(e.getLocation(), e.getMessage());
+    // TODO(laurentlb): In BUILD files, calling setScope will throw an exception. This happens
+    // because some AST nodes are shared across multipe ASTs (due to the prelude file).
+    if (!isBuildFile) {
+      node.setScope(b.scope);
     }
   }
 
@@ -210,7 +207,9 @@ public final class ValidationEnvironment extends SyntaxTreeVisitor {
   @Override
   public void visit(ForStatement node) {
     loopCount++;
-    super.visit(node);
+    visit(node.getCollection());
+    assign(node.getLHS());
+    visitBlock(node.getBlock());
     Preconditions.checkState(loopCount > 0);
     loopCount--;
   }
@@ -234,11 +233,18 @@ public final class ValidationEnvironment extends SyntaxTreeVisitor {
   public void visit(AbstractComprehension node) {
     openBlock(Scope.Local);
     for (AbstractComprehension.Clause clause : node.getClauses()) {
-      if (clause.getLValue() != null) {
-        collectDefinitions(clause.getLValue());
+      if (clause.getLHS() != null) {
+        collectDefinitions(clause.getLHS());
       }
     }
-    super.visit(node);
+    // TODO(adonovan): opt: combine loops
+    for (AbstractComprehension.Clause clause : node.getClauses()) {
+      visit(clause.getExpression());
+      if (clause.getLHS() != null) {
+        assign(clause.getLHS());
+      }
+    }
+    visitAll(node.getOutputExpressions());
     closeBlock();
   }
 
@@ -272,18 +278,26 @@ public final class ValidationEnvironment extends SyntaxTreeVisitor {
   }
 
   @Override
+  public void visit(AssignmentStatement node) {
+    visit(node.getRHS());
+    assign(node.getLHS());
+  }
+
+  @Override
   public void visit(AugmentedAssignmentStatement node) {
-    if (node.getLValue().getExpression() instanceof ListLiteral) {
+    if (node.getLHS() instanceof ListLiteral) {
       throw new ValidationException(
           node.getLocation(), "cannot perform augmented assignment on a list or tuple expression");
     }
-    // Other bad cases are handled when visiting the LValue node.
-    super.visit(node);
+    // Other bad cases are handled in assign.
+    visit(node.getRHS());
+    assign(node.getLHS());
   }
 
   /** Declare a variable and add it to the environment. */
   private void declare(String varname, Location location) {
-    if (block.scope == Scope.Module && block.variables.contains(varname)) {
+    // TODO(laurentlb): Forbid reassignment in BUILD files.
+    if (!isBuildFile && block.scope == Scope.Module && block.variables.contains(varname)) {
       // Symbols defined in the module scope cannot be reassigned.
       throw new ValidationException(
           location,
@@ -345,7 +359,7 @@ public final class ValidationEnvironment extends SyntaxTreeVisitor {
   /** Validates the AST and runs static checks. */
   private void validateAst(List<Statement> statements) {
     // Check that load() statements are on top.
-    if (env.getSemantics().incompatibleBzlDisallowLoadAfterStatement()) {
+    if (!isBuildFile && env.getSemantics().incompatibleBzlDisallowLoadAfterStatement()) {
       checkLoadAfterStatement(statements);
     }
 
@@ -362,7 +376,7 @@ public final class ValidationEnvironment extends SyntaxTreeVisitor {
 
   public static void validateAst(Environment env, List<Statement> statements) throws EvalException {
     try {
-      ValidationEnvironment venv = new ValidationEnvironment(env);
+      ValidationEnvironment venv = new ValidationEnvironment(env, false);
       venv.validateAst(statements);
       // Check that no closeBlock was forgotten.
       Preconditions.checkState(venv.block.parent == null);
@@ -401,9 +415,18 @@ public final class ValidationEnvironment extends SyntaxTreeVisitor {
    * **kwargs. This creates a better separation between code and data.
    */
   public static boolean checkBuildSyntax(
-      List<Statement> statements, final EventHandler eventHandler) {
+      List<Statement> statements, final EventHandler eventHandler, Environment env) {
     // Wrap the boolean inside an array so that the inner class can modify it.
     final boolean[] success = new boolean[] {true};
+
+    ValidationEnvironment venv = new ValidationEnvironment(env, true);
+    try {
+      venv.validateAst(statements);
+    } catch (ValidationException e) {
+      eventHandler.handle(Event.error(e.exception.getLocation(), e.exception.getMessage()));
+      return false;
+    }
+
     // TODO(laurentlb): Merge with the visitor above when possible (i.e. when BUILD files use it).
     SyntaxTreeVisitor checker =
         new SyntaxTreeVisitor() {
@@ -454,9 +477,47 @@ public final class ValidationEnvironment extends SyntaxTreeVisitor {
                         + "explicitly.");
               }
             }
+            super.visit(node);
           }
         };
     checker.visitAll(statements);
     return success[0];
+  }
+
+  /**
+   * Returns all names bound by an LHS expression.
+   *
+   * <p>Examples:
+   *
+   * <ul>
+   *   <li><{@code x = ...} binds x.
+   *   <li><{@code x, [y,z] = ..} binds x, y, z.
+   *   <li><{@code x[5] = ..} does not bind any names.
+   * </ul>
+   */
+  // TODO(adonovan): make this private after weaning Skyframe off it.
+  public static ImmutableSet<Identifier> boundIdentifiers(Expression expr) {
+    if (expr instanceof Identifier) {
+      // Common case/fast path - skip the builder.
+      return ImmutableSet.of((Identifier) expr);
+    } else {
+      ImmutableSet.Builder<Identifier> result = ImmutableSet.builder();
+      collectBoundIdentifiers(expr, result);
+      return result.build();
+    }
+  }
+
+  private static void collectBoundIdentifiers(
+      Expression lhs, ImmutableSet.Builder<Identifier> result) {
+    if (lhs instanceof Identifier) {
+      result.add((Identifier) lhs);
+      return;
+    }
+    if (lhs instanceof ListLiteral) {
+      ListLiteral variables = (ListLiteral) lhs;
+      for (Expression expression : variables.getElements()) {
+        collectBoundIdentifiers(expression, result);
+      }
+    }
   }
 }

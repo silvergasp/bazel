@@ -20,11 +20,11 @@ import com.google.common.collect.ImmutableSet;
 import com.google.devtools.build.lib.analysis.RuleContext;
 import com.google.devtools.build.lib.analysis.Whitelist;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
-import com.google.devtools.build.lib.analysis.config.BuildConfiguration.EmptyToNullLabelConverter;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration.Fragment;
-import com.google.devtools.build.lib.analysis.config.BuildConfiguration.LabelConverter;
 import com.google.devtools.build.lib.analysis.config.BuildOptions;
 import com.google.devtools.build.lib.analysis.config.ConfigurationFragmentFactory;
+import com.google.devtools.build.lib.analysis.config.CoreOptionConverters.EmptyToNullLabelConverter;
+import com.google.devtools.build.lib.analysis.config.CoreOptionConverters.LabelConverter;
 import com.google.devtools.build.lib.analysis.config.FragmentOptions;
 import com.google.devtools.build.lib.analysis.config.InvalidConfigurationException;
 import com.google.devtools.build.lib.analysis.skylark.annotations.SkylarkConfigurationField;
@@ -158,11 +158,15 @@ public class AndroidConfiguration extends BuildConfiguration.Fragment
   /** Types of android manifest mergers. */
   public enum AndroidManifestMerger {
     LEGACY,
-    ANDROID;
+    ANDROID,
+    FORCE_ANDROID;
 
     public static List<String> getAttributeValues() {
       return ImmutableList.of(
-          LEGACY.name().toLowerCase(), ANDROID.name().toLowerCase(), getRuleAttributeDefault());
+          LEGACY.name().toLowerCase(),
+          ANDROID.name().toLowerCase(),
+          FORCE_ANDROID.name().toLowerCase(),
+          getRuleAttributeDefault());
     }
 
     public static String getRuleAttributeDefault() {
@@ -259,14 +263,11 @@ public class AndroidConfiguration extends BuildConfiguration.Fragment
     }
 
     /**
-     * Select the aapt version for resource processing actions, based on the combination of
-     * --android_aapt flag, aapt_version target attribute, and --incompatible_use_aapt2_by_default
-     * flag.
+     * Select the aapt version for resource processing actions.
      *
      * <p>Order of precedence:
      * <li>1. --android_aapt flag
      * <li>2. 'aapt_version' attribute on target
-     * <li>3. --incompatible_use_aapt2_by_default flag
      *
      * @param dataContext the Android data context for detecting aapt2 and fetching Android configs
      * @param errorConsumer the rule context for reporting errors during version selection
@@ -286,27 +287,18 @@ public class AndroidConfiguration extends BuildConfiguration.Fragment
       AndroidAaptVersion flag = dataContext.getAndroidConfig().getAndroidAaptVersion();
       AndroidAaptVersion attribute = AndroidAaptVersion.fromString(attributeString);
 
-      AndroidAaptVersion version = flag == AndroidAaptVersion.AUTO ? attribute : flag;
+      AndroidAaptVersion version = flag == AUTO ? attribute : flag;
 
       if (version == AAPT2 && !hasAapt2) {
         throw errorConsumer.throwWithRuleError(
             "aapt2 processing requested but not available on the android_sdk");
       }
 
-      if (version != AndroidAaptVersion.AUTO) {
-        return version;
+      if (version == AUTO) {
+        return AAPT;
       }
 
-      // At this point, the version is still auto. If the user passes
-      // --incompatible_use_aapt2_by_default explicitly or implicitly via
-      // --all_incompatible_changes, use aapt2 by default.
-      //
-      // We use the --incompatible_use_aapt2_by_default flag to signal a breaking change in Bazel.
-      // This is required by the Bazel Incompatible Changes policy.
-      //
-      // TODO(jingwen): We can remove the incompatible change flag only when the depot migration is
-      // complete and the default value of --android_aapt is switched from `auto` to `aapt2`.
-      return dataContext.getAndroidConfig().incompatibleChangeUseAapt2ByDefault() ? AAPT2 : AAPT;
+      return version;
     }
   }
 
@@ -821,7 +813,18 @@ public class AndroidConfiguration extends BuildConfiguration.Fragment
         help =
             "Skips resource parsing action for library targets"
                 + " and uses the output of the compile action instead for resource merging.")
+    // TODO(b/136572475): Remove this flag once the usage has been removed from blazerc files.
     public boolean skipParsingAction;
+
+    @Option(
+        name = "experimental_omit_resources_info_provider_from_android_binary",
+        defaultValue = "false",
+        documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,
+        effectTags = {OptionEffectTag.AFFECTS_OUTPUTS},
+        help =
+            "Omit AndroidResourcesInfo provider from android_binary rules."
+                + " Propagating resources out to other binaries is usually unintentional.")
+    public boolean omitResourcesInfoProviderFromAndroidBinary;
 
     @Option(
         name = "android_fixed_resource_neverlinking",
@@ -854,8 +857,25 @@ public class AndroidConfiguration extends BuildConfiguration.Fragment
           OptionEffectTag.EAGERNESS_TO_EXIT,
         },
         help =
-            "If enabled, strict usage of the Starlark migration tag is enabled for android rules.")
+            "If enabled, strict usage of the Starlark migration tag is enabled for android rules. "
+                + "Prefer using --incompatible_disable_native_android_rules.")
     public boolean checkForMigrationTag;
+
+    @Option(
+        name = "incompatible_disable_native_android_rules",
+        defaultValue = "false",
+        documentationCategory = OptionDocumentationCategory.INPUT_STRICTNESS,
+        effectTags = {
+          OptionEffectTag.EAGERNESS_TO_EXIT,
+        },
+        metadataTags = {
+          OptionMetadataTag.INCOMPATIBLE_CHANGE,
+          OptionMetadataTag.TRIGGERED_BY_ALL_INCOMPATIBLE_CHANGES
+        },
+        help =
+            "If enabled, direct usage of the native Android rules is disabled. Please use the"
+                + " Starlark Android rules from https://github.com/bazelbuild/rules_android")
+    public boolean disableNativeAndroidRules;
 
     @Option(
         name = "experimental_filter_r_jars_from_android_test",
@@ -945,6 +965,31 @@ public class AndroidConfiguration extends BuildConfiguration.Fragment
                 + "https://developer.android.com/studio/command-line/aapt2#aapt2_changes")
     public boolean incompatibleUseAapt2ByDefault;
 
+    @Option(
+        name = "experimental_remove_r_classes_from_instrumentation_test_jar",
+        defaultValue = "true",
+        documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,
+        effectTags = {
+          OptionEffectTag.CHANGES_INPUTS,
+        },
+        help =
+            "If enabled and the test instruments an application, all the R classes from the test's "
+                + "deploy jar will be removed.")
+    public boolean removeRClassesFromInstrumentationTestJar;
+
+    @Option(
+        name = "experimental_always_filter_duplicate_classes_from_android_test",
+        defaultValue = "false",
+        documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,
+        effectTags = {
+          OptionEffectTag.CHANGES_INPUTS,
+        },
+        help =
+            "If enabled and the android_test defines a binary_under_test, the class filterering "
+                + "applied to the test's deploy jar will always filter duplicate classes based "
+                + "solely on matching class and package name, ignoring hash values.")
+    public boolean alwaysFilterDuplicateClassesFromAndroidTest;
+
     @Override
     public FragmentOptions getHost() {
       Options host = (Options) super.getHost();
@@ -972,6 +1017,11 @@ public class AndroidConfiguration extends BuildConfiguration.Fragment
       host.oneVersionEnforcementUseTransitiveJarsForBinaryUnderTest =
           oneVersionEnforcementUseTransitiveJarsForBinaryUnderTest;
       host.persistentBusyboxTools = persistentBusyboxTools;
+
+      // Once this has been set to ANDROID, the crosstool_top is the android crosstool, even after
+      // a host transition. In that case, allowing the distinguisher to reset creates the action
+      // conflicts that this was added to stop.
+      host.configurationDistinguisher = configurationDistinguisher;
       return host;
     }
   }
@@ -1024,7 +1074,7 @@ public class AndroidConfiguration extends BuildConfiguration.Fragment
   private final boolean useAapt2ForRobolectric;
   private final boolean throwOnResourceConflict;
   private final boolean useParallelDex2Oat;
-  private final boolean skipParsingAction;
+  private final boolean omitResourcesInfoProviderFromAndroidBinary;
   private final boolean fixedResourceNeverlinking;
   private final AndroidRobolectricTestDeprecationLevel robolectricTestDeprecationLevel;
   private final boolean checkForMigrationTag;
@@ -1033,6 +1083,8 @@ public class AndroidConfiguration extends BuildConfiguration.Fragment
   private final boolean dataBindingUpdatedArgs;
   private final boolean persistentBusyboxTools;
   private final boolean filterRJarsFromAndroidTest;
+  private final boolean removeRClassesFromInstrumentationTestJar;
+  private final boolean alwaysFilterDuplicateClassesFromAndroidTest;
 
   // Incompatible changes
   private final boolean incompatibleUseAapt2ByDefault;
@@ -1067,14 +1119,16 @@ public class AndroidConfiguration extends BuildConfiguration.Fragment
     this.useRexToCompressDexFiles = options.useRexToCompressDexFiles;
     this.compressJavaResources = options.compressJavaResources;
     this.exportsManifestDefault = options.exportsManifestDefault;
-    this.androidAaptVersion = options.androidAaptVersion;
     this.useAapt2ForRobolectric = options.useAapt2ForRobolectric;
     this.throwOnResourceConflict = options.throwOnResourceConflict;
     this.useParallelDex2Oat = options.useParallelDex2Oat;
-    this.skipParsingAction = options.skipParsingAction;
+    this.omitResourcesInfoProviderFromAndroidBinary =
+        options.omitResourcesInfoProviderFromAndroidBinary;
     this.fixedResourceNeverlinking = options.fixedResourceNeverlinking;
     this.robolectricTestDeprecationLevel = options.robolectricTestDeprecationLevel;
-    this.checkForMigrationTag = options.checkForMigrationTag;
+    // use --incompatible_disable_native_android_rules, and also the old flag for backwards
+    // compatibility
+    this.checkForMigrationTag = options.checkForMigrationTag || options.disableNativeAndroidRules;
     this.oneVersionEnforcementUseTransitiveJarsForBinaryUnderTest =
         options.oneVersionEnforcementUseTransitiveJarsForBinaryUnderTest;
     this.dataBindingV2 = options.dataBindingV2;
@@ -1082,6 +1136,25 @@ public class AndroidConfiguration extends BuildConfiguration.Fragment
     this.persistentBusyboxTools = options.persistentBusyboxTools;
     this.filterRJarsFromAndroidTest = options.filterRJarsFromAndroidTest;
     this.incompatibleUseAapt2ByDefault = options.incompatibleUseAapt2ByDefault;
+    this.removeRClassesFromInstrumentationTestJar =
+        options.removeRClassesFromInstrumentationTestJar;
+    this.alwaysFilterDuplicateClassesFromAndroidTest =
+        options.alwaysFilterDuplicateClassesFromAndroidTest;
+
+    // Make the value of --android_aapt aapt2 if --incompatible_use_aapt2_by_default is enabled
+    // and --android_aapt = AUTO
+    //
+    // We use the --incompatible_use_aapt2_by_default flag to signal a breaking change in Bazel.
+    // This is required by the Bazel Incompatible Changes policy.
+    //
+    // TODO(jingwen): We can remove the incompatible change flag only when the depot migration is
+    // complete and the default value of --android_aapt is switched from `auto` to `aapt2`.
+    if (options.incompatibleUseAapt2ByDefault
+        && options.androidAaptVersion == AndroidAaptVersion.AUTO) {
+      this.androidAaptVersion = AndroidAaptVersion.AAPT2;
+    } else {
+      this.androidAaptVersion = options.androidAaptVersion;
+    }
 
     if (incrementalDexingShardsAfterProguard < 0) {
       throw new InvalidConfigurationException(
@@ -1269,8 +1342,8 @@ public class AndroidConfiguration extends BuildConfiguration.Fragment
   }
 
   @Override
-  public boolean skipParsingAction() {
-    return this.skipParsingAction;
+  public boolean omitResourcesInfoProviderFromAndroidBinary() {
+    return this.omitResourcesInfoProviderFromAndroidBinary;
   }
 
   @Override
@@ -1318,5 +1391,13 @@ public class AndroidConfiguration extends BuildConfiguration.Fragment
 
   public boolean filterRJarsFromAndroidTest() {
     return filterRJarsFromAndroidTest;
+  }
+
+  public boolean removeRClassesFromInstrumentationTestJar() {
+    return removeRClassesFromInstrumentationTestJar;
+  }
+
+  public boolean alwaysFilterDuplicateClassesFromAndroidTest() {
+    return alwaysFilterDuplicateClassesFromAndroidTest;
   }
 }

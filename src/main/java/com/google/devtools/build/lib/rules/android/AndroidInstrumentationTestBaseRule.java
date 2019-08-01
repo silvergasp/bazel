@@ -52,7 +52,7 @@ public class AndroidInstrumentationTestBaseRule implements RuleDefinition {
             attr("target_device", LABEL)
                 .mandatory()
                 .exec()
-                .cfg(HostTransition.INSTANCE)
+                .cfg(HostTransition.createFactory())
                 .allowedFileTypes(FileTypeSet.NO_FILE)
                 .mandatoryProviders(
                     SkylarkProviderIdentifier.forKey(AndroidDeviceBrokerInfo.PROVIDER.getKey())))
@@ -72,7 +72,7 @@ public class AndroidInstrumentationTestBaseRule implements RuleDefinition {
         .add(
             attr("$test_entry_point", LABEL)
                 .exec()
-                .cfg(HostTransition.INSTANCE)
+                .cfg(HostTransition.createFactory())
                 .value(
                     environment.getToolsLabel("//tools/android:instrumentation_test_entry_point")))
         .build();
@@ -98,7 +98,7 @@ public class AndroidInstrumentationTestBaseRule implements RuleDefinition {
   The <a href="${link android_instrumentation_test.test_app}">test_app</a> attribute specifies the
   <code>android_binary</code> which contains the test. This <code>android_binary</code> in turn
   specifies the <code>android_binary</code> application under test through its
-  <a href="${link android_binary.instruments">instruments</a> attribute.
+  <a href="${link android_binary.instruments}">instruments</a> attribute.
 </p>
 
 <h4 id="android_instrumentation_test_examples">Example</h4>

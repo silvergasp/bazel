@@ -182,11 +182,17 @@ public abstract class ResourceTestBase extends AndroidBuildViewTestCase {
   public FileSystem fileSystem;
   public ArtifactRoot root;
 
+  @Override
   @Before
-  public void setup() {
+  public void setup() throws Exception {
     errorConsumer = new FakeRuleErrorConsumer();
     fileSystem = new InMemoryFileSystem();
     root = ArtifactRoot.asSourceRoot(Root.fromPath(fileSystem.getPath("/")));
+
+    // Force tests to use aapt to unblock global aapt2 migration, until these
+    // tests are migrated to use aapt2.
+    // TODO(jingwen): https://github.com/bazelbuild/bazel/issues/6907
+    useConfiguration("--android_aapt=aapt");
   }
 
   @After
@@ -213,7 +219,7 @@ public abstract class ResourceTestBase extends AndroidBuildViewTestCase {
 
   private Artifact getArtifact(String subdir, String pathString) {
     Path path = fileSystem.getPath("/" + subdir + "/" + pathString);
-    return new Artifact(
+    return new Artifact.SourceArtifact(
         root, root.getExecPath().getRelative(root.getRoot().relativize(path)), OWNER);
   }
 
@@ -238,6 +244,7 @@ public abstract class ResourceTestBase extends AndroidBuildViewTestCase {
             ConfiguredTargetKey.of(dummyTarget.getLabel(), targetConfig),
             /*isSystemEnv=*/ false,
             targetConfig.extendedSanityChecks(),
+            targetConfig.allowAnalysisFailures(),
             eventHandler,
             null),
         new BuildConfigurationCollection(

@@ -166,7 +166,7 @@ public class SkylarkEvaluationTest extends EvaluationTest {
         name = "struct_field_with_extra",
         documented = false,
         structField = true,
-        useSkylarkSemantics = true)
+        useStarlarkSemantics = true)
     public String structFieldWithExtra(StarlarkSemantics sem) {
       return "struct_field_with_extra("
         + (sem != null)
@@ -316,7 +316,7 @@ public class SkylarkEvaluationTest extends EvaluationTest {
         useLocation = true,
         useAst = true,
         useEnvironment = true,
-        useSkylarkSemantics = true,
+        useStarlarkSemantics = true,
         useContext = true)
     public String withExtraInterpreterParams(
         Location location,
@@ -384,7 +384,7 @@ public class SkylarkEvaluationTest extends EvaluationTest {
         useAst = true,
         useLocation = true,
         useEnvironment = true,
-        useSkylarkSemantics = true)
+        useStarlarkSemantics = true)
     public String withParamsAndExtraInterpreterParams(
         Integer pos1,
         boolean pos2,
@@ -509,6 +509,11 @@ public class SkylarkEvaluationTest extends EvaluationTest {
                   .collect(joining(", "))
               + ")";
       return "with_args_and_kwargs(" + foo + ", " + argsString + ", " + kwargsString + ")";
+    }
+
+    @SkylarkCallable(name = "raise_unchecked_exception", documented = false)
+    public void raiseUncheckedException() {
+      throw new InternalError("buggy code");
     }
 
     @Override
@@ -1309,6 +1314,12 @@ public class SkylarkEvaluationTest extends EvaluationTest {
   }
 
   @Test
+  public void testCallingMethodThatRaisesUncheckedException() throws Exception {
+    update("mock", new Mock());
+    assertThrows(InternalError.class, () -> eval("mock.raise_unchecked_exception()"));
+  }
+
+  @Test
   public void testJavaFunctionWithExtraInterpreterParams() throws Exception {
     new SkylarkTest()
         .update("mock", new Mock())
@@ -1435,11 +1446,7 @@ public class SkylarkEvaluationTest extends EvaluationTest {
 
   @Test
   public void testStructAccessOfMethod() throws Exception {
-    new SkylarkTest()
-        .update("mock", new Mock())
-        .testIfExactError(
-            "object of type 'Mock' has no field 'function', however, a method of that name exists",
-            "v = mock.function");
+    new SkylarkTest().update("mock", new Mock()).testStatement("v = mock.function", null);
   }
 
   @Test
@@ -1470,12 +1477,10 @@ public class SkylarkEvaluationTest extends EvaluationTest {
 
   @Test
   public void testJavaFunctionReturnsNullFails() throws Exception {
-    new SkylarkTest()
-        .update("mock", new Mock())
-        .testIfErrorContains(
-            "method invocation returned None,"
-                + " please file a bug report: nullfunc_failing(\"abc\", 1)",
-            "mock.nullfunc_failing('abc', 1)");
+    update("mock", new Mock());
+    IllegalStateException e =
+        assertThrows(IllegalStateException.class, () -> eval("mock.nullfunc_failing('abc', 1)"));
+    assertThat(e).hasMessageThat().contains("method invocation returned None");
   }
 
   @Test
@@ -1487,8 +1492,8 @@ public class SkylarkEvaluationTest extends EvaluationTest {
   }
 
   @Test
-  public void testInSet() throws Exception {
-    new SkylarkTest()
+  public void testInSetDeprecated() throws Exception {
+    new SkylarkTest("--incompatible_depset_is_not_iterable=false")
         .testStatement("'b' in depset(['a', 'b'])", Boolean.TRUE)
         .testStatement("'c' in depset(['a', 'b'])", Boolean.FALSE)
         .testStatement("1 in depset(['a', 'b'])", Boolean.FALSE);
@@ -1496,10 +1501,10 @@ public class SkylarkEvaluationTest extends EvaluationTest {
 
   @Test
   public void testUnionSet() throws Exception {
-    new SkylarkTest()
+    new SkylarkTest("--incompatible_depset_union=false")
         .testStatement("str(depset([1, 3]) | depset([1, 2]))", "depset([1, 2, 3])")
         .testStatement("str(depset([1, 2]) | [1, 3])", "depset([1, 2, 3])")
-        .testIfExactError("unsupported operand type(s) for |: 'int' and 'int'", "2 | 4");
+        .testIfExactError("unsupported operand type(s) for |: 'int' and 'bool'", "2 | False");
   }
 
   @Test
@@ -1885,15 +1890,16 @@ public class SkylarkEvaluationTest extends EvaluationTest {
   public void testGetattrMethods() throws Exception {
     new SkylarkTest()
         .update("mock", new Mock())
-        .setUp("a = getattr(mock, 'struct_field', 'no')",
-            "b = getattr(mock, 'function', 'no')",
-            "c = getattr(mock, 'is_empty', 'no')",
-            "d = getattr('str', 'replace', 'no')",
-            "e = getattr(mock, 'other', 'no')\n")
+        .setUp(
+            "a = str(getattr(mock, 'struct_field', 'no'))",
+            "b = str(getattr(mock, 'function', 'no'))",
+            "c = str(getattr(mock, 'is_empty', 'no'))",
+            "d = str(getattr('str', 'replace', 'no'))",
+            "e = str(getattr(mock, 'other', 'no'))\n")
         .testLookup("a", "a")
-        .testLookup("b", "no")
-        .testLookup("c", "no")
-        .testLookup("d", "no")
+        .testLookup("b", "<built-in function function>")
+        .testLookup("c", "<built-in function is_empty>")
+        .testLookup("d", "<built-in function replace>")
         .testLookup("e", "no");
   }
 
@@ -1947,6 +1953,7 @@ public class SkylarkEvaluationTest extends EvaluationTest {
             "nullfunc_failing",
             "nullfunc_working",
             "proxy_methods_object",
+            "raise_unchecked_exception",
             "return_bad",
             "string",
             "string_list",
@@ -1998,9 +2005,10 @@ public class SkylarkEvaluationTest extends EvaluationTest {
 
   @Test
   public void testPrintBadKwargs() throws Exception {
-    new SkylarkTest().testIfExactError(
-        "unexpected keywords 'end', 'other' in call to print(*args, sep: string = \" \")",
-        "print(end='x', other='y')");
+    new SkylarkTest()
+        .testIfErrorContains(
+            "unexpected keywords 'end', 'other', for call to function print(sep = \" \", *args)",
+            "print(end='x', other='y')");
   }
 
   // Override tests in EvaluationTest incompatible with Skylark
@@ -2215,14 +2223,14 @@ public class SkylarkEvaluationTest extends EvaluationTest {
   public void testLoadStatementWithAbsolutePath() throws Exception {
     checkEvalErrorContains(
         "First argument of 'load' must be a label and start with either '//', ':', or '@'",
-        "load('/tmp/foo', 'arg')");
+        "load('/tmp/foo.bzl', 'arg')");
   }
 
   @Test
   public void testLoadStatementWithRelativePath() throws Exception {
     checkEvalErrorContains(
         "First argument of 'load' must be a label and start with either '//', ':', or '@'",
-        "load('foo', 'arg')");
+        "load('foo.bzl', 'arg')");
   }
 
   @Test

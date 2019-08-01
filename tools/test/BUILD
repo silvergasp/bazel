@@ -1,5 +1,7 @@
 package(default_visibility = ["//visibility:public"])
 
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_test")
+
 # Members of this filegroup shouldn't have duplicate basenames, otherwise
 # TestRunnerAction#getRuntimeArtifact() will get confused.
 # Deprecated, do not use.
@@ -79,7 +81,8 @@ cc_library(
             "//src/main/cpp/util:filesystem",
             "//src/main/cpp/util:strings",
             "//src/main/native/windows:lib-file",
-            "//src/main/native/windows:lib-util",
+            "//src/main/native/windows:lib-process",
+            "//src/tools/launcher/util",
             "//third_party/ijar:zip",
             "@bazel_tools//tools/cpp/runfiles",
         ],
@@ -101,7 +104,6 @@ cc_test(
     ] + select({
         "@bazel_tools//src/conditions:windows": [
             "//src/main/native/windows:lib-file",
-            "//src/main/native/windows:lib-util",
             "//third_party/ijar:zip",
         ],
         "//conditions:default": [],

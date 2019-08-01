@@ -14,6 +14,7 @@
 package com.google.devtools.build.android.dexer;
 
 import static com.google.common.truth.Truth.assertThat;
+import static com.google.common.truth.Truth.assertWithMessage;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.junit.Assert.fail;
 
@@ -221,7 +222,8 @@ public class DexFileMergerTest {
       fail("Expected DexFileMerger to fail");
     } catch (IllegalArgumentException e) {
       assertThat(e)
-          .hasMessage(
+          .hasMessageThat()
+          .isEqualTo(
               "--minimal-main-dex is only supported with multidex enabled, but mode is: OFF");
     }
     try {
@@ -237,7 +239,8 @@ public class DexFileMergerTest {
       fail("Expected DexFileMerger to fail");
     } catch (IllegalArgumentException e) {
       assertThat(e)
-          .hasMessage("--main-dex-list is only supported with multidex enabled, but mode is: OFF");
+          .hasMessageThat()
+          .isEqualTo("--main-dex-list is only supported with multidex enabled, but mode is: OFF");
     }
   }
 
@@ -251,7 +254,7 @@ public class DexFileMergerTest {
           MultidexStrategy.OFF, /*mainDexList=*/ null, /*minimalMainDex=*/ false, DEX_PREFIX,
           dexArchive);
     } catch (IllegalStateException e) {
-      assertThat(e).hasMessage("--forceJumbo flag not supported");
+      assertThat(e).hasMessageThat().isEqualTo("--forceJumbo flag not supported");
       System.err.println("Skipping this test due to missing --forceJumbo support in Android SDK.");
       e.printStackTrace();
       return;
@@ -300,9 +303,15 @@ public class DexFileMergerTest {
       Set<String> shard = dexFiles.get(expectedDexFileName(i));
       for (String c1 : prev) {
         for (String c2 : shard) {
-          assertThat(ZipEntryComparator.compareClassNames(c2, c1))
-              .named(c2 + " in shard " + i + " should compare as larger than " + c1
-                  + "; list of all shards for reference: " + dexFiles)
+          assertWithMessage(
+                  c2
+                      + " in shard "
+                      + i
+                      + " should compare as larger than "
+                      + c1
+                      + "; list of all shards for reference: "
+                      + dexFiles)
+              .that(ZipEntryComparator.compareClassNames(c2, c1))
               .isGreaterThan(0);
         }
       }
@@ -327,7 +336,7 @@ public class DexFileMergerTest {
     if (minimalMainDex) {
       assertThat(dexFiles.get("classes.dex")).containsExactlyElementsIn(mainDexList);
     } else {
-      assertThat(dexFiles.get("classes.dex")).containsAllIn(mainDexList);
+      assertThat(dexFiles.get("classes.dex")).containsAtLeastElementsIn(mainDexList);
     }
   }
 

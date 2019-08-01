@@ -20,6 +20,7 @@
 #include <string.h>
 #include <algorithm>
 #include <cassert>
+#include <iterator>
 #include <set>
 #include <sstream>
 #include <utility>
@@ -53,7 +54,8 @@ OptionProcessor::OptionProcessor(
     const WorkspaceLayout* workspace_layout,
     std::unique_ptr<StartupOptions> default_startup_options)
     : workspace_layout_(workspace_layout),
-      parsed_startup_options_(std::move(default_startup_options)),
+      startup_options_(std::move(default_startup_options)),
+      parse_options_called_(false),
       system_bazelrc_path_(BAZEL_SYSTEM_BAZELRC_PATH) {}
 
 OptionProcessor::OptionProcessor(
@@ -61,13 +63,17 @@ OptionProcessor::OptionProcessor(
     std::unique_ptr<StartupOptions> default_startup_options,
     const std::string& system_bazelrc_path)
     : workspace_layout_(workspace_layout),
-      parsed_startup_options_(std::move(default_startup_options)),
+      startup_options_(std::move(default_startup_options)),
+      parse_options_called_(false),
       system_bazelrc_path_(system_bazelrc_path) {}
 
+std::string OptionProcessor::GetLowercaseProductName() const {
+  return startup_options_->GetLowercaseProductName();
+}
+
 std::unique_ptr<CommandLine> OptionProcessor::SplitCommandLine(
-    const vector<string>& args, string* error) const {
-  const string lowercase_product_name =
-      parsed_startup_options_->GetLowercaseProductName();
+    vector<string> args, string* error) const {
+  const string lowercase_product_name = GetLowercaseProductName();
 
   if (args.empty()) {
     blaze_util::StringPrintf(error,
@@ -75,27 +81,27 @@ std::unique_ptr<CommandLine> OptionProcessor::SplitCommandLine(
     return nullptr;
   }
 
-  const string path_to_binary(args[0]);
+  string& path_to_binary = args[0];
 
   // Process the startup options.
   vector<string> startup_args;
   vector<string>::size_type i = 1;
   while (i < args.size() && IsArg(args[i])) {
-    const string current_arg(args[i]);
+    string& current_arg = args[i];
     // If the current argument is a valid nullary startup option such as
     // --master_bazelrc or --nomaster_bazelrc proceed to examine the next
     // argument.
-    if (parsed_startup_options_->IsNullary(current_arg)) {
+    if (startup_options_->IsNullary(current_arg)) {
       startup_args.push_back(current_arg);
       i++;
-    } else if (parsed_startup_options_->IsUnary(current_arg)) {
+    } else if (startup_options_->IsUnary(current_arg)) {
       // If the current argument is a valid unary startup option such as
       // --bazelrc there are two cases to consider.
 
       // The option is of the form '--bazelrc=value', hence proceed to
       // examine the next argument.
       if (current_arg.find("=") != string::npos) {
-        startup_args.push_back(current_arg);
+        startup_args.push_back(std::move(current_arg));
         i++;
       } else {
         // Otherwise, the option is of the form '--bazelrc value', hence
@@ -112,7 +118,8 @@ std::unique_ptr<CommandLine> OptionProcessor::SplitCommandLine(
           return nullptr;
         }
         // In this case we transform it to the form '--bazelrc=value'.
-        startup_args.push_back(current_arg + string("=") + args[i + 1]);
+        startup_args.push_back(std::move(current_arg) + "=" +
+                               std::move(args[i + 1]));
         i += 2;
       }
     } else {
@@ -129,16 +136,18 @@ std::unique_ptr<CommandLine> OptionProcessor::SplitCommandLine(
 
   // The command is the arg right after the startup options.
   if (i == args.size()) {
-    return std::unique_ptr<CommandLine>(
-        new CommandLine(path_to_binary, startup_args, "", {}));
+    return std::unique_ptr<CommandLine>(new CommandLine(
+        std::move(path_to_binary), std::move(startup_args), "", {}));
   }
-  const string command(args[i]);
+  string& command = args[i];
 
   // The rest are the command arguments.
-  const vector<string> command_args(args.begin() + i + 1, args.end());
+  vector<string> command_args(std::make_move_iterator(args.begin() + i + 1),
+                              std::make_move_iterator(args.end()));
 
   return std::unique_ptr<CommandLine>(
-      new CommandLine(path_to_binary, startup_args, command, command_args));
+      new CommandLine(std::move(path_to_binary), std::move(startup_args),
+                      std::move(command), std::move(command_args)));
 }
 
 namespace internal {
@@ -220,7 +229,7 @@ std::vector<std::string> DedupeBlazercPaths(
 
 std::string FindSystemWideRc(const std::string& system_bazelrc_path) {
   const std::string path =
-      blaze_util::MakeAbsoluteAndResolveWindowsEnvvars(system_bazelrc_path);
+      blaze_util::MakeAbsoluteAndResolveEnvvars(system_bazelrc_path);
   if (blaze_util::CanReadFile(path)) {
     return path;
   }
@@ -325,11 +334,11 @@ blaze_exit_code::ExitCode OptionProcessor::GetRcFiles(
 
   // Get the system rc (unless --nosystem_rc).
   if (SearchNullaryOption(cmd_line->startup_args, "system_rc", true)) {
-    // MakeAbsoluteAndResolveWindowsEnvvars will standardize the form of the
+    // MakeAbsoluteAndResolveEnvvars will standardize the form of the
     // provided path. This also means we accept relative paths, which is
     // is convenient for testing.
     const std::string system_rc =
-        blaze_util::MakeAbsoluteAndResolveWindowsEnvvars(system_bazelrc_path_);
+        blaze_util::MakeAbsoluteAndResolveEnvvars(system_bazelrc_path_);
     rc_files.push_back(system_rc);
   }
 
@@ -449,6 +458,8 @@ blaze_exit_code::ExitCode ParseRcFile(const WorkspaceLayout* workspace_layout,
 blaze_exit_code::ExitCode OptionProcessor::ParseOptions(
     const vector<string>& args, const string& workspace, const string& cwd,
     string* error) {
+  assert(!parse_options_called_);
+  parse_options_called_ = true;
   cmd_line_ = SplitCommandLine(args, error);
   if (cmd_line_ == nullptr) {
     return blaze_exit_code::BAD_ARGV;
@@ -543,7 +554,7 @@ blaze_exit_code::ExitCode OptionProcessor::ParseStartupOptions(
     rcstartup_flags.push_back(RcStartupFlag("", arg));
   }
 
-  return parsed_startup_options_->ProcessArgs(rcstartup_flags, error);
+  return startup_options_->ProcessArgs(rcstartup_flags, error);
 }
 
 static bool IsValidEnvName(const char* p) {
@@ -622,9 +633,9 @@ std::vector<std::string> OptionProcessor::GetBlazercAndEnvCommandArgs(
   std::vector<std::string> result = {
       "--rc_source=client",
       "--default_override=0:common=--isatty=" +
-          ToString(IsStderrStandardTerminal()),
+          ToString(IsStandardTerminal()),
       "--default_override=0:common=--terminal_columns=" +
-          ToString(GetStderrTerminalColumns())};
+          ToString(GetTerminalColumns())};
   if (IsEmacsTerminal()) {
     result.push_back("--default_override=0:common=--emacs");
   }
@@ -697,8 +708,8 @@ std::string OptionProcessor::GetCommand() const {
 }
 
 StartupOptions* OptionProcessor::GetParsedStartupOptions() const {
-  assert(parsed_startup_options_ != NULL);
-  return parsed_startup_options_.get();
+  assert(parse_options_called_);
+  return startup_options_.get();
 }
 
 }  // namespace blaze

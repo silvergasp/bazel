@@ -1,4 +1,4 @@
-load("//tools/build_defs/pkg:pkg.bzl", "pkg_tar")
+load("@rules_pkg//:pkg.bzl", "pkg_tar")
 load("//scripts/docs:jekyll.bzl", "jekyll_build")
 load("//scripts/docs:doc_versions.bzl", "DOC_VERSIONS")
 
@@ -135,6 +135,7 @@ genrule(
         "//src/main/java/com/google/devtools/build/lib:gen_buildencyclopedia",
         "//src/main/java/com/google/devtools/build/lib:gen_skylarklibrary",
         "//src/main/java/com/google/devtools/build/lib:gen_command-line-reference",
+        "//tools/build_defs/repo:doc",
     ],
     outs = ["jekyll-tree.tar"],
     cmd = ("$(location jekyll-tree.sh) $@ " +
@@ -142,7 +143,8 @@ genrule(
            "$(location :skylark-rule-docs) " +
            "$(location //src/main/java/com/google/devtools/build/lib:gen_buildencyclopedia) " +
            "$(location //src/main/java/com/google/devtools/build/lib:gen_skylarklibrary) " +
-           "$(location //src/main/java/com/google/devtools/build/lib:gen_command-line-reference)"),
+           "$(location //src/main/java/com/google/devtools/build/lib:gen_command-line-reference) " +
+           "$(location //tools/build_defs/repo:doc)"),
     tools = [
         "jekyll-tree.sh",
     ],

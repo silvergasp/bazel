@@ -21,7 +21,6 @@ import com.google.devtools.build.lib.packages.RuleErrorConsumer;
 import com.google.devtools.build.lib.rules.android.AndroidConfiguration.AndroidAaptVersion;
 import com.google.devtools.build.lib.rules.android.databinding.DataBinding;
 import com.google.devtools.build.lib.rules.android.databinding.DataBindingContext;
-import com.google.devtools.build.lib.rules.java.ProguardHelper;
 import com.google.devtools.build.lib.syntax.Type;
 import java.util.List;
 import java.util.Map;
@@ -184,9 +183,7 @@ public class ProcessedAndroidData {
 
     return builderForNonIncrementalTopLevelTarget(
             dataContext, manifest, manifestValues, aaptVersion)
-        .setUseCompiledResourcesForMerge(
-            aaptVersion == AndroidAaptVersion.AAPT2
-                && dataContext.getAndroidConfig().skipParsingAction())
+        .setUseCompiledResourcesForMerge(aaptVersion == AndroidAaptVersion.AAPT2)
         .setManifestOut(
             dataContext.createOutputArtifact(AndroidRuleClasses.ANDROID_PROCESSED_MANIFEST))
         .setMergedResourcesOut(
@@ -268,7 +265,7 @@ public class ProcessedAndroidData {
         .setApplicationId(manifestValues.get("applicationId"))
         .setVersionCode(manifestValues.get("versionCode"))
         .setVersionName(manifestValues.get("versionName"))
-        .setThrowOnResourceConflict(dataContext.getAndroidConfig().throwOnResourceConflict())
+        .setThrowOnResourceConflict(dataContext.throwOnResourceConflict())
 
         // Output
         .setProguardOut(

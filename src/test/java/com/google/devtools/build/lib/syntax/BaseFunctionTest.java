@@ -15,7 +15,7 @@ package com.google.devtools.build.lib.syntax;
 
 import static com.google.common.truth.Truth.assertThat;
 import static com.google.common.truth.Truth.assertWithMessage;
-import static org.junit.Assert.fail;
+import static com.google.devtools.build.lib.testutil.MoreAsserts.assertThrows;
 
 import com.google.devtools.build.lib.syntax.util.EvaluationTestCase;
 import java.util.Arrays;
@@ -58,14 +58,10 @@ public class BaseFunctionTest extends EvaluationTestCase {
           .isEqualTo(expectedOutput);
 
     } else { // expected to fail with an exception
-      try {
-        eval(callExpression);
-        fail();
-      } catch (EvalException e) {
-        assertWithMessage("Wrong exception for " + callExpression)
-            .that(e.getMessage())
-            .isEqualTo(expectedOutput);
-      }
+      EvalException e = assertThrows(EvalException.class, () -> eval(callExpression));
+      assertWithMessage("Wrong exception for " + callExpression)
+          .that(e.getMessage())
+          .isEqualTo(expectedOutput);
     }
   }
 
@@ -160,12 +156,19 @@ public class BaseFunctionTest extends EvaluationTestCase {
   }
 
   @Test
-  public void testCommaAfterArgsAndKwargs() throws Exception {
-    // Test that commas are not allowed in function definitions and calls
-    // after last *args or **kwargs expressions.
-    checkEvalErrorContains("syntax error at ')': expected identifier", "def foo(*args,): pass");
-    checkEvalErrorContains("unexpected tokens after kwarg", "def foo(**kwargs,): pass");
-    checkEvalErrorContains("syntax error at ')': expected expression", "foo(*args,)");
-    checkEvalErrorContains("unexpected tokens after kwarg", "foo(**kwargs,)");
+  public void testTrailingCommas() throws Exception {
+    // Test that trailing commas are allowed in function definitions and calls
+    // even after last *args or **kwargs expressions, like python3
+    eval(
+        "def f(*args, **kwargs): pass\n"
+            + "v1 = f(1,)\n"
+            + "v2 = f(*(1,2),)\n"
+            + "v3 = f(a=1,)\n"
+            + "v4 = f(**{\"a\": 1},)\n");
+
+    assertThat(Printer.repr(lookup("v1"))).isEqualTo("None");
+    assertThat(Printer.repr(lookup("v2"))).isEqualTo("None");
+    assertThat(Printer.repr(lookup("v3"))).isEqualTo("None");
+    assertThat(Printer.repr(lookup("v4"))).isEqualTo("None");
   }
 }

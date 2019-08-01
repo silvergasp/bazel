@@ -71,7 +71,7 @@ public class PythonOptions extends FragmentOptions {
 
   @Option(
       name = "incompatible_remove_old_python_version_api",
-      defaultValue = "false",
+      defaultValue = "true",
       documentationCategory = OptionDocumentationCategory.STARLARK_SEMANTICS,
       effectTags = {OptionEffectTag.LOADING_AND_ANALYSIS},
       metadataTags = {
@@ -87,7 +87,7 @@ public class PythonOptions extends FragmentOptions {
 
   @Option(
       name = "incompatible_allow_python_version_transitions",
-      defaultValue = "false",
+      defaultValue = "true",
       documentationCategory = OptionDocumentationCategory.STARLARK_SEMANTICS,
       effectTags = {OptionEffectTag.LOADING_AND_ANALYSIS},
       metadataTags = {
@@ -105,7 +105,7 @@ public class PythonOptions extends FragmentOptions {
    */
   @Option(
       name = "incompatible_py3_is_default",
-      defaultValue = "false",
+      defaultValue = "true",
       documentationCategory = OptionDocumentationCategory.GENERIC_INPUTS,
       effectTags = {
         OptionEffectTag.LOADING_AND_ANALYSIS,
@@ -125,7 +125,7 @@ public class PythonOptions extends FragmentOptions {
 
   @Option(
       name = "incompatible_py2_outputs_are_suffixed",
-      defaultValue = "false",
+      defaultValue = "true",
       documentationCategory = OptionDocumentationCategory.GENERIC_INPUTS,
       effectTags = {OptionEffectTag.AFFECTS_OUTPUTS},
       metadataTags = {
@@ -216,7 +216,7 @@ public class PythonOptions extends FragmentOptions {
 
   @Option(
       name = "incompatible_disallow_legacy_py_provider",
-      defaultValue = "false",
+      defaultValue = "true",
       documentationCategory = OptionDocumentationCategory.STARLARK_SEMANTICS,
       effectTags = {OptionEffectTag.LOADING_AND_ANALYSIS},
       metadataTags = {
@@ -230,6 +230,21 @@ public class PythonOptions extends FragmentOptions {
   public boolean incompatibleDisallowLegacyPyProvider;
 
   @Option(
+      name = "incompatible_use_python_toolchains",
+      defaultValue = "true",
+      documentationCategory = OptionDocumentationCategory.GENERIC_INPUTS,
+      effectTags = {OptionEffectTag.LOADING_AND_ANALYSIS},
+      metadataTags = {
+        OptionMetadataTag.INCOMPATIBLE_CHANGE,
+        OptionMetadataTag.TRIGGERED_BY_ALL_INCOMPATIBLE_CHANGES
+      },
+      help =
+          "If set to true, executable native Python rules will use the Python runtime specified by "
+              + "the Python toolchain, rather than the runtime given by legacy flags like "
+              + "--python_top.")
+  public boolean incompatibleUsePythonToolchains;
+
+  @Option(
       name = "experimental_build_transitive_python_runfiles",
       defaultValue = "true",
       documentationCategory = OptionDocumentationCategory.UNDOCUMENTED,
@@ -238,6 +253,26 @@ public class PythonOptions extends FragmentOptions {
           "Build the runfiles trees of py_binary targets that appear in the transitive "
               + "data runfiles of another binary.")
   public boolean buildTransitiveRunfilesTrees;
+
+  @Option(
+      name = "incompatible_windows_escape_python_args",
+      defaultValue = "true",
+      documentationCategory = OptionDocumentationCategory.OUTPUT_PARAMETERS,
+      effectTags = {
+        OptionEffectTag.ACTION_COMMAND_LINES,
+        OptionEffectTag.AFFECTS_OUTPUTS,
+      },
+      metadataTags = {
+        OptionMetadataTag.INCOMPATIBLE_CHANGE,
+        OptionMetadataTag.TRIGGERED_BY_ALL_INCOMPATIBLE_CHANGES
+      },
+      help =
+          "On Linux/macOS/non-Windows: no-op. On Windows: this flag affects how py_binary and"
+              + " py_test targets are built: how their launcher escapes command line flags. When"
+              + " this flag is true, the launcher escapes command line flags using Windows-style"
+              + " escaping (correct behavior). When the flag is false, the launcher uses Bash-style"
+              + " escaping (buggy behavior). See https://github.com/bazelbuild/bazel/issues/7958")
+  public boolean windowsEscapePythonArgs;
 
   @Override
   public Map<OptionDefinition, SelectRestriction> getSelectRestrictions() {
@@ -293,10 +328,7 @@ public class PythonOptions extends FragmentOptions {
    *
    * <p>Under the new semantics ({@link #incompatibleAllowPythonVersionTransitions} is true),
    * version transitions are always allowed, so this essentially returns whether the new version is
-   * different from the existing one. However, to improve compatibility for unmigrated {@code
-   * select()}s that depend on {@code "force_python"}, if the old API is still enabled then
-   * transitioning is still done whenever {@link #forcePython} is not in agreement with the
-   * requested version, even if {@link #getPythonVersion}'s value would be unaffected.
+   * different from the existing one.
    *
    * <p>Under the old semantics ({@link #incompatibleAllowPythonVersionTransitions} is false),
    * version transitions are not allowed once the version has already been set ({@link #forcePython}
@@ -309,10 +341,7 @@ public class PythonOptions extends FragmentOptions {
   public boolean canTransitionPythonVersion(PythonVersion version) {
     Preconditions.checkArgument(version.isTargetValue());
     if (incompatibleAllowPythonVersionTransitions) {
-      boolean currentVersionNeedsUpdating = !version.equals(getPythonVersion());
-      boolean forcePythonNeedsUpdating =
-          !incompatibleRemoveOldPythonVersionApi && !version.equals(forcePython);
-      return currentVersionNeedsUpdating || forcePythonNeedsUpdating;
+      return !version.equals(getPythonVersion());
     } else {
       boolean currentlyUnset = forcePython == null && pythonVersion == null;
       boolean transitioningToNonDefault = !version.equals(getDefaultPythonVersion());
@@ -340,9 +369,13 @@ public class PythonOptions extends FragmentOptions {
   public void setPythonVersion(PythonVersion version) {
     Preconditions.checkArgument(version.isTargetValue());
     this.pythonVersion = version;
-    // Update forcePython, but if the flag to remove the old API is enabled, no one will be able
-    // to tell anyway.
-    this.forcePython = version;
+    // If the old version API is enabled, update forcePython for consistency. If the old API is
+    // disabled, don't update it because 1) no one can read it anyway, and 2) updating it during
+    // normalization would cause analysis-time validation of the flag to spuriously fail (it'd think
+    // the user set the flag).
+    if (!incompatibleRemoveOldPythonVersionApi) {
+      this.forcePython = version;
+    }
   }
 
   @Override
@@ -358,6 +391,24 @@ public class PythonOptions extends FragmentOptions {
     hostPythonOptions.incompatiblePy2OutputsAreSuffixed = incompatiblePy2OutputsAreSuffixed;
     hostPythonOptions.buildPythonZip = buildPythonZip;
     hostPythonOptions.incompatibleDisallowLegacyPyProvider = incompatibleDisallowLegacyPyProvider;
+    hostPythonOptions.incompatibleUsePythonToolchains = incompatibleUsePythonToolchains;
+    hostPythonOptions.windowsEscapePythonArgs = windowsEscapePythonArgs;
+
+    // Save host options in case of a further exec->host transition.
+    hostPythonOptions.hostForcePython = hostForcePython;
+
     return hostPythonOptions;
+  }
+
+  @Override
+  public FragmentOptions getNormalized() {
+    // Under the new version semantics, we want to ensure that options with "null" physical default
+    // values are normalized, to avoid #7808. We don't want to normalize with the old version
+    // semantics because that breaks backwards compatibility (--force_python would always be on).
+    PythonOptions newOptions = (PythonOptions) clone();
+    if (incompatibleAllowPythonVersionTransitions) {
+      newOptions.setPythonVersion(newOptions.getPythonVersion());
+    }
+    return newOptions;
   }
 }

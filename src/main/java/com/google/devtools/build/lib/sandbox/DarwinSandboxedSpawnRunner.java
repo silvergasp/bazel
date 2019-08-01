@@ -26,7 +26,7 @@ import com.google.devtools.build.lib.actions.Spawn;
 import com.google.devtools.build.lib.actions.SpawnActionContext;
 import com.google.devtools.build.lib.actions.SpawnResult;
 import com.google.devtools.build.lib.actions.Spawns;
-import com.google.devtools.build.lib.exec.apple.XcodeLocalEnvProvider;
+import com.google.devtools.build.lib.exec.TreeDeleter;
 import com.google.devtools.build.lib.exec.local.LocalEnvProvider;
 import com.google.devtools.build.lib.runtime.CommandEnvironment;
 import com.google.devtools.build.lib.runtime.ProcessWrapperUtil;
@@ -112,6 +112,8 @@ final class DarwinSandboxedSpawnRunner extends AbstractSandboxSpawnRunner {
   private final Path sandboxBase;
   private final Duration timeoutKillDelay;
   private final @Nullable SandboxfsProcess sandboxfsProcess;
+  private final boolean sandboxfsMapSymlinkTargets;
+  private final TreeDeleter treeDeleter;
 
   /**
    * The set of directories that always should be writable, independent of the Spawn itself.
@@ -130,22 +132,27 @@ final class DarwinSandboxedSpawnRunner extends AbstractSandboxSpawnRunner {
    * @param timeoutKillDelay additional grace period before killing timing out commands
    * @param sandboxfsProcess instance of the sandboxfs process to use; may be null for none, in
    *     which case the runner uses a symlinked sandbox
+   * @param sandboxfsMapSymlinkTargets map the targets of symlinks within the sandbox if true
    */
   DarwinSandboxedSpawnRunner(
       CommandEnvironment cmdEnv,
       Path sandboxBase,
       Duration timeoutKillDelay,
-      @Nullable SandboxfsProcess sandboxfsProcess)
+      @Nullable SandboxfsProcess sandboxfsProcess,
+      boolean sandboxfsMapSymlinkTargets,
+      TreeDeleter treeDeleter)
       throws IOException {
     super(cmdEnv);
     this.execRoot = cmdEnv.getExecRoot();
     this.allowNetwork = SandboxHelpers.shouldAllowNetwork(cmdEnv.getOptions());
     this.alwaysWritableDirs = getAlwaysWritableDirs(cmdEnv.getRuntime().getFileSystem());
     this.processWrapper = ProcessWrapperUtil.getProcessWrapper(cmdEnv);
-    this.localEnvProvider = new XcodeLocalEnvProvider(cmdEnv.getClientEnv());
+    this.localEnvProvider = LocalEnvProvider.forCurrentOs(cmdEnv.getClientEnv());
     this.sandboxBase = sandboxBase;
     this.timeoutKillDelay = timeoutKillDelay;
     this.sandboxfsProcess = sandboxfsProcess;
+    this.sandboxfsMapSymlinkTargets = sandboxfsMapSymlinkTargets;
+    this.treeDeleter = treeDeleter;
   }
 
   private static void addPathToSetIfExists(FileSystem fs, Set<Path> paths, String path)
@@ -277,7 +284,9 @@ final class DarwinSandboxedSpawnRunner extends AbstractSandboxSpawnRunner {
               environment,
               inputs,
               outputs,
-              ImmutableSet.of()) {
+              ImmutableSet.of(),
+              sandboxfsMapSymlinkTargets,
+              treeDeleter) {
             @Override
             public void createFileSystem() throws IOException {
               super.createFileSystem();
@@ -298,7 +307,8 @@ final class DarwinSandboxedSpawnRunner extends AbstractSandboxSpawnRunner {
               environment,
               inputs,
               outputs,
-              writableDirs) {
+              writableDirs,
+              treeDeleter) {
             @Override
             public void createFileSystem() throws IOException {
               super.createFileSystem();

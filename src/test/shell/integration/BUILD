@@ -1,5 +1,7 @@
 package(default_visibility = ["//visibility:private"])
 
+load("@rules_cc//cc:defs.bzl", "cc_binary")
+
 filegroup(
     name = "srcs",
     srcs = glob(["**"]),
@@ -36,6 +38,16 @@ sh_test(
 )
 
 sh_test(
+    name = "implicit_dependency_reporting_test",
+    size = "medium",
+    srcs = ["implicit_dependency_reporting_test.sh"],
+    data = [
+        ":test-deps",
+        "@bazel_tools//tools/bash/runfiles",
+    ],
+)
+
+sh_test(
     name = "execution_strategies_test",
     size = "medium",
     srcs = ["execution_strategies_test.sh"],
@@ -54,7 +66,7 @@ sh_test(
         "@bazel_tools//tools/bash/runfiles",
     ],
     tags = [
-        "local",
+        "no-sandbox",
     ],
 )
 
@@ -136,9 +148,9 @@ sh_test(
 )
 
 sh_test(
-    name = "experimental_ui_test",
+    name = "ui_test",
     size = "large",
-    srcs = ["experimental_ui_test.sh"],
+    srcs = ["ui_test.sh"],
     data = [
         ":test-deps",
         "@bazel_tools//tools/bash/runfiles",
@@ -193,8 +205,13 @@ sh_test(
     name = "discard_analysis_cache_test",
     size = "medium",
     srcs = ["discard_analysis_cache_test.sh"],
-    data = [":test-deps"],
+    args = ["$(JAVABASE)"],
+    data = [
+        ":test-deps",
+        "@bazel_tools//tools/bash/runfiles",
+    ],
     tags = ["no_windows"],
+    toolchains = ["@bazel_tools//tools/jdk:current_java_runtime"],
 )
 
 sh_test(
@@ -286,7 +303,7 @@ sh_test(
     # This test doesn't work with the sandbox on, see the source file
     # for details.
     tags = [
-        "local",
+        "no-sandbox",
         "no_windows",
     ],
 )
@@ -324,16 +341,6 @@ sh_test(
     name = "skylark_flag_test",
     size = "medium",
     srcs = ["skylark_flag_test.sh"],
-    data = [
-        ":test-deps",
-        "@bazel_tools//tools/bash/runfiles",
-    ],
-)
-
-sh_test(
-    name = "ui_test",
-    size = "medium",
-    srcs = ["ui_test.sh"],
     data = [
         ":test-deps",
         "@bazel_tools//tools/bash/runfiles",
@@ -386,23 +393,28 @@ sh_test(
     name = "discard_graph_edges_test",
     size = "medium",
     srcs = ["discard_graph_edges_test.sh"],
+    args = ["$(JAVABASE)"],
     data = [
         ":discard_graph_edges_lib.sh",
         ":test-deps",
+        "@bazel_tools//tools/bash/runfiles",
     ],
     shard_count = 6,
     tags = ["no_windows"],
+    toolchains = ["@bazel_tools//tools/jdk:current_java_runtime"],
 )
 
 sh_test(
     name = "nonincremental_builds_test",
     size = "medium",
     srcs = ["nonincremental_builds_test.sh"],
+    args = ["$(JAVABASE)"],
     data = [
         ":discard_graph_edges_lib.sh",
         ":test-deps",
         "@bazel_tools//tools/bash/runfiles",
     ],
+    toolchains = ["@bazel_tools//tools/jdk:current_java_runtime"],
 )
 
 sh_test(
@@ -539,6 +551,16 @@ sh_test(
     tags = ["no_windows"],
 )
 
+sh_test(
+    name = "sandboxing_test",
+    size = "large",
+    srcs = ["sandboxing_test.sh"],
+    data = [
+        ":test-deps",
+    ],
+    tags = ["no_windows"],
+)
+
 package_group(
     name = "spend_cpu_time_users",
     packages = [
@@ -587,6 +609,20 @@ sh_test(
     name = "jvm_flags_escaping_test",
     srcs = ["jvm_flags_escaping_test.sh"],
     data = [":test-deps"],
+    deps = ["@bazel_tools//tools/bash/runfiles"],
+)
+
+sh_test(
+    name = "py_args_escaping_test",
+    srcs = ["py_args_escaping_test.sh"],
+    data = [":test-deps"],
+    deps = ["@bazel_tools//tools/bash/runfiles"],
+)
+
+sh_test(
+    name = "bash_runfiles_v1_test",
+    srcs = ["bash_runfiles_v1_test.sh"],
+    data = ["BUILD"],
     deps = ["@bazel_tools//tools/bash/runfiles"],
 )
 

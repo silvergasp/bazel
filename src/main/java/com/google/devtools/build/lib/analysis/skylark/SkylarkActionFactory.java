@@ -22,9 +22,9 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.devtools.build.lib.actions.Action;
 import com.google.devtools.build.lib.actions.ActionAnalysisMetadata;
+import com.google.devtools.build.lib.actions.ActionLookupValue;
 import com.google.devtools.build.lib.actions.ActionRegistry;
 import com.google.devtools.build.lib.actions.Artifact;
-import com.google.devtools.build.lib.actions.ArtifactOwner;
 import com.google.devtools.build.lib.actions.ArtifactRoot;
 import com.google.devtools.build.lib.actions.CommandLine;
 import com.google.devtools.build.lib.actions.CommandLineExpansionException;
@@ -34,6 +34,7 @@ import com.google.devtools.build.lib.actions.RunfilesSupplier;
 import com.google.devtools.build.lib.actions.SingleStringArgFormatter;
 import com.google.devtools.build.lib.actions.extra.ExtraActionInfo;
 import com.google.devtools.build.lib.actions.extra.SpawnInfo;
+import com.google.devtools.build.lib.analysis.BashCommandConstructor;
 import com.google.devtools.build.lib.analysis.CommandHelper;
 import com.google.devtools.build.lib.analysis.FilesToRunProvider;
 import com.google.devtools.build.lib.analysis.PseudoAction;
@@ -43,6 +44,7 @@ import com.google.devtools.build.lib.analysis.actions.ActionConstructionContext;
 import com.google.devtools.build.lib.analysis.actions.FileWriteAction;
 import com.google.devtools.build.lib.analysis.actions.ParameterFileWriteAction;
 import com.google.devtools.build.lib.analysis.actions.SpawnAction;
+import com.google.devtools.build.lib.analysis.actions.StarlarkAction;
 import com.google.devtools.build.lib.analysis.actions.Substitution;
 import com.google.devtools.build.lib.analysis.actions.TemplateExpansionAction;
 import com.google.devtools.build.lib.analysis.skylark.SkylarkCustomCommandLine.ScalarArg;
@@ -64,8 +66,8 @@ import com.google.devtools.build.lib.syntax.Mutability;
 import com.google.devtools.build.lib.syntax.Runtime;
 import com.google.devtools.build.lib.syntax.SkylarkDict;
 import com.google.devtools.build.lib.syntax.SkylarkList;
-import com.google.devtools.build.lib.syntax.SkylarkMutable;
 import com.google.devtools.build.lib.syntax.SkylarkNestedSet;
+import com.google.devtools.build.lib.syntax.StarlarkMutable;
 import com.google.devtools.build.lib.syntax.StarlarkSemantics;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.protobuf.GeneratedMessage;
@@ -74,6 +76,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import javax.annotation.Nullable;
@@ -115,7 +118,7 @@ public class SkylarkActionFactory implements SkylarkActionFactoryApi {
       }
 
       @Override
-      public ArtifactOwner getOwner() {
+      public ActionLookupValue.ActionLookupKey getOwner() {
         return skylarkActionFactory
             .getActionConstructionContext()
             .getAnalysisEnvironment()
@@ -213,6 +216,7 @@ public class SkylarkActionFactory implements SkylarkActionFactoryApi {
   public void run(
       SkylarkList outputs,
       Object inputs,
+      Object unusedInputsList,
       Object executableUnchecked,
       Object toolsUnchecked,
       Object arguments,
@@ -225,7 +229,7 @@ public class SkylarkActionFactory implements SkylarkActionFactoryApi {
       Location location)
       throws EvalException {
     context.checkMutable("actions.run");
-    SpawnAction.Builder builder = new SpawnAction.Builder();
+    StarlarkAction.Builder builder = new StarlarkAction.Builder();
 
     SkylarkList argumentsList = ((SkylarkList) arguments);
     buildCommandLine(builder, argumentsList);
@@ -245,9 +249,10 @@ public class SkylarkActionFactory implements SkylarkActionFactoryApi {
       // Should have been verified by Starlark before this function is called
       throw new IllegalStateException();
     }
-    registerSpawnAction(
+    registerStarlarkAction(
         outputs,
         inputs,
+        unusedInputsList,
         toolsUnchecked,
         mnemonicUnchecked,
         progressMessage,
@@ -289,6 +294,10 @@ public class SkylarkActionFactory implements SkylarkActionFactoryApi {
     return ruleContext;
   }
 
+  public RuleContext getRuleContext() {
+    return ruleContext;
+  }
+
   @Override
   public void runShell(
       SkylarkList outputs,
@@ -302,12 +311,13 @@ public class SkylarkActionFactory implements SkylarkActionFactoryApi {
       Object envUnchecked,
       Object executionRequirementsUnchecked,
       Object inputManifestsUnchecked,
-      Location location)
+      Location location,
+      StarlarkSemantics semantics)
       throws EvalException {
     context.checkMutable("actions.run_shell");
 
     SkylarkList argumentList = (SkylarkList) arguments;
-    SpawnAction.Builder builder = new SpawnAction.Builder();
+    StarlarkAction.Builder builder = new StarlarkAction.Builder();
     buildCommandLine(builder, argumentList);
 
     if (commandUnchecked instanceof String) {
@@ -315,10 +325,12 @@ public class SkylarkActionFactory implements SkylarkActionFactoryApi {
           ImmutableMap.copyOf(TargetUtils.getExecutionInfo(ruleContext.getRule()));
       String helperScriptSuffix = String.format(".run_shell_%d.sh", runShellOutputCounter++);
       String command = (String) commandUnchecked;
-      Artifact helperScript =
-          CommandHelper.shellCommandHelperScriptMaybe(
-              ruleContext, command, helperScriptSuffix, executionInfo);
       PathFragment shExecutable = ShToolchain.getPathOrError(ruleContext);
+      BashCommandConstructor constructor =
+          CommandHelper.buildBashCommandConstructor(
+              executionInfo, shExecutable, helperScriptSuffix);
+      Artifact helperScript =
+          CommandHelper.commandHelperScriptMaybe(ruleContext, command, constructor);
       if (helperScript == null) {
         builder.setShellCommand(shExecutable, command);
       } else {
@@ -330,6 +342,13 @@ public class SkylarkActionFactory implements SkylarkActionFactoryApi {
         }
       }
     } else if (commandUnchecked instanceof SkylarkList) {
+      if (semantics.incompatibleRunShellCommandString()) {
+        throw new EvalException(
+            location,
+            "'command' must be of type string. passing a sequence of strings as 'command'"
+                + " is deprecated. To temporarily disable this check,"
+                + " set --incompatible_objc_framework_cleanup=false.");
+      }
       SkylarkList commandList = (SkylarkList) commandUnchecked;
       if (argumentList.size() > 0) {
         throw new EvalException(location,
@@ -351,9 +370,10 @@ public class SkylarkActionFactory implements SkylarkActionFactoryApi {
       // arg1 and arg2 will be $1 and $2, as a user expects.
       builder.addExecutableArguments("");
     }
-    registerSpawnAction(
+    registerStarlarkAction(
         outputs,
         inputs,
+        /*unusedInputsList=*/ Runtime.NONE,
         toolsUnchecked,
         mnemonicUnchecked,
         progressMessage,
@@ -404,9 +424,10 @@ public class SkylarkActionFactory implements SkylarkActionFactoryApi {
    *
    * <p>{@code builder} should have either executable or a command set.
    */
-  private void registerSpawnAction(
+  private void registerStarlarkAction(
       SkylarkList outputs,
       Object inputs,
+      Object unusedInputsList,
       Object toolsUnchecked,
       Object mnemonicUnchecked,
       Object progressMessage,
@@ -415,7 +436,7 @@ public class SkylarkActionFactory implements SkylarkActionFactoryApi {
       Object executionRequirementsUnchecked,
       Object inputManifestsUnchecked,
       Location location,
-      SpawnAction.Builder builder)
+      StarlarkAction.Builder builder)
       throws EvalException {
     Iterable<Artifact> inputArtifacts;
     if (inputs instanceof SkylarkList) {
@@ -426,7 +447,33 @@ public class SkylarkActionFactory implements SkylarkActionFactoryApi {
       builder.addTransitiveInputs(inputSet);
       inputArtifacts = inputSet;
     }
-    builder.addOutputs(outputs.getContents(Artifact.class, "outputs"));
+
+    @SuppressWarnings("unchecked")
+    List<Artifact> outputArtifacts = outputs.getContents(Artifact.class, "outputs");
+    if (outputArtifacts.isEmpty()) {
+      throw new EvalException(location, "param 'outputs' may not be empty");
+    }
+    builder.addOutputs(outputArtifacts);
+
+    if (unusedInputsList != Runtime.NONE) {
+      if (!starlarkSemantics.experimentalStarlarkUnusedInputsList()) {
+        throw new EvalException(
+            location,
+            "'unused_inputs_list' attribute is experimental and disabled by default. "
+                + "This API is in development and subject to change at any time. "
+                + "Use --experimental_starlark_unused_inputs_list to use this experimental API.");
+      }
+      if (unusedInputsList instanceof Artifact) {
+        builder.setUnusedInputsList(Optional.of((Artifact) unusedInputsList));
+      } else {
+        throw new EvalException(
+            location,
+            "expected value of type 'File' for "
+                + "a member of parameter 'unused_inputs_list' but got "
+                + EvalUtils.getDataTypeName(unusedInputsList)
+                + " instead");
+      }
+    }
 
     if (toolsUnchecked != Runtime.UNBOUND) {
       @SuppressWarnings("unchecked")
@@ -514,15 +561,14 @@ public class SkylarkActionFactory implements SkylarkActionFactoryApi {
     if (EvalUtils.toBoolean(useDefaultShellEnv)) {
       builder.useDefaultShellEnvironment();
     }
-    if (executionRequirementsUnchecked != Runtime.NONE) {
-      builder.setExecutionInfo(
-          TargetUtils.filter(
-              SkylarkDict.castSkylarkDictOrNoneToDict(
-                  executionRequirementsUnchecked,
-                  String.class,
-                  String.class,
-                  "execution_requirements")));
-    }
+
+    ImmutableMap<String, String> executionInfo =
+        TargetUtils.getFilteredExecutionInfo(
+            executionRequirementsUnchecked,
+            ruleContext.getRule(),
+            starlarkSemantics.incompatibleAllowTagsPropagation());
+    builder.setExecutionInfo(executionInfo);
+
     if (inputManifestsUnchecked != Runtime.NONE) {
       for (RunfilesSupplier supplier : SkylarkList.castSkylarkListOrNoneToList(
           inputManifestsUnchecked, RunfilesSupplier.class, "runfiles suppliers")) {
@@ -534,8 +580,7 @@ public class SkylarkActionFactory implements SkylarkActionFactoryApi {
   }
 
   private String getMnemonic(Object mnemonicUnchecked) {
-    String mnemonic =
-        mnemonicUnchecked == Runtime.NONE ? "SkylarkAction" : (String) mnemonicUnchecked;
+    String mnemonic = mnemonicUnchecked == Runtime.NONE ? "Action" : (String) mnemonicUnchecked;
     if (ruleContext.getConfiguration().getReservedActionMnemonics().contains(mnemonic)) {
       mnemonic = mangleMnemonic(mnemonic);
     }
@@ -543,7 +588,7 @@ public class SkylarkActionFactory implements SkylarkActionFactoryApi {
   }
 
   private static String mangleMnemonic(String mnemonic) {
-    return mnemonic + "FromSkylark";
+    return mnemonic + "FromStarlark";
   }
 
   @Override
@@ -590,7 +635,7 @@ public class SkylarkActionFactory implements SkylarkActionFactoryApi {
 
   /** Args module. */
   @VisibleForTesting
-  public static class Args extends SkylarkMutable implements CommandLineArgsApi {
+  public static class Args extends StarlarkMutable implements CommandLineArgsApi {
     private final Mutability mutability;
     private final StarlarkSemantics starlarkSemantics;
     private final SkylarkCustomCommandLine.Builder commandLine;

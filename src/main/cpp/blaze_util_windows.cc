@@ -12,19 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "src/main/cpp/blaze_util_platform.h"
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
 
 #include <fcntl.h>
-#include <stdarg.h>  // va_start, va_end, va_list
-
-#include <windows.h>
+#include <io.h>              // _open
+#include <knownfolders.h>    // FOLDERID_Profile
 #include <lmcons.h>          // UNLEN
-#include <versionhelpers.h>  // IsWindows8OrGreater
-
-#include <io.h>            // _open
-#include <knownfolders.h>  // FOLDERID_Profile
-#include <objbase.h>       // CoTaskMemFree
-#include <shlobj.h>        // SHGetKnownFolderPath
+#include <objbase.h>         // CoTaskMemFree
+#include <shlobj.h>          // SHGetKnownFolderPath
+#include <stdarg.h>          // va_start, va_end, va_list
 
 #include <algorithm>
 #include <cstdio>
@@ -38,7 +37,7 @@
 #include <vector>
 
 #include "src/main/cpp/blaze_util.h"
-#include "src/main/cpp/global_variables.h"
+#include "src/main/cpp/blaze_util_platform.h"
 #include "src/main/cpp/startup_options.h"
 #include "src/main/cpp/util/errors.h"
 #include "src/main/cpp/util/exit_code.h"
@@ -51,6 +50,7 @@
 #include "src/main/cpp/util/path_platform.h"
 #include "src/main/cpp/util/strings.h"
 #include "src/main/native/windows/file.h"
+#include "src/main/native/windows/process.h"
 #include "src/main/native/windows/util.h"
 
 namespace blaze {
@@ -296,17 +296,17 @@ BOOL WINAPI ConsoleCtrlHandler(_In_ DWORD ctrlType) {
       if (++sigint_count >= 3) {
         SigPrintf(
             "\n%s caught third Ctrl+C handler signal; killed.\n\n",
-            SignalHandler::Get().GetGlobals()->options->product_name.c_str());
-        if (SignalHandler::Get().GetGlobals()->server_pid != -1) {
+            SignalHandler::Get().GetProductName().c_str());
+        if (SignalHandler::Get().GetServerProcessInfo()->server_pid_ != -1) {
           KillServerProcess(
-              SignalHandler::Get().GetGlobals()->server_pid,
-              SignalHandler::Get().GetGlobals()->options->output_base);
+              SignalHandler::Get().GetServerProcessInfo()->server_pid_,
+              SignalHandler::Get().GetOutputBase());
         }
         _exit(1);
       }
       SigPrintf(
           "\n%s Ctrl+C handler; shutting down.\n\n",
-          SignalHandler::Get().GetGlobals()->options->product_name.c_str());
+          SignalHandler::Get().GetProductName().c_str());
       SignalHandler::Get().CancelServer();
       return TRUE;
 
@@ -317,10 +317,14 @@ BOOL WINAPI ConsoleCtrlHandler(_In_ DWORD ctrlType) {
   return false;
 }
 
-void SignalHandler::Install(GlobalVariables* globals,
+void SignalHandler::Install(const string &product_name,
+                            const string &output_base,
+                            const ServerProcessInfo *server_process_info_,
                             SignalHandler::Callback cancel_server) {
-  _globals = globals;
-  _cancel_server = cancel_server;
+  product_name_ = product_name;
+  output_base_ = output_base;
+  server_process_info_ = server_process_info_;
+  cancel_server_ = cancel_server;
   ::SetConsoleCtrlHandler(&ConsoleCtrlHandler, TRUE);
 }
 
@@ -328,8 +332,6 @@ ATTRIBUTE_NORETURN void SignalHandler::PropagateSignalOrExit(int exit_code) {
   // We do not handle signals on Windows; always exit with exit_code.
   exit(exit_code);
 }
-
-
 
 // A signal-safe version of fprintf(stderr, ...).
 //
@@ -409,7 +411,7 @@ string GetHomeDir() {
   if (IsRunningWithinTest()) {
     // Bazel is running inside of a test. Respect $HOME that the test setup has
     // set instead of using the actual home directory of the current user.
-    return GetEnv("HOME");
+    return GetPathEnv("HOME");
   }
 
   PWSTR wpath;
@@ -424,12 +426,12 @@ string GetHomeDir() {
 
   // On Windows 2016 Server, Nano server: FOLDERID_Profile is unknown but
   // %USERPROFILE% is set. See https://github.com/bazelbuild/bazel/issues/6701
-  string userprofile = GetEnv("USERPROFILE");
+  string userprofile = GetPathEnv("USERPROFILE");
   if (!userprofile.empty()) {
     return userprofile;
   }
 
-  return GetEnv("HOME");  // only defined in MSYS/Cygwin
+  return GetPathEnv("HOME");  // only defined in MSYS/Cygwin
 }
 
 string FindSystemWideBlazerc() {
@@ -458,7 +460,7 @@ bool IsSharedLibrary(const string &filename) {
 }
 
 string GetSystemJavabase() {
-  string javahome(GetEnv("JAVA_HOME"));
+  string javahome(GetPathEnv("JAVA_HOME"));
   if (!javahome.empty()) {
     string javac = blaze_util::JoinPath(javahome, "bin/javac.exe");
     if (blaze_util::PathExists(javac.c_str())) {
@@ -482,51 +484,56 @@ namespace {
 static const int MAX_CMDLINE_LENGTH = 32768;
 
 struct CmdLine {
-  char cmdline[MAX_CMDLINE_LENGTH];
+  WCHAR cmdline[MAX_CMDLINE_LENGTH];
 };
 static void CreateCommandLine(CmdLine* result, const string& exe,
                               const std::vector<string>& args_vector) {
-  std::ostringstream cmdline;
+  std::wstringstream cmdline;
   string short_exe;
-  string error;
-  if (!blaze_util::AsShortWindowsPath(exe, &short_exe, &error)) {
-    BAZEL_DIE(blaze_exit_code::LOCAL_ENVIRONMENTAL_ERROR)
-        << "CreateCommandLine: AsShortWindowsPath(" << exe << "): " << error;
+  if (!exe.empty()) {
+    string error;
+    if (!blaze_util::AsShortWindowsPath(exe, &short_exe, &error)) {
+      BAZEL_DIE(blaze_exit_code::LOCAL_ENVIRONMENTAL_ERROR)
+          << "CreateCommandLine: AsShortWindowsPath(" << exe << "): " << error;
+    }
+    wstring wshort_exe = blaze_util::CstringToWstring(short_exe.c_str()).get();
+    cmdline << L'\"' << wshort_exe << L'\"';
   }
+
   bool first = true;
   for (const auto& s : args_vector) {
     if (first) {
+      // Skip first argument, it is equal to 'exe'.
       first = false;
-      // Skip first argument, instead use quoted executable name.
-      cmdline << '\"' << short_exe << '\"';
       continue;
     } else {
-      cmdline << ' ';
+      cmdline << L' ';
     }
 
     bool has_space = s.find(" ") != string::npos;
 
     if (has_space) {
-      cmdline << '\"';
+      cmdline << L'\"';
     }
 
-    std::string::const_iterator it = s.begin();
-    while (it != s.end()) {
-      char ch = *it++;
+    wstring ws = blaze_util::CstringToWstring(s.c_str()).get();
+    std::wstring::const_iterator it = ws.begin();
+    while (it != ws.end()) {
+      wchar_t ch = *it++;
       switch (ch) {
-        case '"':
+        case L'"':
           // Escape double quotes
-          cmdline << "\\\"";
+          cmdline << L"\\\"";
           break;
 
-        case '\\':
-          if (it == s.end()) {
+        case L'\\':
+          if (it == ws.end()) {
             // Backslashes at the end of the string are quoted if we add quotes
-            cmdline << (has_space ? "\\\\" : "\\");
+            cmdline << (has_space ? L"\\\\" : L"\\");
           } else {
             // Backslashes everywhere else are quoted if they are followed by a
             // quote or a backslash
-            cmdline << (*it == '"' || *it == '\\' ? "\\\\" : "\\");
+            cmdline << (*it == L'"' || *it == L'\\' ? L"\\\\" : L"\\");
           }
           break;
 
@@ -536,20 +543,21 @@ static void CreateCommandLine(CmdLine* result, const string& exe,
     }
 
     if (has_space) {
-      cmdline << '\"';
+      cmdline << L'\"';
     }
   }
 
-  string cmdline_str = cmdline.str();
+  wstring cmdline_str = cmdline.str();
   if (cmdline_str.size() >= MAX_CMDLINE_LENGTH) {
     BAZEL_DIE(blaze_exit_code::INTERNAL_ERROR)
         << "Command line too long (" << cmdline_str.size() << " > "
-        << MAX_CMDLINE_LENGTH << "): " << cmdline_str;
+        << MAX_CMDLINE_LENGTH
+        << "): " << blaze_util::WstringToCstring(cmdline_str.c_str()).get();
   }
 
   // Copy command line into a mutable buffer.
   // CreateProcess is allowed to mutate its command line argument.
-  strncpy(result->cmdline, cmdline_str.c_str(), MAX_CMDLINE_LENGTH - 1);
+  wcsncpy(result->cmdline, cmdline_str.c_str(), MAX_CMDLINE_LENGTH - 1);
   result->cmdline[MAX_CMDLINE_LENGTH - 1] = 0;
 }
 
@@ -642,7 +650,6 @@ class ProcessHandleBlazeServerStartup : public BlazeServerStartup {
   AutoHandle proc;
 };
 
-
 int ExecuteDaemon(const string& exe,
                   const std::vector<string>& args_vector,
                   const std::map<string, EnvVarValue>& env,
@@ -650,6 +657,7 @@ int ExecuteDaemon(const string& exe,
                   const bool daemon_out_append,
                   const string& binaries_dir,
                   const string& server_dir,
+                  const StartupOptions &options,
                   BlazeServerStartup** server_startup) {
   wstring wdaemon_output;
   string error;
@@ -711,8 +719,8 @@ int ExecuteDaemon(const string& exe,
   }
 
   PROCESS_INFORMATION processInfo = {0};
-  STARTUPINFOEXA startupInfoEx = {0};
-  lpAttributeList->InitStartupInfoExA(&startupInfoEx);
+  STARTUPINFOEXW startupInfoEx = {0};
+  lpAttributeList->InitStartupInfoExW(&startupInfoEx);
 
   CmdLine cmdline;
   CreateCommandLine(&cmdline, exe, args_vector);
@@ -721,14 +729,14 @@ int ExecuteDaemon(const string& exe,
   {
     WithEnvVars env_obj(env);
 
-    ok = CreateProcessA(
+    ok = CreateProcessW(
         /* lpApplicationName */ NULL,
         /* lpCommandLine */ cmdline.cmdline,
         /* lpProcessAttributes */ NULL,
         /* lpThreadAttributes */ NULL,
         /* bInheritHandles */ TRUE,
         /* dwCreationFlags */ DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP |
-        EXTENDED_STARTUPINFO_PRESENT,
+            EXTENDED_STARTUPINFO_PRESENT,
         /* lpEnvironment */ NULL,
         /* lpCurrentDirectory */ NULL,
         /* lpStartupInfo */ &startupInfoEx.StartupInfo,
@@ -760,95 +768,32 @@ int ExecuteDaemon(const string& exe,
   return processInfo.dwProcessId;
 }
 
-// Returns whether nested jobs are not available on the current system.
-static bool NestedJobsSupported() {
-  // Nested jobs are supported from Windows 8
-  return IsWindows8OrGreater();
-}
-
 // Run the given program in the current working directory, using the given
 // argument vector, wait for it to finish, then exit ourselves with the exitcode
 // of that program.
 void ExecuteProgram(const string& exe, const std::vector<string>& args_vector) {
+  std::wstring wexe = blaze_util::CstringToWstring(exe.c_str()).get();
+
   CmdLine cmdline;
-  CreateCommandLine(&cmdline, exe, args_vector);
+  CreateCommandLine(&cmdline, "", args_vector);
 
-  STARTUPINFOA startupInfo = {0};
-  startupInfo.cb = sizeof(STARTUPINFOA);
-
-  PROCESS_INFORMATION processInfo = {0};
-
-  HANDLE job = INVALID_HANDLE_VALUE;
-  if (NestedJobsSupported()) {
-    job = CreateJobObject(NULL, NULL);
-    if (job == NULL) {
-      BAZEL_DIE(blaze_exit_code::LOCAL_ENVIRONMENTAL_ERROR)
-          << "ExecuteProgram(" << exe
-          << "): CreateJobObject failed: " << GetLastErrorString();
-    }
-
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION job_info = {0};
-    job_info.BasicLimitInformation.LimitFlags =
-        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-
-    if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation,
-                                 &job_info, sizeof(job_info))) {
-      BAZEL_DIE(blaze_exit_code::LOCAL_ENVIRONMENTAL_ERROR)
-          << "ExecuteProgram(" << exe
-          << "): SetInformationJobObject failed: " << GetLastErrorString();
-    }
-  }
-
-  BOOL success = CreateProcessA(
-      /* lpApplicationName */ NULL,
-      /* lpCommandLine */ cmdline.cmdline,
-      /* lpProcessAttributes */ NULL,
-      /* lpThreadAttributes */ NULL,
-      /* bInheritHandles */ TRUE,
-      /* dwCreationFlags */ CREATE_SUSPENDED,
-      /* lpEnvironment */ NULL,
-      /* lpCurrentDirectory */ NULL,
-      /* lpStartupInfo */ &startupInfo,
-      /* lpProcessInformation */ &processInfo);
-
-  if (!success) {
-    BAZEL_DIE(blaze_exit_code::LOCAL_ENVIRONMENTAL_ERROR)
-        << "ExecuteProgram(" << exe << "): CreateProcess(" << cmdline.cmdline
-        << ") failed: " << GetLastErrorString();
-  }
-
-  // On Windows versions that support nested jobs (Windows 8 and above), we
-  // assign the Bazel server to a job object. Every process that Bazel creates,
-  // as well as all their child processes, will be assigned to this job object.
-  // When the Bazel server terminates the OS can reliably kill the entire
-  // process tree under it. On Windows versions that don't support nested jobs
-  // (Windows 7), we don't assign the Bazel server to a big job object. Instead,
-  // when Bazel creates new processes, it does so using the JNI library. The
-  // library assigns individual job objects to each subprocess. This way when
-  // these processes terminate, the OS can kill all their subprocesses. Bazel's
-  // own subprocesses are not in a job object though, so we only create
-  // subprocesses via the JNI library.
-  if (job != INVALID_HANDLE_VALUE) {
-    if (!AssignProcessToJobObject(job, processInfo.hProcess)) {
-      BAZEL_DIE(blaze_exit_code::LOCAL_ENVIRONMENTAL_ERROR)
-          << "ExecuteProgram(" << exe
-          << "): AssignProcessToJobObject failed: " << GetLastErrorString();
-    }
-  }
-  // Now that we potentially put the process into a new job object, we can start
-  // running it.
-  if (ResumeThread(processInfo.hThread) == -1) {
+  bazel::windows::WaitableProcess proc;
+  std::wstring werror;
+  if (!proc.Create(wexe, cmdline.cmdline, nullptr, L"", &werror) ||
+      proc.WaitFor(-1, nullptr, &werror) !=
+          bazel::windows::WaitableProcess::kWaitSuccess) {
     BAZEL_DIE(blaze_exit_code::LOCAL_ENVIRONMENTAL_ERROR)
         << "ExecuteProgram(" << exe
-        << "): ResumeThread failed: " << GetLastErrorString();
+        << ") failed: " << blaze_util::WstringToCstring(werror.c_str()).get();
   }
-
-  WaitForSingleObject(processInfo.hProcess, INFINITE);
-  DWORD exit_code;
-  GetExitCodeProcess(processInfo.hProcess, &exit_code);
-  CloseHandle(processInfo.hProcess);
-  CloseHandle(processInfo.hThread);
-  exit(exit_code);
+  werror.clear();
+  int x = proc.GetExitCode(&werror);
+  if (!werror.empty()) {
+    BAZEL_DIE(blaze_exit_code::LOCAL_ENVIRONMENTAL_ERROR)
+        << "ExecuteProgram(" << exe
+        << ") failed: " << blaze_util::WstringToCstring(werror.c_str()).get();
+  }
+  exit(x);
 }
 
 const char kListSeparator = ';';
@@ -1000,6 +945,24 @@ string GetEnv(const string& name) {
   unique_ptr<char[]> value(new char[size]);
   ::GetEnvironmentVariableA(name.c_str(), value.get(), size);
   return string(value.get());
+}
+
+string GetPathEnv(const string& name) {
+  string value = GetEnv(name);
+  if (value.empty()) {
+    return value;
+  }
+  if (bazel::windows::HasUncPrefix(value.c_str())) {
+    value = value.substr(4);
+  }
+  string wpath, error;
+  if (!blaze_util::AsWindowsPath(value, &wpath, &error)) {
+    BAZEL_DIE(blaze_exit_code::LOCAL_ENVIRONMENTAL_ERROR)
+        << "Invalid path in envvar \"" << name << "\": " << error;
+  }
+  // Callers of GetPathEnv expect a path with forward slashes.
+  std::replace(wpath.begin(), wpath.end(), '\\', '/');
+  return wpath;
 }
 
 bool ExistsEnv(const string& name) {
@@ -1218,36 +1181,29 @@ string GetUserName() {
 
 bool IsEmacsTerminal() {
   string emacs = GetEnv("EMACS");
-  string inside_emacs = GetEnv("INSIDE_EMACS");
   // GNU Emacs <25.1 (and ~all non-GNU emacsen) set EMACS=t, but >=25.1 doesn't
   // do that and instead sets INSIDE_EMACS=<stuff> (where <stuff> can look like
   // e.g. "25.1.1,comint").  So we check both variables for maximum
   // compatibility.
-  return emacs == "t" || !inside_emacs.empty();
+  return emacs == "t" || ExistsEnv("INSIDE_EMACS");
 }
 
-// Returns true if stderr is connected to a terminal, and it can support color
-// and cursor movement (this is computed heuristically based on the values of
-// environment variables).  Blaze only outputs control characters to stderr,
-// so we only care for the stderr descriptor type.
-bool IsStderrStandardTerminal() {
-  DWORD mode = 0;
-  HANDLE handle = ::GetStdHandle(STD_ERROR_HANDLE);
-  // handle may be invalid when stderr is redirected
-  if (handle == INVALID_HANDLE_VALUE || !::GetConsoleMode(handle, &mode) ||
-      !(mode & ENABLE_PROCESSED_OUTPUT) ||
-      !(mode & ENABLE_WRAP_AT_EOL_OUTPUT) ||
-      !(mode & ENABLE_VIRTUAL_TERMINAL_PROCESSING)) {
-    return false;
+bool IsStandardTerminal() {
+  for (DWORD i : {STD_OUTPUT_HANDLE, STD_ERROR_HANDLE}) {
+    DWORD mode = 0;
+    HANDLE handle = ::GetStdHandle(STD_ERROR_HANDLE);
+    // handle may be invalid when std{out,err} is redirected
+    if (handle == INVALID_HANDLE_VALUE || !::GetConsoleMode(handle, &mode) ||
+        !(mode & ENABLE_PROCESSED_OUTPUT) ||
+        !(mode & ENABLE_WRAP_AT_EOL_OUTPUT) ||
+        !(mode & ENABLE_VIRTUAL_TERMINAL_PROCESSING)) {
+      return false;
+    }
   }
   return true;
 }
 
-// Returns the number of columns of the terminal to which stderr is connected,
-// or $COLUMNS (default 80) if there is no such terminal.  Blaze only outputs
-// formatted messages to stderr, so we only care for width of a terminal
-// connected to the stderr descriptor.
-int GetStderrTerminalColumns() {
+int GetTerminalColumns() {
   string columns_env = GetEnv("COLUMNS");
   if (!columns_env.empty()) {
     char* endptr;
@@ -1257,7 +1213,7 @@ int GetStderrTerminalColumns() {
     }
   }
 
-  HANDLE stdout_handle = ::GetStdHandle(STD_ERROR_HANDLE);
+  HANDLE stdout_handle = ::GetStdHandle(STD_OUTPUT_HANDLE);
   if (stdout_handle != INVALID_HANDLE_VALUE) {
     // stdout_handle may be invalid when stdout is redirected.
     CONSOLE_SCREEN_BUFFER_INFO screen_info;
@@ -1418,7 +1374,7 @@ static string GetMsysBash() {
 
 static string GetBinaryFromPath(const string& binary_name) {
   char found[MAX_PATH];
-  string path_list = blaze::GetEnv("PATH");
+  string path_list = blaze::GetPathEnv("PATH");
 
   // We do not fully replicate all the quirks of search in PATH.
   // There is no system function to do so, and that way lies madness.
@@ -1452,54 +1408,32 @@ static string GetBinaryFromPath(const string& binary_name) {
   return string();
 }
 
-static string LocateBash() {
+static string LocateBashMaybe() {
   string msys_bash = GetMsysBash();
-  if (!msys_bash.empty()) {
-    return msys_bash;
-  }
-
-  string result = GetBinaryFromPath("bash.exe");
-  if (result.empty()) {
-    BAZEL_LOG(ERROR) << "bash.exe not found on PATH";
-  }
-  return result;
+  return msys_bash.empty() ? GetBinaryFromPath("bash.exe") : msys_bash;
 }
 
 string DetectBashAndExportBazelSh() {
-  string bash = blaze::GetEnv("BAZEL_SH");
+  string bash = blaze::GetPathEnv("BAZEL_SH");
   if (!bash.empty()) {
     return bash;
   }
 
   uint64_t start = blaze::GetMillisecondsMonotonic();
 
-  bash = LocateBash();
+  bash = LocateBashMaybe();
   uint64_t end = blaze::GetMillisecondsMonotonic();
-  BAZEL_LOG(INFO) << "BAZEL_SH detection took " << end - start
-                  << " msec, found " << bash.c_str();
-
-  if (!bash.empty()) {
+  if (bash.empty()) {
+    BAZEL_LOG(INFO) << "BAZEL_SH detection took " << end - start
+                    << " msec, not found";
+  } else {
+    BAZEL_LOG(INFO) << "BAZEL_SH detection took " << end - start
+                    << " msec, found " << bash.c_str();
     // Set process environment variable.
     blaze::SetEnv("BAZEL_SH", bash);
   }
-  return bash;
-}
 
-void DetectBashOrDie() {
-  string bash = DetectBashAndExportBazelSh();
-  if (bash.empty()) {
-    // TODO(bazel-team) should this be printed to stderr? If so, it should use
-    // BAZEL_LOG(ERROR)
-    printf(
-        "Bazel on Windows requires MSYS2 Bash, but we could not find it.\n"
-        "If you do not have it installed, you can install MSYS2 from\n"
-        "       http://repo.msys2.org/distrib/msys2-x86_64-latest.exe\n"
-        "\n"
-        "If you already have it installed but Bazel cannot find it,\n"
-        "set BAZEL_SH environment variable to its location:\n"
-        "       set BAZEL_SH=c:\\path\\to\\msys2\\usr\\bin\\bash.exe\n");
-    exit(1);
-  }
+  return bash;
 }
 
 void EnsurePythonPathOption(std::vector<string>* options) {

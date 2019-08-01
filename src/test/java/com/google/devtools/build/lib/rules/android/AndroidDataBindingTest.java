@@ -14,6 +14,7 @@
 package com.google.devtools.build.lib.rules.android;
 
 import static com.google.common.truth.Truth.assertThat;
+import static com.google.common.truth.Truth.assertWithMessage;
 import static com.google.devtools.build.lib.actions.util.ActionsTestUtil.getFirstArtifactEndingWith;
 import static com.google.devtools.build.lib.actions.util.ActionsTestUtil.prettyArtifactNames;
 import static com.google.devtools.build.lib.rules.java.JavaCompileActionTestHelper.getJavacArguments;
@@ -26,7 +27,6 @@ import com.google.devtools.build.lib.actions.extra.JavaCompileInfo;
 import com.google.devtools.build.lib.actions.util.ActionsTestUtil;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
 import com.google.devtools.build.lib.cmdline.RepositoryName;
-import com.google.devtools.build.lib.packages.util.MockCcSupport;
 import com.google.devtools.build.lib.rules.android.databinding.UsesDataBindingProvider;
 import com.google.devtools.build.lib.rules.java.JavaCompileAction;
 import java.util.List;
@@ -42,12 +42,7 @@ import org.junit.runners.JUnit4;
 public class AndroidDataBindingTest extends AndroidBuildViewTestCase {
   @Before
   public void setupCcToolchain() throws Exception {
-    getAnalysisMock()
-        .ccSupport()
-        .setupCrosstool(
-            mockToolsConfig,
-            /* appendToCurrentToolchain=*/ false,
-            MockCcSupport.emptyToolchainForCpu("armeabi-v7a"));
+    getAnalysisMock().ccSupport().setupCcToolchainConfigForCpu(mockToolsConfig, "armeabi-v7a");
   }
 
   private void writeDataBindingFiles() throws Exception {
@@ -126,13 +121,13 @@ public class AndroidDataBindingTest extends AndroidBuildViewTestCase {
         getFirstArtifactEndingWith(
             allArtifacts, "databinding/lib_with_data_binding/layout-info.zip");
     assertThat(getGeneratingSpawnActionArgs(libResourceInfoOutput))
-        .containsAllOf("--dataBindingInfoOut", libResourceInfoOutput.getExecPathString())
+        .containsAtLeast("--dataBindingInfoOut", libResourceInfoOutput.getExecPathString())
         .inOrder();
 
     Artifact binResourceInfoOutput =
         getFirstArtifactEndingWith(allArtifacts, "databinding/app/layout-info.zip");
     assertThat(getGeneratingSpawnActionArgs(binResourceInfoOutput))
-        .containsAllOf("--dataBindingInfoOut", binResourceInfoOutput.getExecPathString())
+        .containsAtLeast("--dataBindingInfoOut", binResourceInfoOutput.getExecPathString())
         .inOrder();
 
     // Java compilation includes the data binding annotation processor, the resource processor's
@@ -145,7 +140,7 @@ public class AndroidDataBindingTest extends AndroidBuildViewTestCase {
     assertThat(getProcessorNames(libCompileAction))
         .contains("android.databinding.annotationprocessor.ProcessDataBinding");
     assertThat(prettyArtifactNames(libCompileAction.getInputs()))
-        .containsAllOf(
+        .containsAtLeast(
             "java/android/library/databinding/lib_with_data_binding/layout-info.zip",
             "java/android/library/databinding/lib_with_data_binding/DataBindingInfo.java");
 
@@ -155,7 +150,7 @@ public class AndroidDataBindingTest extends AndroidBuildViewTestCase {
     assertThat(getProcessorNames(binCompileAction))
         .contains("android.databinding.annotationprocessor.ProcessDataBinding");
     assertThat(prettyArtifactNames(binCompileAction.getInputs()))
-        .containsAllOf(
+        .containsAtLeast(
             "java/android/binary/databinding/app/layout-info.zip",
             "java/android/binary/databinding/app/DataBindingInfo.java");
   }
@@ -221,14 +216,14 @@ public class AndroidDataBindingTest extends AndroidBuildViewTestCase {
             "-Aandroid.databinding.exportClassListTo=/tmp/exported_classes",
             "-Aandroid.databinding.modulePackage=android.binary",
             "-Aandroid.databinding.minApi=14");
-    assertThat(getJavacArguments(binCompileAction)).containsAllIn(expectedJavacopts);
+    assertThat(getJavacArguments(binCompileAction)).containsAtLeastElementsIn(expectedJavacopts);
 
     // Regression test for b/63134122
     JavaCompileInfo javaCompileInfo =
         binCompileAction
             .getExtraActionInfo(actionKeyContext)
             .getExtension(JavaCompileInfo.javaCompileInfo);
-    assertThat(javaCompileInfo.getJavacOptList()).containsAllIn(expectedJavacopts);
+    assertThat(javaCompileInfo.getJavacOptList()).containsAtLeastElementsIn(expectedJavacopts);
   }
 
   @Test
@@ -256,7 +251,7 @@ public class AndroidDataBindingTest extends AndroidBuildViewTestCase {
             + "dependent-lib-artifacts/java/android/lib_with_resource_files/databinding/"
             + "lib_with_resource_files/bin-files/android.lib_with_resource_files-";
     assertThat(appJarInputs)
-        .containsAllOf(
+        .containsAtLeast(
             "java/android/binary/databinding/app/layout-info.zip",
             libWithResourcesMetadataBaseDir + "android.lib_with_resource_files-setter_store.bin",
             libWithResourcesMetadataBaseDir + "android.lib_with_resource_files-layoutinfo.bin",
@@ -286,7 +281,7 @@ public class AndroidDataBindingTest extends AndroidBuildViewTestCase {
                 getFirstArtifactEndingWith(libArtifacts, "lib_no_resource_files.jar"));
     // The annotation processor is attached to the Java compilation:
     assertThat(getJavacArguments(libCompileAction))
-        .containsAllOf(
+        .containsAtLeast(
             "--processors", "android.databinding.annotationprocessor.ProcessDataBinding");
     // The dummy .java file with annotations that trigger the annotation process is present:
     assertThat(prettyArtifactNames(libCompileAction.getInputs()))
@@ -359,9 +354,7 @@ public class AndroidDataBindingTest extends AndroidBuildViewTestCase {
     ConfiguredTarget a = getConfiguredTarget("//java/a:a");
     final UsesDataBindingProvider usesDataBindingProvider = a.get(UsesDataBindingProvider.PROVIDER);
 
-    Truth.assertThat(usesDataBindingProvider)
-        .named(UsesDataBindingProvider.NAME)
-        .isNotNull();
+    assertWithMessage(UsesDataBindingProvider.NAME).that(usesDataBindingProvider).isNotNull();
 
     Truth.assertThat(
             usesDataBindingProvider
@@ -414,8 +407,8 @@ public class AndroidDataBindingTest extends AndroidBuildViewTestCase {
         ")");
     useConfiguration("--android_sdk=//sdk:sdk");
     ConfiguredTarget b = getConfiguredTarget("//java/b:b");
-    Truth.assertThat(b.get(UsesDataBindingProvider.PROVIDER))
-        .named("UsesDataBindingProvider")
+    assertWithMessage("UsesDataBindingProvider")
+        .that(b.get(UsesDataBindingProvider.PROVIDER))
         .isNotNull();
   }
 }

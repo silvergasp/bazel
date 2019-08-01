@@ -24,8 +24,6 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.devtools.build.lib.actions.ActionAnalysisMetadata;
 import com.google.devtools.build.lib.actions.ActionEnvironment;
-import com.google.devtools.build.lib.actions.ActionInput;
-import com.google.devtools.build.lib.actions.ActionInputHelper;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.EmptyRunfilesSupplier;
 import com.google.devtools.build.lib.actions.ExecutionRequirements;
@@ -35,10 +33,9 @@ import com.google.devtools.build.lib.actions.extra.JavaCompileInfo;
 import com.google.devtools.build.lib.analysis.FilesToRunProvider;
 import com.google.devtools.build.lib.analysis.RuleContext;
 import com.google.devtools.build.lib.analysis.actions.CustomCommandLine;
-import com.google.devtools.build.lib.analysis.actions.CustomCommandLine.VectorArg;
 import com.google.devtools.build.lib.analysis.actions.LazyWritePathsFileAction;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
-import com.google.devtools.build.lib.analysis.config.BuildConfiguration.StrictDepsMode;
+import com.google.devtools.build.lib.analysis.config.CoreOptionConverters.StrictDepsMode;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
@@ -162,9 +159,7 @@ public final class JavaCompileActionBuilder {
   private ImmutableList<Artifact> sourcePathEntries = ImmutableList.of();
   private ImmutableList<Artifact> extdirInputs = ImmutableList.of();
   private FilesToRunProvider javaBuilder;
-  private Artifact langtoolsJar;
   private NestedSet<Artifact> toolsJars = NestedSetBuilder.emptySet(Order.NAIVE_LINK_ORDER);
-  private ImmutableList<Artifact> instrumentationJars = ImmutableList.of();
   private PathFragment sourceGenDirectory;
   private PathFragment tempDirectory;
   private PathFragment classDirectory;
@@ -220,22 +215,7 @@ public final class JavaCompileActionBuilder {
       executableLine.addPath(javaBuilder.getExecutable().getExecPath());
       runfilesSupplier = javaBuilder.getRunfilesSupplier();
       toolsBuilder.addTransitive(javaBuilder.getFilesToRun());
-    } else if (!instrumentationJars.isEmpty()) {
-      toolsBuilder.add(javaBuilderJar);
-      executableLine
-          .addPath(javaExecutable)
-          .addAll(javacJvmOpts)
-          .addExecPaths(
-              "-cp",
-              VectorArg.join(ruleContext.getConfiguration().getHostPathSeparator())
-                  .each(
-                      ImmutableList.<Artifact>builder()
-                          .addAll(instrumentationJars)
-                          .add(javaBuilderJar)
-                          .build()))
-          .addDynamicString(javaSemantics.getJavaBuilderMainClass());
     } else {
-      // If there are no instrumentation jars, use simpler '-jar' option to launch JavaBuilder.
       toolsBuilder.add(javaBuilderJar);
       executableLine
           .addPath(javaExecutable)
@@ -243,7 +223,7 @@ public final class JavaCompileActionBuilder {
           .add("-jar")
           .addPath(javaBuilderJar.getExecPath());
     }
-    toolsBuilder.add(langtoolsJar).addTransitive(toolsJars).addAll(instrumentationJars);
+    toolsBuilder.addTransitive(toolsJars);
 
     ActionEnvironment actionEnvironment =
         ruleContext.getConfiguration().getActionEnvironment().addFixedVariables(UTF8_ENVIRONMENT);
@@ -287,27 +267,25 @@ public final class JavaCompileActionBuilder {
       classpathMode = JavaClasspathMode.OFF;
     }
 
-    ActionInput outputDepsProtoInput = null;
-    if (outputDepsProto != null) {
+    Artifact outputDepsProto = null;
+    if (this.outputDepsProto != null) {
+      outputDepsProto =
+          ruleContext.getDerivedArtifact(
+              FileSystemUtils.replaceExtension(
+                  this.outputDepsProto.relativeTo(outputJar.getRoot().getExecPath()), ".jdeps"),
+              outputJar.getRoot());
+      outputs.add(outputDepsProto);
       if (javaConfiguration.inmemoryJdepsFiles()) {
-        outputDepsProtoInput = ActionInputHelper.fromPath(outputDepsProto.getSafePathString());
         executionInfo =
             ImmutableMap.<String, String>builderWithExpectedSize(this.executionInfo.size() + 1)
                 .putAll(this.executionInfo)
                 .put(
                     ExecutionRequirements.REMOTE_EXECUTION_INLINE_OUTPUTS,
-                    outputDepsProtoInput.getExecPathString())
+                    outputDepsProto.getExecPathString())
                 .build();
-      } else {
-        Artifact outputDepsProtoArtifact =
-            ruleContext.getDerivedArtifact(
-                FileSystemUtils.replaceExtension(
-                    outputDepsProto.relativeTo(outputJar.getRoot().getExecPath()), ".jdeps"),
-                outputJar.getRoot());
-        outputDepsProtoInput = outputDepsProtoArtifact;
-        outputs.add(outputDepsProtoArtifact);
       }
     }
+
     NestedSet<Artifact> tools = toolsBuilder.build();
     mandatoryInputs.addTransitive(tools);
     JavaCompileAction javaCompileAction =
@@ -329,7 +307,7 @@ public final class JavaCompileActionBuilder {
             /* flagLine= */ buildParamFileContents(ruleContext.getConfiguration(), internedJcopts),
             /* configuration= */ ruleContext.getConfiguration(),
             /* dependencyArtifacts= */ compileTimeDependencyArtifacts,
-            /* outputDepsProto= */ outputDepsProtoInput,
+            /* outputDepsProto= */ outputDepsProto,
             /* classpathMode= */ classpathMode);
     ruleContext.getAnalysisEnvironment().registerAction(javaCompileAction);
     return javaCompileAction;
@@ -459,7 +437,7 @@ public final class JavaCompileActionBuilder {
 
   /**
    * Sets the strictness of Java dependency checking, see {@link
-   * com.google.devtools.build.lib.analysis.config.BuildConfiguration.StrictDepsMode}.
+   * com.google.devtools.build.lib.analysis.config.StrictDepsMode}.
    */
   public JavaCompileActionBuilder setStrictJavaDeps(StrictDepsMode strictDeps) {
     strictJavaDeps = strictDeps;
@@ -555,11 +533,6 @@ public final class JavaCompileActionBuilder {
     this.extraData = extraData;
   }
 
-  public JavaCompileActionBuilder setLangtoolsJar(Artifact langtoolsJar) {
-    this.langtoolsJar = langtoolsJar;
-    return this;
-  }
-
   /** Sets the tools jars. */
   public JavaCompileActionBuilder setToolsJars(NestedSet<Artifact> toolsJars) {
     checkNotNull(toolsJars, "toolsJars must not be null");
@@ -569,11 +542,6 @@ public final class JavaCompileActionBuilder {
 
   public JavaCompileActionBuilder setJavaBuilder(FilesToRunProvider javaBuilder) {
     this.javaBuilder = javaBuilder;
-    return this;
-  }
-
-  public JavaCompileActionBuilder setInstrumentationJars(Iterable<Artifact> instrumentationJars) {
-    this.instrumentationJars = ImmutableList.copyOf(instrumentationJars);
     return this;
   }
 

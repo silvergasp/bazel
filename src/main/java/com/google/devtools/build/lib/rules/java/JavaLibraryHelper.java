@@ -16,7 +16,6 @@ package com.google.devtools.build.lib.rules.java;
 
 import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.base.Preconditions.checkState;
-import static com.google.devtools.build.lib.analysis.config.BuildConfiguration.StrictDepsMode.OFF;
 import static com.google.devtools.build.lib.rules.java.JavaCommon.collectJavaCompilationArgs;
 
 import com.google.common.base.Preconditions;
@@ -24,7 +23,7 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterables;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.analysis.RuleContext;
-import com.google.devtools.build.lib.analysis.config.BuildConfiguration.StrictDepsMode;
+import com.google.devtools.build.lib.analysis.config.CoreOptionConverters.StrictDepsMode;
 import com.google.devtools.build.lib.rules.java.JavaConfiguration.JavaClasspathMode;
 import com.google.devtools.build.lib.rules.java.JavaRuleOutputJarsProvider.OutputJar;
 import java.util.ArrayList;
@@ -57,6 +56,7 @@ public final class JavaLibraryHelper {
   private JavaPluginInfoProvider plugins = JavaPluginInfoProvider.empty();
   private ImmutableList<String> javacOpts = ImmutableList.of();
   private ImmutableList<Artifact> sourcePathEntries = ImmutableList.of();
+  private final List<Artifact> additionalOutputs = new ArrayList<>();
 
   /** @see {@link #setCompilationStrictDepsMode}. */
   private StrictDepsMode strictDepsMode = StrictDepsMode.ERROR;
@@ -119,6 +119,11 @@ public final class JavaLibraryHelper {
     return this;
   }
 
+  public JavaLibraryHelper addAdditionalOutputs(Iterable<Artifact> outputs) {
+    Iterables.addAll(additionalOutputs, outputs);
+    return this;
+  }
+
   public JavaLibraryHelper setPlugins(JavaPluginInfoProvider plugins) {
     checkNotNull(plugins, "plugins must not be null");
     checkState(this.plugins.isEmpty());
@@ -168,7 +173,6 @@ public final class JavaLibraryHelper {
    * @param javaToolchainProvider used for retrieving misc java tools
    * @param hostJavabase the target of the host javabase used to retrieve the java executable and
    *     its necessary inputs
-   * @param jacocoInstrumental jacoco jars needed when running coverage
    * @param outputJarsBuilder populated with the outputs of the created actions
    * @param outputSourceJar if not-null, the output of an source jar action that will be created
    */
@@ -176,7 +180,6 @@ public final class JavaLibraryHelper {
       JavaSemantics semantics,
       JavaToolchainProvider javaToolchainProvider,
       JavaRuntimeInfo hostJavabase,
-      Iterable<Artifact> jacocoInstrumental,
       JavaRuleOutputJarsProvider.Builder outputJarsBuilder,
       boolean createOutputSourceJar,
       @Nullable Artifact outputSourceJar) {
@@ -184,28 +187,30 @@ public final class JavaLibraryHelper {
         semantics,
         javaToolchainProvider,
         hostJavabase,
-        jacocoInstrumental,
         outputJarsBuilder,
         createOutputSourceJar,
         outputSourceJar,
         /* javaInfoBuilder= */ null,
-        ImmutableList.of()); // ignored when javaInfoBuilder is null
+        ImmutableList.of(), // ignored when javaInfoBuilder is null
+        ImmutableList.of());
   }
 
   public JavaCompilationArtifacts build(
       JavaSemantics semantics,
       JavaToolchainProvider javaToolchainProvider,
       JavaRuntimeInfo hostJavabase,
-      Iterable<Artifact> jacocoInstrumental,
       JavaRuleOutputJarsProvider.Builder outputJarsBuilder,
       boolean createOutputSourceJar,
       @Nullable Artifact outputSourceJar,
       @Nullable JavaInfo.Builder javaInfoBuilder,
-      Iterable<JavaGenJarsProvider> transitiveJavaGenJars) {
+      Iterable<JavaGenJarsProvider> transitiveJavaGenJars,
+      ImmutableList<Artifact> additionalJavaBaseInputs) {
+
     Preconditions.checkState(output != null, "must have an output file; use setOutput()");
     Preconditions.checkState(
         !createOutputSourceJar || outputSourceJar != null,
         "outputSourceJar cannot be null when createOutputSourceJar is true");
+
     JavaTargetAttributes.Builder attributes = new JavaTargetAttributes.Builder(semantics);
     attributes.addSourceJars(sourceJars);
     attributes.addSourceFiles(sourceFiles);
@@ -215,6 +220,7 @@ public final class JavaLibraryHelper {
     attributes.setInjectingRuleKind(injectingRuleKind);
     attributes.setSourcePath(sourcePathEntries);
     JavaCommon.addPlugins(attributes, plugins);
+    attributes.addAdditionalOutputs(additionalOutputs);
 
     for (Artifact resource : resources) {
       attributes.addResource(
@@ -234,7 +240,7 @@ public final class JavaLibraryHelper {
             attributes,
             javaToolchainProvider,
             hostJavabase,
-            jacocoInstrumental);
+            additionalJavaBaseInputs);
     Artifact manifestProtoOutput = helper.createManifestProtoOutput(output);
 
     Artifact genSourceJar = null;
@@ -252,7 +258,6 @@ public final class JavaLibraryHelper {
             output,
             manifestProtoOutput,
             genSourceJar,
-            /* instrumentationMetadataJar= */ null,
             nativeHeaderOutput);
 
     Artifact iJar = null;
@@ -349,10 +354,9 @@ public final class JavaLibraryHelper {
 
     attributes.addCompileTimeClassPathEntries(argsProvider.getTransitiveCompileTimeJars());
     attributes.addRuntimeClassPathEntries(argsProvider.getRuntimeJars());
-    attributes.addInstrumentationMetadataEntries(argsProvider.getInstrumentationMetadata());
   }
 
   private boolean isStrict() {
-    return strictDepsMode != OFF;
+    return strictDepsMode != StrictDepsMode.OFF;
   }
 }

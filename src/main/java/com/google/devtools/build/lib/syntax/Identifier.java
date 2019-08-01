@@ -57,22 +57,6 @@ public final class Identifier extends Expression {
     buffer.append(name);
   }
 
-  @Override
-  public boolean equals(@Nullable Object object) {
-    // TODO(laurentlb): Remove this. AST nodes should probably not be comparable.
-    if (object instanceof Identifier) {
-      Identifier that = (Identifier) object;
-      return this.name.equals(that.name);
-    }
-    return false;
-  }
-
-  @Override
-  public int hashCode() {
-    // TODO(laurentlb): Remove this.
-    return name.hashCode();
-  }
-
   void setScope(ValidationEnvironment.Scope scope) {
     Preconditions.checkState(this.scope == null);
     this.scope = scope;
@@ -140,8 +124,8 @@ public final class Identifier extends Expression {
     if (name.equals("REPOSITORY_NAME")) {
       return new EvalException(
           getLocation(),
-          "The value 'REPOSITORY_NAME' has been removed in favor of 'repository_name()', "
-              + "please use the latter ("
+          "The value 'REPOSITORY_NAME' has been removed in favor of 'repository_name()', please"
+              + " use the latter ("
               + "https://docs.bazel.build/versions/master/skylark/lib/native.html#repository_name).");
     }
     return null;
@@ -164,5 +148,28 @@ public final class Identifier extends Expression {
   /** @return The {@link Identifier} of the provided name. */
   public static Identifier of(String name) {
     return new Identifier(name);
+  }
+
+  /** Returns true if the string is a syntactically valid identifier. */
+  public static boolean isValid(String name) {
+    // TODO(laurentlb): Handle Unicode characters.
+    if (name.isEmpty()) {
+      return false;
+    }
+    for (int i = 0; i < name.length(); i++) {
+      char c = name.charAt(i);
+      if ((c >= 'a' && c <= 'z')
+          || (c >= 'A' && c <= 'Z')
+          || (c >= '0' && c <= '9')
+          || (c == '_')) {
+        continue;
+      }
+      return false;
+    }
+    if (name.charAt(0) >= '0' && name.charAt(0) <= '9') {
+      return false;
+    }
+
+    return true;
   }
 }

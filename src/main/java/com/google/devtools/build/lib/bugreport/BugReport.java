@@ -13,6 +13,8 @@
 // limitations under the License.
 package com.google.devtools.build.lib.bugreport;
 
+import static com.google.common.base.Strings.isNullOrEmpty;
+
 import com.google.common.base.Joiner;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Throwables;
@@ -38,6 +40,8 @@ import javax.annotation.Nullable;
  */
 public abstract class BugReport {
 
+  static final BugReporter REPORTER_INSTANCE = BugReport::sendBugReport;
+
   private BugReport() {}
 
   private static final Logger logger = Logger.getLogger(BugReport.class.getName());
@@ -60,8 +64,11 @@ public abstract class BugReport {
    */
   public interface BlazeRuntimeInterface {
     String getProductName();
-    void notifyCommandComplete(int exitCode);
-    void shutdownOnCrash();
+    /**
+     * Perform all possible clean-up before crashing, posting events etc. so long as crashing isn't
+     * significantly delayed or another crash isn't triggered.
+     */
+    void cleanUpForCrash(ExitCode exitCode);
   }
 
   public static void setRuntime(BlazeRuntimeInterface newRuntime) {
@@ -118,15 +125,15 @@ public abstract class BugReport {
       return;
     }
 
-    logException(exception, filterClientEnv(args), values);
+    logException(exception, filterArgs(args), values);
   }
 
   private static void logCrash(Throwable throwable, boolean sendBugReport, String... args) {
-    logger.severe("Crash: " + Throwables.getStackTraceAsString(throwable));
+    logger.severe("Crash: " + throwable + " " + Throwables.getStackTraceAsString(throwable));
     if (sendBugReport) {
       BugReport.sendBugReport(throwable, Arrays.asList(args));
     }
-    BugReport.printBug(OutErr.SYSTEM_OUT_ERR, throwable);
+    BugReport.printBug(OutErr.SYSTEM_OUT_ERR, throwable, /* oomMessage = */ null);
     System.err.println("ERROR: " + getProductName() + " crash in async thread:");
     throwable.printStackTrace();
   }
@@ -138,8 +145,8 @@ public abstract class BugReport {
    * <p>Has no effect if another crash has already been handled by {@link BugReport}.
    */
   public static void handleCrashWithoutSendingBugReport(
-      Throwable throwable, int exitCode, String... args) {
-    handleCrash(throwable, /*sendBugReport=*/ false, Integer.valueOf(exitCode), args);
+      Throwable throwable, ExitCode exitCode, String... args) {
+    handleCrash(throwable, /*sendBugReport=*/ false, exitCode, args);
   }
 
   /**
@@ -148,8 +155,8 @@ public abstract class BugReport {
    *
    * <p>Has no effect if another crash has already been handled by {@link BugReport}.
    */
-  public static void handleCrash(Throwable throwable, int exitCode, String... args) {
-    handleCrash(throwable, /*sendBugReport=*/ true, Integer.valueOf(exitCode), args);
+  public static void handleCrash(Throwable throwable, ExitCode exitCode, String... args) {
+    handleCrash(throwable, /*sendBugReport=*/ true, exitCode, args);
   }
 
   /**
@@ -163,10 +170,9 @@ public abstract class BugReport {
   }
 
   private static void handleCrash(
-      Throwable throwable, boolean sendBugReport, @Nullable Integer exitCode, String... args) {
-    int exitCodeToUse = exitCode == null
-        ? getExitCodeForThrowable(throwable).getNumericExitCode()
-        : exitCode.intValue();
+      Throwable throwable, boolean sendBugReport, @Nullable ExitCode exitCode, String... args) {
+    ExitCode exitCodeToUse = exitCode == null ? getExitCodeForThrowable(throwable) : exitCode;
+    int numericExitCode = exitCodeToUse.getNumericExitCode();
     try {
       synchronized (LOCK) {
         if (IN_TEST) {
@@ -175,21 +181,16 @@ public abstract class BugReport {
         logCrash(throwable, sendBugReport, args);
         try {
           if (runtime != null) {
-            runtime.notifyCommandComplete(exitCodeToUse);
-            // We don't call runtime#shutDown() here because all it does is shut down the modules,
-            // and who knows if they can be trusted. Instead, we call runtime#shutdownOnCrash()
-            // which attempts to cleanly shutdown those modules that might have something pending
-            // to do as a best-effort operation.
-            runtime.shutdownOnCrash();
+            runtime.cleanUpForCrash(exitCodeToUse);
           }
-          CustomExitCodePublisher.maybeWriteExitStatusFile(exitCodeToUse);
+          CustomExitCodePublisher.maybeWriteExitStatusFile(numericExitCode);
         } finally {
           // Avoid shutdown deadlock issues: If an application shutdown hook crashes, it will
           // trigger our Blaze crash handler (this method). Calling System#exit() here, would
           // therefore induce a deadlock. This call would block on the shutdown sequence completing,
           // but the shutdown sequence would in turn be blocked on this thread finishing. Instead,
           // exit fast via halt().
-          Runtime.getRuntime().halt(exitCodeToUse);
+          Runtime.getRuntime().halt(numericExitCode);
         }
       }
     } catch (Throwable t) {
@@ -206,7 +207,7 @@ public abstract class BugReport {
       System.err.println("Exception encountered during BugReport#handleCrash:");
       t.printStackTrace(System.err);
 
-      Runtime.getRuntime().halt(exitCodeToUse);
+      Runtime.getRuntime().halt(numericExitCode);
     }
   }
 
@@ -230,29 +231,38 @@ public abstract class BugReport {
    * @param outErr where to write the output
    * @param e the exception thrown
    */
-  public static void printBug(OutErr outErr, Throwable e) {
+  public static void printBug(OutErr outErr, Throwable e, String oomMessage) {
     if (e instanceof OutOfMemoryError) {
       outErr.printErr(
-          e.getMessage() + "\n\nERROR: " + getProductName() + " ran out of memory and crashed.\n");
+          e.getMessage()
+              + "\n\nERROR: "
+              + getProductName()
+              + " ran out of memory and crashed."
+              + (isNullOrEmpty(oomMessage) ? "" : (" " + oomMessage))
+              + "\n");
     } else {
       printThrowableTo(outErr, e);
     }
   }
 
   /**
-   * Filters {@code args} by removing any item that starts with "--client_env",
-   * then returns this as an immutable list.
+   * Filters {@code args} by removing superfluous items:
    *
-   * <p>The client's environment variables may contain sensitive data, so we filter it out.
+   * <ul>
+   *   <li>The client's environment variables may contain sensitive data, so we filter it out.
+   *   <li>{@code --default_override} is spammy.
+   * </ul>
    */
-  private static List<String> filterClientEnv(Iterable<String> args) {
+  private static List<String> filterArgs(Iterable<String> args) {
     if (args == null) {
       return null;
     }
 
     ImmutableList.Builder<String> filteredArgs = ImmutableList.builder();
     for (String arg : args) {
-      if (arg != null && !arg.startsWith("--client_env")) {
+      if (arg != null
+          && !arg.startsWith("--client_env=")
+          && !arg.startsWith("--default_override=")) {
         filteredArgs.add(arg);
       }
     }

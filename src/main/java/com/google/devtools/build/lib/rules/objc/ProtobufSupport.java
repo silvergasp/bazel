@@ -30,7 +30,6 @@ import com.google.devtools.build.lib.analysis.actions.CustomCommandLine.VectorAr
 import com.google.devtools.build.lib.analysis.actions.FileWriteAction;
 import com.google.devtools.build.lib.analysis.actions.SpawnAction;
 import com.google.devtools.build.lib.analysis.config.BuildConfiguration;
-import com.google.devtools.build.lib.analysis.configuredtargets.RuleConfiguredTarget.Mode;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
 import com.google.devtools.build.lib.collect.nestedset.NestedSetBuilder;
 import com.google.devtools.build.lib.packages.RuleClass.ConfiguredTargetFactory.RuleErrorException;
@@ -70,7 +69,6 @@ final class ProtobufSupport {
   private final RuleContext ruleContext;
   private final BuildConfiguration buildConfiguration;
   private final ProtoAttributes attributes;
-  private final IntermediateArtifacts intermediateArtifacts;
   private final Set<PathFragment> dylibHandledProtoPaths;
   private final Iterable<ObjcProtoProvider> objcProtoProviders;
   private final NestedSet<Artifact> portableProtoFilters;
@@ -101,38 +99,9 @@ final class ProtobufSupport {
    * @param ruleContext context this proto library is constructed in
    * @param buildConfiguration the configuration from which to get prerequisites when building proto
    *     targets in a split configuration
-   * @param protoInfos the list of ProtoInfos that this proto support should process
-   * @param objcProtoProviders the list of ObjcProtoProviders that this proto support should process
-   */
-  public ProtobufSupport(
-      RuleContext ruleContext,
-      BuildConfiguration buildConfiguration,
-      Iterable<ProtoInfo> protoInfos,
-      Iterable<ObjcProtoProvider> objcProtoProviders,
-      NestedSet<Artifact> portableProtoFilters) {
-    this(
-        ruleContext,
-        buildConfiguration,
-        NestedSetBuilder.<Artifact>stableOrder().build(),
-        protoInfos,
-        objcProtoProviders,
-        portableProtoFilters,
-        null);
-  }
-
-  /**
-   * Creates a new proto support for the protobuf library. This support code bundles up all the
-   * transitive protos within the groups in which they were defined. We use that information to
-   * minimize the number of inputs per generation/compilation actions by only providing what is
-   * really needed to the actions.
-   *
-   * @param ruleContext context this proto library is constructed in
-   * @param buildConfiguration the configuration from which to get prerequisites when building proto
-   *     targets in a split configuration
    * @param dylibHandledProtos a set of protos linked into dynamic libraries that the current rule
    *     depends on; these protos will not be output by this support, thus avoiding duplicate
    *     symbols
-   * @param protoInfos the list of ProtoInfos that this proto support should process
    * @param objcProtoProviders the list of ObjcProtoProviders that this proto support should process
    * @param toolchain if not null, the toolchain to override the default toolchain for the rule
    *     context.
@@ -141,7 +110,6 @@ final class ProtobufSupport {
       RuleContext ruleContext,
       BuildConfiguration buildConfiguration,
       NestedSet<Artifact> dylibHandledProtos,
-      Iterable<ProtoInfo> protoInfos,
       Iterable<ObjcProtoProvider> objcProtoProviders,
       NestedSet<Artifact> portableProtoFilters,
       CcToolchainProvider toolchain) {
@@ -151,9 +119,7 @@ final class ProtobufSupport {
     this.dylibHandledProtoPaths = runfilesPaths(dylibHandledProtos.toSet());
     this.objcProtoProviders = objcProtoProviders;
     this.portableProtoFilters = portableProtoFilters;
-    this.intermediateArtifacts =
-        ObjcRuleClasses.intermediateArtifacts(ruleContext, buildConfiguration);
-    this.inputsToOutputsMap = getInputsToOutputsMap(attributes, protoInfos, objcProtoProviders);
+    this.inputsToOutputsMap = getInputsToOutputsMap(attributes, objcProtoProviders);
     this.toolchain = toolchain;
   }
 
@@ -161,7 +127,7 @@ final class ProtobufSupport {
    * Registers the proto generation actions. These actions generate the ObjC/CPP code to be compiled
    * by this rule.
    */
-  public ProtobufSupport registerGenerationActions() {
+  public ProtobufSupport registerGenerationActions() throws InterruptedException {
     int actionId = 0;
 
     for (ImmutableSet<Artifact> inputProtos : orderedInputOutputKeySet()) {
@@ -170,29 +136,7 @@ final class ProtobufSupport {
       actionId++;
     }
 
-    if (!isLinkingTarget()) {
-      registerModuleMapGenerationAction();
-    }
-
     return this;
-  }
-
-  private void registerModuleMapGenerationAction() {
-    CompilationArtifacts.Builder moduleMapCompilationArtifacts =
-        new CompilationArtifacts.Builder()
-            .setIntermediateArtifacts(intermediateArtifacts)
-            .addAdditionalHdrs(getProtobufHeaders())
-            .addAdditionalHdrs(
-                getGeneratedProtoOutputs(inputsToOutputsMap.values(), HEADER_SUFFIX));
-
-    CompilationSupport compilationSupport =
-        new CompilationSupport.Builder()
-            .setRuleContext(ruleContext)
-            .setCompilationAttributes(new CompilationAttributes.Builder().build())
-            .doNotUsePch()
-            .build();
-
-    compilationSupport.registerGenerateModuleMapAction(moduleMapCompilationArtifacts.build());
   }
 
   /**
@@ -255,10 +199,6 @@ final class ProtobufSupport {
     Iterable<PathFragment> includes = ImmutableList.of(getWorkspaceRelativeOutputDir());
     ObjcCommon.Builder commonBuilder = new ObjcCommon.Builder(ruleContext);
 
-    if (!isLinkingTarget()) {
-      commonBuilder.setIntermediateArtifacts(intermediateArtifacts).setHasModuleMap();
-    }
-
     CompilationArtifacts.Builder compilationArtifacts =
         new CompilationArtifacts.Builder()
             .setIntermediateArtifacts(getUniqueIntermediateArtifactsForSourceCompile());
@@ -271,12 +211,7 @@ final class ProtobufSupport {
     ObjcCommon common =
         getCommon(getUniqueIntermediateArtifactsForSourceCompile(), compilationArtifacts.build());
     commonBuilder.addDepObjcProviders(ImmutableSet.of(common.getObjcProvider()));
-
-    if (isLinkingTarget()) {
-      commonBuilder.addIncludes(includes);
-    } else {
-      commonBuilder.addDirectDependencyIncludes(includes);
-    }
+    commonBuilder.addIncludes(includes);
 
     return Optional.of(commonBuilder.build().getObjcProvider());
   }
@@ -306,9 +241,7 @@ final class ProtobufSupport {
   }
 
   private static ImmutableSetMultimap<ImmutableSet<Artifact>, Artifact> getInputsToOutputsMap(
-      ProtoAttributes attributes,
-      Iterable<ProtoInfo> protoInfos,
-      Iterable<ObjcProtoProvider> objcProtoProviders) {
+      ProtoAttributes attributes, Iterable<ObjcProtoProvider> objcProtoProviders) {
     ImmutableList.Builder<NestedSet<Artifact>> protoSets =
         new ImmutableList.Builder<NestedSet<Artifact>>();
 
@@ -317,16 +250,13 @@ final class ProtobufSupport {
     for (ObjcProtoProvider objcProtoProvider : objcProtoProviders) {
       protoSets.addAll(objcProtoProvider.getProtoGroups());
     }
-    for (ProtoInfo protoInfo : protoInfos) {
-      protoSets.add(protoInfo.getTransitiveProtoSources());
-    }
 
     HashMap<Artifact, Set<Artifact>> protoToGroupMap = new HashMap<>();
 
     // For each proto in each proto group, store the smallest group in which it is contained. This
     // group will be considered the smallest input group with which the proto can be generated.
     for (NestedSet<Artifact> nestedProtoSet : protoSets.build()) {
-      ImmutableSet<Artifact> protoSet = ImmutableSet.copyOf(nestedProtoSet.toSet());
+      ImmutableSet<Artifact> protoSet = nestedProtoSet.toSet();
       for (Artifact proto : protoSet) {
         // If the proto is well known, don't store it as we don't need to generate it; it comes
         // generated with the runtime library.
@@ -391,18 +321,11 @@ final class ProtobufSupport {
   private ObjcCommon getCommon(
       IntermediateArtifacts intermediateArtifacts, CompilationArtifacts compilationArtifacts)
       throws InterruptedException {
-    ObjcCommon.Builder commonBuilder =
-        new ObjcCommon.Builder(ruleContext)
-            .setIntermediateArtifacts(intermediateArtifacts)
-            .setCompilationArtifacts(compilationArtifacts);
-    if (isLinkingTarget()) {
-      commonBuilder.addIncludes(getProtobufHeaderSearchPaths());
-    } else {
-      commonBuilder.addDepObjcProviders(
-          ruleContext.getPrerequisites(
-              ObjcRuleClasses.PROTO_LIB_ATTR, Mode.TARGET, ObjcProvider.SKYLARK_CONSTRUCTOR));
-    }
-    return commonBuilder.build();
+    return new ObjcCommon.Builder(ruleContext)
+        .setIntermediateArtifacts(intermediateArtifacts)
+        .setCompilationArtifacts(compilationArtifacts)
+        .addIncludes(getProtobufHeaderSearchPaths())
+        .build();
   }
 
   private void addCompilationArtifacts(
@@ -415,12 +338,8 @@ final class ProtobufSupport {
 
     compilationArtifactsBuilder
         .addAdditionalHdrs(getGeneratedProtoOutputs(filteredInputProtos, HEADER_SUFFIX))
-        .addAdditionalHdrs(getProtobufHeaders());
-
-    if (isLinkingTarget()) {
-      compilationArtifactsBuilder.addNonArcSrcs(
-          getProtoSourceFilesForCompilation(outputProtoFiles));
-    }
+        .addAdditionalHdrs(getProtobufHeaders())
+        .addNonArcSrcs(getProtoSourceFilesForCompilation(outputProtoFiles));
   }
 
   private Iterable<Artifact> getProtoSourceFilesForCompilation(
@@ -521,12 +440,6 @@ final class ProtobufSupport {
       }
     }
     return builder.build();
-  }
-
-  private boolean isLinkingTarget() {
-    // Since this is the ProtobufSupport helper class, check whether the current target is
-    // an objc_proto_library. If not, it must be a linking rule (e.g. apple_binary).
-    return !attributes.isObjcProtoLibrary();
   }
 
   /**

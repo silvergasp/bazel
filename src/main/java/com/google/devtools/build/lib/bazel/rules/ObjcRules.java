@@ -35,7 +35,6 @@ import com.google.devtools.build.lib.rules.objc.ObjcConfigurationLoader;
 import com.google.devtools.build.lib.rules.objc.ObjcImportRule;
 import com.google.devtools.build.lib.rules.objc.ObjcLibraryRule;
 import com.google.devtools.build.lib.rules.objc.ObjcProtoAspect;
-import com.google.devtools.build.lib.rules.objc.ObjcProtoLibraryRule;
 import com.google.devtools.build.lib.rules.objc.ObjcRuleClasses;
 import com.google.devtools.build.lib.skylarkbuildapi.apple.AppleBootstrap;
 
@@ -68,24 +67,20 @@ public class ObjcRules implements RuleSet {
     builder.addNativeAspectClass(objcProtoAspect);
     builder.addRuleDefinition(new AppleBinaryRule(objcProtoAspect));
     builder.addRuleDefinition(new AppleStaticLibraryRule(objcProtoAspect));
-    builder.addRuleDefinition(new ObjcProtoLibraryRule(objcProtoAspect));
 
     builder.addRuleDefinition(new AppleCcToolchainRule());
     builder.addRuleDefinition(new AppleToolchain.RequiresXcodeConfigRule(toolsRepository));
     builder.addRuleDefinition(new ObjcImportRule());
     builder.addRuleDefinition(new ObjcLibraryRule());
     builder.addRuleDefinition(new ObjcRuleClasses.CoptsRule());
-    builder.addRuleDefinition(new ObjcRuleClasses.BundlingRule());
     builder.addRuleDefinition(new ObjcRuleClasses.DylibDependingRule(objcProtoAspect));
     builder.addRuleDefinition(new ObjcRuleClasses.CompilingRule());
     builder.addRuleDefinition(new ObjcRuleClasses.LinkingRule(objcProtoAspect));
     builder.addRuleDefinition(new ObjcRuleClasses.PlatformRule());
     builder.addRuleDefinition(new ObjcRuleClasses.MultiArchPlatformRule(objcProtoAspect));
-    builder.addRuleDefinition(new ObjcRuleClasses.ResourcesRule());
     builder.addRuleDefinition(new ObjcRuleClasses.AlwaysLinkRule());
     builder.addRuleDefinition(new ObjcRuleClasses.SdkFrameworksDependerRule());
     builder.addRuleDefinition(new ObjcRuleClasses.CompileDependencyRule());
-    builder.addRuleDefinition(new ObjcRuleClasses.ResourceToolsRule());
     builder.addRuleDefinition(new ObjcRuleClasses.XcrunRule());
     builder.addRuleDefinition(new ObjcRuleClasses.LibtoolRule());
     builder.addRuleDefinition(new ObjcRuleClasses.CrosstoolRule());

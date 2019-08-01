@@ -230,8 +230,8 @@ public final class BlazeOptionHandler {
   }
 
   /**
-   * TODO(bazel-team): When we move BuildConfiguration.Options options to be defined in starlark,
-   * make sure they're not passed in here during {@link #getOptionsResult}.
+   * TODO(bazel-team): When we move CoreOptions options to be defined in starlark, make sure they're
+   * not passed in here during {@link #getOptionsResult}.
    */
   ExitCode parseStarlarkOptions(CommandEnvironment env, ExtendedEventHandler eventHandler) {
     // For now, restrict starlark options to commands that already build to ensure that loading
@@ -244,11 +244,11 @@ public final class BlazeOptionHandler {
       return ExitCode.SUCCESS;
     }
     try {
-      StarlarkOptionsParser.newStarlarkOptionsParser(env, optionsParser, runtime)
+      StarlarkOptionsParser.newStarlarkOptionsParser(env, optionsParser)
           .parse(commandAnnotation, eventHandler);
     } catch (OptionsParsingException e) {
-      eventHandler.handle(Event.error(e.getMessage()));
-      return ExitCode.COMMAND_LINE_ERROR;
+      env.getReporter().handle(Event.error(e.getMessage()));
+      return ExitCode.PARSING_FAILURE;
     }
     return ExitCode.SUCCESS;
   }

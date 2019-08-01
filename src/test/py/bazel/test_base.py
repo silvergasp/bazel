@@ -66,6 +66,34 @@ class TestBase(unittest.TestCase):
 
   def tearDown(self):
     self.RunBazel(['shutdown'])
+    super(TestBase, self).tearDown()
+
+  def _AssertExitCodeIs(self,
+                        actual_exit_code,
+                        exit_code_pred,
+                        expectation_msg,
+                        stderr_lines,
+                        stdout_lines=None):
+    """Assert that `actual_exit_code` == `expected_exit_code`."""
+    if not exit_code_pred(actual_exit_code):
+      # If stdout was provided, include it in the output. This is mostly useful
+      # for tests.
+      stdout = ''
+      if stdout_lines:
+        stdout = '\n'.join([
+            '(start stdout)----------------------------------------',
+        ] + stdout_lines + [
+            '(end stdout)------------------------------------------',
+        ])
+
+      self.fail('\n'.join([
+          'Bazel exited with %d %s, stderr:' %
+          (actual_exit_code, expectation_msg),
+          stdout,
+          '(start stderr)----------------------------------------',
+      ] + (stderr_lines or []) + [
+          '(end stderr)------------------------------------------',
+      ]))
 
   def AssertExitCode(self,
                      actual_exit_code,
@@ -73,23 +101,55 @@ class TestBase(unittest.TestCase):
                      stderr_lines,
                      stdout_lines=None):
     """Assert that `actual_exit_code` == `expected_exit_code`."""
-    if actual_exit_code != expected_exit_code:
-      # If stdout was provided, include it in the output. This is mostly useful
-      # for tests.
-      stdout = '\n'.join([
-          '(start stdout)----------------------------------------',
-      ] + stdout_lines + [
-          '(end stdout)------------------------------------------',
-      ]) if stdout_lines is not None else ''
+    self._AssertExitCodeIs(actual_exit_code, lambda x: x == expected_exit_code,
+                           '(expected %d)' % expected_exit_code, stderr_lines,
+                           stdout_lines)
 
-      self.fail('\n'.join([
-          'Bazel exited with %d (expected %d), stderr:' % (actual_exit_code,
-                                                           expected_exit_code),
-          stdout,
-          '(start stderr)----------------------------------------',
-      ] + (stderr_lines or []) + [
-          '(end stderr)------------------------------------------',
-      ]))
+  def AssertNotExitCode(self,
+                        actual_exit_code,
+                        not_expected_exit_code,
+                        stderr_lines,
+                        stdout_lines=None):
+    """Assert that `actual_exit_code` != `not_expected_exit_code`."""
+    self._AssertExitCodeIs(
+        actual_exit_code, lambda x: x != not_expected_exit_code,
+        '(against expectations)', stderr_lines, stdout_lines)
+
+  def AssertFileContentContains(self, file_path, entry):
+    with open(file_path, 'r') as f:
+      if entry not in f.read():
+        self.fail('File "%s" does not contain "%s"' % (file_path, entry))
+
+  def AssertFileContentNotContains(self, file_path, entry):
+    with open(file_path, 'r') as f:
+      if entry in f.read():
+        self.fail('File "%s" does contain "%s"' % (file_path, entry))
+
+  def CreateWorkspaceWithDefaultRepos(self, path, lines=None):
+    rule_definition = [
+        'load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")'
+    ]
+    rule_definition.extend(self.GetDefaultRepoRules())
+    self.ScratchFile(path, rule_definition + (lines if lines else []))
+
+  def GetDefaultRepoRules(self):
+    return self.GetCcRulesRepoRule()
+
+  def GetCcRulesRepoRule(self):
+    sha256 = '36fa66d4d49debd71d05fba55c1353b522e8caef4a20f8080a3d17cdda001d89'
+    strip_pfx = 'rules_cc-0d5f3f2768c6ca2faca0079a997a97ce22997a0c'
+    url1 = ('https://mirror.bazel.build/github.com/bazelbuild/rules_cc/'
+            'archive/0d5f3f2768c6ca2faca0079a997a97ce22997a0c.zip')
+    url2 = ('https://github.com/bazelbuild/rules_cc/'
+            'archive/0d5f3f2768c6ca2faca0079a997a97ce22997a0c.zip')
+    return [
+        'http_archive(',
+        '    name = "rules_cc",',
+        '    sha256 = "%s",' % sha256,
+        '    strip_prefix = "%s",' % strip_pfx,
+        '    urls = ["%s", "%s"],' % (url1, url2),
+        ')',
+    ]
 
   @staticmethod
   def GetEnv(name, default=None):
@@ -364,9 +424,13 @@ class TestBase(unittest.TestCase):
               TestBase.GetEnv('BAZEL_SH',
                               'c:\\tools\\msys64\\usr\\bin\\bash.exe'),
       }
-      java_home = TestBase.GetEnv('JAVA_HOME', '')
-      if java_home:
-        env['JAVA_HOME'] = java_home
+      for k in [
+          'JAVA_HOME', 'BAZEL_VC', 'BAZEL_VS', 'BAZEL_VC_FULL_VERSION',
+          'BAZEL_WINSDK_FULL_VERSION'
+      ]:
+        v = TestBase.GetEnv(k, '')
+        if v:
+          env[k] = v
     else:
       env = {'HOME': os.path.join(self._temp, 'home')}
 

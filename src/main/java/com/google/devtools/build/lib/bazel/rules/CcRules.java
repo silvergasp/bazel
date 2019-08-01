@@ -38,8 +38,11 @@ import com.google.devtools.build.lib.rules.cpp.CppRuleClasses.CcIncludeScanningR
 import com.google.devtools.build.lib.rules.cpp.CpuTransformer;
 import com.google.devtools.build.lib.rules.cpp.FdoPrefetchHintsRule;
 import com.google.devtools.build.lib.rules.cpp.FdoProfileRule;
+import com.google.devtools.build.lib.rules.cpp.GoogleLegacyStubs;
 import com.google.devtools.build.lib.rules.platform.PlatformRules;
 import com.google.devtools.build.lib.skylarkbuildapi.cpp.CcBootstrap;
+import com.google.devtools.build.lib.util.ResourceFileLoader;
+import java.io.IOException;
 
 /**
  * Rules for C++ support in Bazel.
@@ -75,10 +78,22 @@ public class CcRules implements RuleSet {
     builder.addRuleDefinition(new CcIncludeScanningRule());
     builder.addRuleDefinition(new FdoProfileRule());
     builder.addRuleDefinition(new FdoPrefetchHintsRule());
+    builder.addSkylarkBootstrap(
+        new CcBootstrap(
+            new BazelCcModule(),
+            CcInfo.PROVIDER,
+            CcToolchainConfigInfo.PROVIDER,
+            new GoogleLegacyStubs.PyWrapCcHelper(),
+            new GoogleLegacyStubs.GoWrapCcHelper(),
+            new GoogleLegacyStubs.PyWrapCcInfoProvider(),
+            new GoogleLegacyStubs.PyCcLinkParamsProvider()));
 
-    builder.addSkylarkBootstrap(new CcBootstrap(new BazelCcModule()));
-    builder.addSkylarkAccessibleTopLevels("CcInfo", CcInfo.PROVIDER);
-    builder.addSkylarkAccessibleTopLevels("CcToolchainConfigInfo", CcToolchainConfigInfo.PROVIDER);
+    try {
+      builder.addWorkspaceFileSuffix(
+          ResourceFileLoader.loadResource(JavaRules.class, "coverage.WORKSPACE"));
+    } catch (IOException e) {
+      throw new IllegalStateException(e);
+    }
   }
 
   @Override

@@ -38,6 +38,7 @@ filegroup(
     name = "test-deps-wo-bazel",
     testonly = 1,
     srcs = [
+        "cc_api_rules.bzl",
         "remote_helpers.sh",
         "testing_server.py",
         ":langtools-copy",
@@ -66,12 +67,15 @@ sh_test(
     name = "bazel_example_test",
     size = "large",
     srcs = ["bazel_example_test.sh"],
+    args = ["$(JAVABASE)"],
     data = [
         ":test-deps",
         "//src/test/shell/bazel/apple:objc-deps",
+        "@bazel_tools//tools/bash/runfiles",
     ],
     shard_count = 3,
     tags = ["no_windows"],
+    toolchains = ["@bazel_tools//tools/jdk:current_java_runtime"],
 )
 
 sh_test(
@@ -130,23 +134,233 @@ sh_test(
 )
 
 sh_test(
-    name = "bazel_java_test",
+    name = "bazel_java_test_no_windows",
     size = "large",
     timeout = "eternal",
-    srcs = ["bazel_java_test.sh"],
-    data = [":test-deps"],
+    srcs = ["bazel_java_test_no_windows.sh"],
+    data = [
+        ":test-deps",
+    ],
     tags = [
-        # TODO(laszlocsomor): make this run on Windows. Currently fails because
-        # the java_common provider doesn't work on Windows.
         "no_windows",
     ],
 )
+
+sh_test(
+    name = "bazel_java_test_defaults",
+    srcs = ["bazel_java_test_defaults.sh"],
+    data = [
+        ":test-deps",
+        "@bazel_tools//tools/bash/runfiles",
+    ],
+)
+
+sh_test(
+    name = "bazel_java12_test",
+    srcs = ["bazel_java12_test.sh"],
+    args = [
+        # --java_toolchain and --host_java_toolchain values
+        "@local_java_tools//:toolchain_jdk_12",
+        # java_tools zip to test
+        "src/java_tools_java12.zip",
+    ] + select({
+        # --javabase and --host_javabase values
+        "//src/conditions:darwin": ["@openjdk12_darwin_archive//:runtime"],
+        "//src/conditions:darwin_x86_64": ["@openjdk12_darwin_archive//:runtime"],
+        "//src/conditions:windows": ["@openjdk12_windows_archive//:runtime"],
+        "//src/conditions:linux_x86_64": ["@openjdk12_linux_archive//:runtime"],
+    }),
+    data = [
+        ":test-deps",
+        "//src:java_tools_java12_zip",
+        "//src/test/shell/bazel/testdata:jdk_http_archives_filegroup",
+        "@bazel_tools//tools/bash/runfiles",
+    ],
+)
+
+sh_test(
+    name = "bazel_java_test",
+    # TODO(iirina): Investigate if the 'large' and 'eternal' values still apply.
+    size = "large",
+    timeout = "eternal",
+    srcs = ["bazel_java_test.sh"],
+    args = [
+        "@bazel_tools//tools/jdk:toolchain",
+        "released",
+    ],
+    data = [
+        ":test-deps",
+        "//src/test/shell/bazel/testdata:jdk_http_archives_filegroup",
+        "@bazel_tools//tools/bash/runfiles",
+    ],
+    exec_compatible_with = ["//:highcpu_machine"],
+)
+
+sh_test(
+    name = "bazel_java_test_jdk9_toolchain_released",
+    size = "large",
+    timeout = "eternal",
+    srcs = ["bazel_java_test.sh"],
+    args = select({
+        "//src/conditions:darwin": ["@remote_java_tools_javac9_test_darwin//:toolchain"],
+        "//src/conditions:darwin_x86_64": ["@remote_java_tools_javac9_test_darwin//:toolchain"],
+        "//src/conditions:windows": ["@remote_java_tools_javac9_test_windows//:toolchain"],
+        "//src/conditions:linux_x86_64": ["@remote_java_tools_javac9_test_linux//:toolchain"],
+    }) + [
+        # java_tools zip to test
+        "released",
+        # --javabase value
+    ] + select({
+        "//src/conditions:darwin": ["@openjdk9_darwin_archive//:runtime"],
+        "//src/conditions:darwin_x86_64": ["@openjdk9_darwin_archive//:runtime"],
+        "//src/conditions:windows": ["@openjdk9_windows_archive//:runtime"],
+        "//src/conditions:linux_x86_64": ["@openjdk9_linux_archive//:runtime"],
+    }),
+    data = [
+        ":test-deps",
+        "//src/test/shell/bazel/testdata:jdk_http_archives_filegroup",
+        "@bazel_tools//tools/bash/runfiles",
+    ],
+    exec_compatible_with = ["//:highcpu_machine"],
+)
+
+JAVA_VERSIONS = ("9", "10", "11", "12")
+
+[
+    sh_test(
+        name = "bazel_java_test_jdk" + java_version + "_toolchain_head",
+        size = "large",
+        timeout = "eternal",
+        srcs = ["bazel_java_test.sh"],
+        args = [
+            # --java_toolchain
+            "@local_java_tools//:toolchain",
+            # java_tools zip to test
+            "src/java_tools_java" + java_version + ".zip",
+            # --javabase value
+        ] + select({
+            "//src/conditions:darwin": ["@openjdk" + java_version + "_darwin_archive//:runtime"],
+            "//src/conditions:darwin_x86_64": ["@openjdk" + java_version + "_darwin_archive//:runtime"],
+            "//src/conditions:windows": ["@openjdk" + java_version + "_windows_archive//:runtime"],
+            "//src/conditions:linux_x86_64": ["@openjdk" + java_version + "_linux_archive//:runtime"],
+        }),
+        data = [
+            ":test-deps",
+            "//src:java_tools_java" + java_version + "_zip",
+            "//src/test/shell/bazel/testdata:jdk_http_archives_filegroup",
+            "@bazel_tools//tools/bash/runfiles",
+        ],
+        exec_compatible_with = ["//:highcpu_machine"],
+    )
+    for java_version in JAVA_VERSIONS
+]
+
+[
+    sh_test(
+        name = "bazel_java_test_jdk" + java_version + "_prebuilt_toolchain_head",
+        size = "large",
+        timeout = "eternal",
+        srcs = ["bazel_java_test.sh"],
+        args = [
+            # --java_toolchain
+            "@local_java_tools//:prebuilt_toolchain",
+            # java_tools zip to test
+            "src/java_tools_java" + java_version + ".zip",
+            # --javabase value
+        ] + select({
+            "//src/conditions:darwin": ["@openjdk" + java_version + "_darwin_archive//:runtime"],
+            "//src/conditions:darwin_x86_64": ["@openjdk" + java_version + "_darwin_archive//:runtime"],
+            "//src/conditions:windows": ["@openjdk" + java_version + "_windows_archive//:runtime"],
+            "//src/conditions:linux_x86_64": ["@openjdk" + java_version + "_linux_archive//:runtime"],
+        }),
+        data = [
+            ":test-deps",
+            "//src:java_tools_java" + java_version + "_zip",
+            "//src/test/shell/bazel/testdata:jdk_http_archives_filegroup",
+            "@bazel_tools//tools/bash/runfiles",
+        ],
+        exec_compatible_with = ["//:highcpu_machine"],
+    )
+    for java_version in JAVA_VERSIONS
+]
+
+[
+    sh_test(
+        name = "bazel_java_test_local_java_tools_jdk" + java_version,
+        size = "large",
+        timeout = "eternal",
+        srcs = ["bazel_java_test.sh"],
+        args = [
+            # --java_toolchain
+            "@local_java_tools//:toolchain",
+            # java_tools zip to test
+            "$(LOCAL_JAVA_TOOLS_ZIP_URL)",
+            # --javabase value
+        ] + select({
+            "//src/conditions:darwin": ["@openjdk" + java_version + "_darwin_archive//:runtime"],
+            "//src/conditions:darwin_x86_64": ["@openjdk" + java_version + "_darwin_archive//:runtime"],
+            "//src/conditions:windows": ["@openjdk" + java_version + "_windows_archive//:runtime"],
+            "//src/conditions:linux_x86_64": ["@openjdk" + java_version + "_linux_archive//:runtime"],
+        }),
+        data = [
+            ":test-deps",
+            "//src/test/shell/bazel/testdata:jdk_http_archives_filegroup",
+            "@bazel_tools//tools/bash/runfiles",
+        ],
+        # This test is only run by the java_tools binaries pipeline.
+        tags = ["manual"],
+    )
+    for java_version in JAVA_VERSIONS
+]
+
+sh_test(
+    name = "bazel_android_tools_test",
+    size = "small",
+    srcs = ["bazel_android_tools_test.sh"],
+    data = [
+        ":test-deps",
+        "//tools/android/runtime_deps:android_tools.tar.gz",
+        "@bazel_tools//tools/bash/runfiles",
+    ],
+    tags = ["no_windows"],
+)
+
+[
+    sh_test(
+        name = "bazel_java_tools_javac" + java_version + "_test",
+        size = "small",
+        srcs = ["bazel_java_tools_test.sh"],
+        args = ["java" + java_version],
+        data = [
+            ":test-deps",
+            "//src:java_tools_java" + java_version + ".zip",
+            "@bazel_tools//tools/bash/runfiles",
+        ],
+    )
+    for java_version in JAVA_VERSIONS
+]
+
+[
+    sh_test(
+        name = "bazel_java_tools_dist_javac" + java_version + "_test",
+        size = "small",
+        srcs = ["bazel_java_tools_dist_test.sh"],
+        args = ["javac" + java_version],
+        data = [
+            ":test-deps",
+            "//src:java_tools_dist_javac" + java_version + ".zip",
+            "@bazel_tools//tools/bash/runfiles",
+        ],
+    )
+    for java_version in JAVA_VERSIONS
+]
 
 sh_test(
     name = "bazel_proto_library_test",
     size = "large",  # Downloads and compiles protobuf for *every* *test* *case*
     srcs = ["bazel_proto_library_test.sh"],
     data = [":test-deps"],
+    exec_compatible_with = ["//:highcpu_machine"],
     tags = ["no_windows"],  # Doesn't work on Windows for unknown reason
 )
 
@@ -183,13 +397,31 @@ sh_test(
 )
 
 sh_test(
+    name = "bazel_rules_java_test",
+    srcs = ["bazel_rules_java_test.sh"],
+    data = [
+        ":test-deps",
+        "@bazel_tools//tools/bash/runfiles",
+    ],
+)
+
+sh_test(
+    name = "bazel_rules_cc_test",
+    srcs = ["bazel_rules_cc_test.sh"],
+    data = [
+        ":test-deps",
+        "@bazel_tools//tools/bash/runfiles",
+    ],
+)
+
+sh_test(
     name = "bazel_test_test",
     timeout = "long",
     srcs = ["bazel_test_test.sh"],
     data = [":test-deps"],
     shard_count = 3,
     tags = [
-        "local",
+        "no-sandbox",
         "no_windows",
     ],
 )
@@ -206,7 +438,6 @@ sh_test(
     srcs = ["bazel_coverage_cc_test_gcc.sh"],
     data = [":test-deps"],
     tags = [
-        "local",
         "no_windows",
     ],
 )
@@ -216,7 +447,6 @@ sh_test(
     srcs = ["bazel_coverage_cc_test_llvm.sh"],
     data = [":test-deps"],
     tags = [
-        "local",
         "no_windows",
     ],
 )
@@ -224,29 +454,84 @@ sh_test(
 sh_test(
     name = "bazel_coverage_java_test",
     srcs = ["bazel_coverage_java_test.sh"],
-    data = [":test-deps"],
+    args = [
+        "@bazel_tools//tools/jdk:toolchain",
+        "released",
+    ],
+    data = [
+        ":test-deps",
+        "//src/test/shell/bazel/testdata:jdk_http_archives_filegroup",
+    ],
     tags = [
-        "local",
         "no_windows",
     ],
 )
 
-sh_test(
-    name = "bazel_coverage_experimental_java_test",
-    srcs = ["bazel_coverage_experimental_java_test.sh"],
-    data = [":test-deps"],
-    tags = [
-        "local",
-        "no_windows",
-    ],
-)
+# Test java coverage with the java_toolchain in the released java_tools versions.
+[
+    sh_test(
+        name = "bazel_coverage_java_jdk" + java_version + "toolchain_released_test",
+        srcs = ["bazel_coverage_java_test.sh"],
+        args = select({
+            "//src/conditions:darwin": ["@remote_java_tools_javac" + java_version + "_test_darwin//:toolchain"],
+            "//src/conditions:darwin_x86_64": ["@remote_java_tools_javac" + java_version + "_test_darwin//:toolchain"],
+            "//src/conditions:windows": ["@remote_java_tools_javac" + java_version + "_test_windows//:toolchain"],
+            "//src/conditions:linux_x86_64": ["@remote_java_tools_javac" + java_version + "_test_linux//:toolchain"],
+        }) + [
+            # java_tools zip to test
+            "released",
+            # --javabase value
+        ] + select({
+            "//src/conditions:darwin": ["@openjdk" + java_version + "_darwin_archive//:runtime"],
+            "//src/conditions:darwin_x86_64": ["@openjdk" + java_version + "_darwin_archive//:runtime"],
+            "//src/conditions:windows": ["@openjdk" + java_version + "_windows_archive//:runtime"],
+            "//src/conditions:linux_x86_64": ["@openjdk" + java_version + "_linux_archive//:runtime"],
+        }),
+        data = [
+            ":test-deps",
+            "//src/test/shell/bazel/testdata:jdk_http_archives_filegroup",
+        ],
+        tags = [
+            "no_windows",
+        ],
+    )
+    for java_version in JAVA_VERSIONS
+]
+
+# Test java coverage with the java_toolchain in the java_tools zip built at head.
+[
+    sh_test(
+        name = "bazel_coverage_java_jdk" + java_version + "_toolchain_head_test",
+        srcs = ["bazel_coverage_java_test.sh"],
+        args = [
+            # --java_toolchain
+            "@local_java_tools//:toolchain",
+            # java_tools zip to test
+            "src/java_tools_java" + java_version + ".zip",
+            # --javabase value
+        ] + select({
+            "//src/conditions:darwin": ["@openjdk" + java_version + "_darwin_archive//:runtime"],
+            "//src/conditions:darwin_x86_64": ["@openjdk" + java_version + "_darwin_archive//:runtime"],
+            "//src/conditions:windows": ["@openjdk" + java_version + "_windows_archive//:runtime"],
+            "//src/conditions:linux_x86_64": ["@openjdk" + java_version + "_linux_archive//:runtime"],
+        }),
+        data = [
+            ":test-deps",
+            "//src:java_tools_java" + java_version + "_zip",
+            "//src/test/shell/bazel/testdata:jdk_http_archives_filegroup",
+        ],
+        tags = [
+            "no_windows",
+        ],
+    )
+    for java_version in JAVA_VERSIONS
+]
 
 sh_test(
     name = "bazel_coverage_sh_test",
     srcs = ["bazel_coverage_sh_test.sh"],
     data = [":test-deps"],
     tags = [
-        "local",
         "no_windows",
     ],
 )
@@ -265,7 +550,7 @@ sh_test(
     srcs = ["bazel_localtest_test.sh"],
     data = [":test-deps"],
     tags = [
-        "local",
+        "no-sandbox",
         "no_windows",
     ],
 )
@@ -291,6 +576,15 @@ sh_test(
         "no_windows",
         "requires-network",
     ],
+)
+
+sh_test(
+    name = "whitelist_test",
+    size = "medium",
+    srcs = ["whitelist_test.sh"],
+    data = [":test-deps"],
+    shard_count = 3,
+    tags = ["no_windows"],
 )
 
 genquery(
@@ -379,6 +673,7 @@ sh_test(
         "//src/test/shell/bazel/testdata:git-repos",
         "@bazel_tools//tools/bash/runfiles",
     ],
+    exec_compatible_with = ["//:highcpu_machine"],
 )
 
 sh_test(
@@ -415,6 +710,16 @@ sh_test(
 )
 
 sh_test(
+    name = "repository_abort_test",
+    size = "large",
+    srcs = ["repository_abort_test.sh"],
+    data = [
+        ":test-deps",
+    ],
+    tags = ["no_windows"],
+)
+
+sh_test(
     name = "skylark_repository_test",
     size = "large",
     srcs = ["skylark_repository_test.sh"],
@@ -430,6 +735,14 @@ sh_test(
     name = "skylark_rule_test",
     size = "large",
     srcs = ["skylark_rule_test.sh"],
+    data = [":test-deps"],
+    tags = ["no_windows"],
+)
+
+sh_test(
+    name = "tags_propagation_skylark_test",
+    size = "large",
+    srcs = ["tags_propagation_skylark_test.sh"],
     data = [":test-deps"],
     tags = ["no_windows"],
 )
@@ -497,10 +810,6 @@ sh_test(
         ":test-deps",
         "@bazel_tools//tools/bash/runfiles",
     ],
-    tags = [
-        # Disabled on windows and mac; see TODOs in the test suite.
-        "no_windows",
-    ],
 )
 
 sh_test(
@@ -521,9 +830,9 @@ sh_test(
 )
 
 filegroup(
-    name = "jdk_WORKSPACE",
+    name = "test_WORKSPACE",
     srcs = [
-        "@jdk_WORKSPACE_files//:archives",
+        "@test_WORKSPACE_files//:archives",
     ],
 )
 
@@ -532,10 +841,10 @@ sh_test(
     size = "large",
     srcs = ["workspace_resolved_test.sh"],
     data = [
-        ":jdk_WORKSPACE",
         ":test-deps",
+        ":test_WORKSPACE",
     ],
-    shard_count = 20,
+    shard_count = 22,
     tags = [
         "block-network",
         "no_windows",
@@ -552,16 +861,12 @@ sh_test(
 
 sh_test(
     name = "bazel_docker_sandboxing_test",
-    timeout = "eternal",
     srcs = ["bazel_docker_sandboxing_test.sh"],
-    args = ["$(location //:bazel-distfile)"],
     data = [
         ":test-deps",
-        "//:bazel-distfile",
     ],
     tags = [
         "local",
-        "manual",
         "no_windows",
     ],
 )
@@ -575,7 +880,7 @@ sh_test(
         "//src/test/shell:sandboxing_test_utils.sh",
     ],
     tags = [
-        "local",
+        "no-sandbox",
         "no_windows",
     ],
 )
@@ -586,9 +891,10 @@ sh_test(
     data = [
         ":test-deps",
         "//src/test/shell:sandboxing_test_utils.sh",
+        "@bazel_tools//tools/bash/runfiles",
     ],
     tags = [
-        "local",
+        "no-sandbox",
         "no_windows",
     ],
 )
@@ -630,12 +936,14 @@ sh_test(
     name = "bazel_with_jdk_test",
     size = "medium",
     srcs = ["bazel_with_jdk_test.sh"],
+    args = ["$(JAVABASE)"],
     data = [
         ":test-deps",
         "//src:bazel",
         "@bazel_tools//tools/bash/runfiles",
     ],
     tags = ["no_windows"],
+    toolchains = ["@bazel_tools//tools/jdk:current_java_runtime"],
 )
 
 sh_test(
@@ -668,6 +976,7 @@ sh_test(
         "//src:embedded_jdk_allmodules_cached",
         "@bazel_tools//tools/bash/runfiles",
     ],
+    exec_compatible_with = ["//:highcpu_machine"],
     tags = ["block-network"],
 )
 
@@ -680,6 +989,7 @@ sh_test(
         ":test-deps",
         "//:bazel-distfile",
     ],
+    exec_compatible_with = ["//:highcpu_machine"],
     tags = [
         "no_windows",
         "slow",
@@ -826,8 +1136,38 @@ sh_test(
 )
 
 sh_test(
+    name = "bazel_execlog_test",
+    srcs = ["bazel_execlog_test.sh"],
+    data = [
+        ":test-deps",
+    ],
+    tags = ["no_windows"],
+)
+
+sh_test(
     name = "new_local_repo_test",
     srcs = ["new_local_repo_test.sh"],
     data = [":test-deps"],
     deps = ["@bazel_tools//tools/bash/runfiles"],
+)
+
+sh_test(
+    name = "archive_contents_test",
+    srcs = ["archive_contents_test.sh"],
+    data = [":test-deps"],
+    deps = ["@bazel_tools//tools/bash/runfiles"],
+)
+
+sh_test(
+    name = "platforms_test",
+    srcs = ["platforms_test.sh"],
+    data = [":test-deps"],
+    deps = ["@bazel_tools//tools/bash/runfiles"],
+)
+
+sh_test(
+    name = "platform_mapping_test",
+    srcs = ["platform_mapping_test.sh"],
+    data = [":test-deps"],
+    tags = ["no_windows"],
 )

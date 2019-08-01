@@ -37,23 +37,24 @@ public class SkylarkNativeModule implements SkylarkNativeModuleApi {
       SkylarkList<?> include,
       SkylarkList<?> exclude,
       Integer excludeDirectories,
+      Object allowEmpty,
       FuncallExpression ast,
       Environment env)
       throws EvalException, ConversionException, InterruptedException {
     SkylarkUtils.checkLoadingPhase(env, "native.glob", ast.getLocation());
-    return PackageFactory.callGlob(null, include, exclude, excludeDirectories != 0, ast, env);
+    try {
+      return PackageFactory.callGlob(
+          null, include, exclude, excludeDirectories != 0, allowEmpty, ast, env);
+    } catch (IllegalArgumentException e) {
+      throw new EvalException(ast.getLocation(), "illegal argument in call to glob", e);
+    }
   }
 
   @Override
   public Object existingRule(String name, FuncallExpression ast, Environment env)
       throws EvalException, InterruptedException {
     SkylarkUtils.checkLoadingOrWorkspacePhase(env, "native.existing_rule", ast.getLocation());
-    SkylarkDict<String, Object> rule = PackageFactory.callGetRuleFunction(name, ast, env);
-    if (rule != null) {
-      return rule;
-    }
-
-    return Runtime.NONE;
+    return PackageFactory.callExistingRule(name, ast, env);
   }
 
   /*
@@ -65,7 +66,7 @@ public class SkylarkNativeModule implements SkylarkNativeModuleApi {
       FuncallExpression ast, Environment env)
       throws EvalException, InterruptedException {
     SkylarkUtils.checkLoadingOrWorkspacePhase(env, "native.existing_rules", ast.getLocation());
-    return PackageFactory.callGetRulesFunction(ast, env);
+    return PackageFactory.callExistingRules(ast, env);
   }
 
   @Override

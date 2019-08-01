@@ -135,4 +135,59 @@ function test_fetch_in_build() {
   expect_not_log '^fetch'
 }
 
+function test_query() {
+  # Verify that at least a minimally meaningful event stream is generated
+  # for non-build. In particular, we expect bazel not to crash.
+  bazel query --build_event_text_file=$TEST_log  //pkg:main \
+    || fail "bazel query failed"
+  expect_log '^started'
+  expect_log 'command: "query"'
+  expect_log 'args: "--build_event_text_file='
+  expect_log 'build_finished'
+  expect_not_log 'aborted'
+  expect_log '^finished'
+  expect_log 'name: "SUCCESS"'
+  expect_log 'last_message: true'
+}
+
+function test_fetch_failure() {
+  # We expect that if a build is failing due to an error fetching an external
+  # repository, we get a reasonable attribution of the root cause.
+  cat > WORKSPACE <<'EOF'
+load("//:failing_repo.bzl", "failing")
+
+failing(name="remote")
+EOF
+  touch BUILD
+  cat > failing_repo.bzl <<'EOF'
+def _impl(ctx):
+  fail("This is the error message")
+
+failing = repository_rule(
+  implementation = _impl,
+  attrs = {},
+)
+EOF
+  cat > pkg/BUILD <<'EOF'
+genrule(
+  name="main",
+  srcs=["@remote//file"],
+  outs = ["main.out"],
+  cmd = "cp $< $@",
+)
+genrule(
+  name="main2",
+  srcs=["@remote//file2"],
+  outs = ["main2.out"],
+  cmd = "cp $< $@",
+)
+EOF
+  bazel build -k --build_event_text_file=$TEST_log  //pkg:main //pkg:main2 \
+    && fail "expected failure" || :
+
+  expect_log 'label: "//external:remote"'
+  expect_log 'description:.*This is the error message'
+  expect_not_log 'label.*@remote//file'
+}
+
 run_suite "Bazel-specific integration tests for the build-event stream"

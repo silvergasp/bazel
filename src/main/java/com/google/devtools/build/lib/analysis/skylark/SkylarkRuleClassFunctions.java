@@ -43,6 +43,7 @@ import com.google.devtools.build.lib.analysis.test.TestConfiguration;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.cmdline.LabelSyntaxException;
 import com.google.devtools.build.lib.cmdline.LabelValidator;
+import com.google.devtools.build.lib.cmdline.RepositoryName;
 import com.google.devtools.build.lib.events.Location;
 import com.google.devtools.build.lib.packages.Attribute;
 import com.google.devtools.build.lib.packages.AttributeMap;
@@ -81,6 +82,7 @@ import com.google.devtools.build.lib.syntax.EvalException;
 import com.google.devtools.build.lib.syntax.EvalUtils;
 import com.google.devtools.build.lib.syntax.FuncallExpression;
 import com.google.devtools.build.lib.syntax.FunctionSignature;
+import com.google.devtools.build.lib.syntax.Identifier;
 import com.google.devtools.build.lib.syntax.Runtime;
 import com.google.devtools.build.lib.syntax.SkylarkCallbackFunction;
 import com.google.devtools.build.lib.syntax.SkylarkDict;
@@ -172,40 +174,40 @@ public class SkylarkRuleClassFunctions implements SkylarkRuleFunctionsApi<Artifa
         // Input files for every test action
         .add(
             attr("$test_wrapper", LABEL)
-                .cfg(HostTransition.INSTANCE)
+                .cfg(HostTransition.createFactory())
                 .singleArtifact()
                 .value(labelCache.getUnchecked(toolsRepository + "//tools/test:test_wrapper")))
         .add(
             attr("$xml_writer", LABEL)
-                .cfg(HostTransition.INSTANCE)
+                .cfg(HostTransition.createFactory())
                 .singleArtifact()
                 .value(labelCache.getUnchecked(toolsRepository + "//tools/test:xml_writer")))
         .add(
             attr("$test_runtime", LABEL_LIST)
-                .cfg(HostTransition.INSTANCE)
+                .cfg(HostTransition.createFactory())
                 .value(
                     ImmutableList.of(
                         labelCache.getUnchecked(toolsRepository + "//tools/test:runtime"))))
         .add(
             attr("$test_setup_script", LABEL)
-                .cfg(HostTransition.INSTANCE)
+                .cfg(HostTransition.createFactory())
                 .singleArtifact()
                 .value(labelCache.getUnchecked(toolsRepository + "//tools/test:test_setup")))
         .add(
             attr("$xml_generator_script", LABEL)
-                .cfg(HostTransition.INSTANCE)
+                .cfg(HostTransition.createFactory())
                 .singleArtifact()
                 .value(
                     labelCache.getUnchecked(toolsRepository + "//tools/test:test_xml_generator")))
         .add(
             attr("$collect_coverage_script", LABEL)
-                .cfg(HostTransition.INSTANCE)
+                .cfg(HostTransition.createFactory())
                 .singleArtifact()
                 .value(labelCache.getUnchecked(toolsRepository + "//tools/test:collect_coverage")))
         // Input files for test actions collecting code coverage
         .add(
             attr(":coverage_support", LABEL)
-                .cfg(HostTransition.INSTANCE)
+                .cfg(HostTransition.createFactory())
                 .value(
                     BaseRuleClasses.coverageSupportAttribute(
                         labelCache.getUnchecked(
@@ -213,7 +215,7 @@ public class SkylarkRuleClassFunctions implements SkylarkRuleFunctionsApi<Artifa
         // Used in the one-per-build coverage report generation action.
         .add(
             attr(":coverage_report_generator", LABEL)
-                .cfg(HostTransition.INSTANCE)
+                .cfg(HostTransition.createFactory())
                 .value(
                     BaseRuleClasses.coverageReportGeneratorAttribute(
                         labelCache.getUnchecked(
@@ -286,7 +288,7 @@ public class SkylarkRuleClassFunctions implements SkylarkRuleFunctionsApi<Artifa
       FuncallExpression ast,
       Environment funcallEnv,
       StarlarkContext context)
-      throws EvalException, ConversionException {
+      throws EvalException {
     SkylarkUtils.checkLoadingOrWorkspacePhase(funcallEnv, "rule", ast.getLocation());
 
     BazelStarlarkContext bazelContext = (BazelStarlarkContext) context;
@@ -302,7 +304,7 @@ public class SkylarkRuleClassFunctions implements SkylarkRuleFunctionsApi<Artifa
     // We'll set the name later, pass the empty string for now.
     RuleClass.Builder builder = new RuleClass.Builder("", type, true, parent);
     ImmutableList<Pair<String, SkylarkAttr.Descriptor>> attributes =
-        attrObjectToAttributesList(attrs, ast);
+        attrObjectToAttributesList(attrs, ast.getLocation(), funcallEnv);
 
     if (skylarkTestable) {
       builder.setSkylarkTestable();
@@ -353,9 +355,14 @@ public class SkylarkRuleClassFunctions implements SkylarkRuleFunctionsApi<Artifa
     builder.setConfiguredTargetFunction(implementation);
     builder.setRuleDefinitionEnvironmentLabelAndHashCode(
         funcallEnv.getGlobals().getLabel(), funcallEnv.getTransitiveContentHashCode());
+
+    ImmutableMap<RepositoryName, RepositoryName> repoMapping = ImmutableMap.of();
+    if (context instanceof BazelStarlarkContext) {
+      repoMapping = ((BazelStarlarkContext) context).getRepoMapping();
+    }
     builder.addRequiredToolchains(
         collectToolchainLabels(
-            toolchains.getContents(String.class, "toolchains"), ast.getLocation()));
+            toolchains.getContents(String.class, "toolchains"), ast.getLocation(), repoMapping));
 
     if (!buildSetting.equals(Runtime.NONE) && !cfg.equals(Runtime.NONE)) {
       throw new EvalException(
@@ -374,6 +381,7 @@ public class SkylarkRuleClassFunctions implements SkylarkRuleFunctionsApi<Artifa
       StarlarkDefinedConfigTransition starlarkDefinedConfigTransition =
           (StarlarkDefinedConfigTransition) cfg;
       builder.cfg(new StarlarkRuleTransitionProvider(starlarkDefinedConfigTransition));
+      builder.setHasStarlarkRuleTransition();
     }
 
     for (Object o : providesArg) {
@@ -395,17 +403,33 @@ public class SkylarkRuleClassFunctions implements SkylarkRuleFunctionsApi<Artifa
       builder.addExecutionPlatformConstraints(
           collectConstraintLabels(
               execCompatibleWith.getContents(String.class, "exec_compatile_with"),
-              ast.getLocation()));
+              ast.getLocation(),
+              repoMapping));
     }
+
     if (executionPlatformConstraintsAllowed) {
       builder.executionPlatformConstraintsAllowed(ExecutionPlatformConstraintsAllowed.PER_TARGET);
+    } else {
+      builder.executionPlatformConstraintsAllowed(ExecutionPlatformConstraintsAllowed.PER_RULE);
     }
 
     return new SkylarkRuleFunction(builder, type, attributes, ast.getLocation());
   }
 
-  protected static ImmutableList<Pair<String, Descriptor>> attrObjectToAttributesList(
-      Object attrs, FuncallExpression ast) throws EvalException {
+  private static void checkAttributeName(Location loc, Environment env, String name)
+      throws EvalException {
+    if (env.getSemantics().incompatibleRestrictAttributeNames() && !Identifier.isValid(name)) {
+      throw new EvalException(
+          loc,
+          "attribute name `"
+              + name
+              + "` is not a valid identfier. "
+              + "This check can be disabled with `--incompatible_restrict_attribute_names=false`.");
+    }
+  }
+
+  private static ImmutableList<Pair<String, Descriptor>> attrObjectToAttributesList(
+      Object attrs, Location loc, Environment env) throws EvalException {
     ImmutableList.Builder<Pair<String, Descriptor>> attributes = ImmutableList.builder();
 
     if (attrs != Runtime.NONE) {
@@ -413,7 +437,8 @@ public class SkylarkRuleClassFunctions implements SkylarkRuleFunctionsApi<Artifa
           castMap(attrs, String.class, Descriptor.class, "attrs").entrySet()) {
         Descriptor attrDescriptor = attr.getValue();
         AttributeValueSource source = attrDescriptor.getValueSource();
-        String attrName = source.convertToNativeName(attr.getKey(), ast.getLocation());
+        checkAttributeName(loc, env, attr.getKey());
+        String attrName = source.convertToNativeName(attr.getKey(), loc);
         attributes.add(Pair.of(attrName, attrDescriptor));
       }
     }
@@ -430,11 +455,14 @@ public class SkylarkRuleClassFunctions implements SkylarkRuleFunctionsApi<Artifa
   }
 
   private static ImmutableList<Label> collectToolchainLabels(
-      Iterable<String> rawLabels, Location loc) throws EvalException {
+      Iterable<String> rawLabels,
+      Location loc,
+      ImmutableMap<RepositoryName, RepositoryName> mapping)
+      throws EvalException {
     ImmutableList.Builder<Label> requiredToolchains = new ImmutableList.Builder<>();
     for (String rawLabel : rawLabels) {
       try {
-        Label toolchainLabel = Label.parseAbsolute(rawLabel, ImmutableMap.of());
+        Label toolchainLabel = Label.parseAbsolute(rawLabel, mapping);
         requiredToolchains.add(toolchainLabel);
       } catch (LabelSyntaxException e) {
         throw new EvalException(
@@ -446,11 +474,14 @@ public class SkylarkRuleClassFunctions implements SkylarkRuleFunctionsApi<Artifa
   }
 
   private static ImmutableList<Label> collectConstraintLabels(
-      Iterable<String> rawLabels, Location loc) throws EvalException {
+      Iterable<String> rawLabels,
+      Location loc,
+      ImmutableMap<RepositoryName, RepositoryName> mapping)
+      throws EvalException {
     ImmutableList.Builder<Label> constraintLabels = new ImmutableList.Builder<>();
     for (String rawLabel : rawLabels) {
       try {
-        Label constraintLabel = Label.parseAbsolute(rawLabel, ImmutableMap.of());
+        Label constraintLabel = Label.parseAbsolute(rawLabel, mapping);
         constraintLabels.add(constraintLabel);
       } catch (LabelSyntaxException e) {
         throw new EvalException(
@@ -498,7 +529,7 @@ public class SkylarkRuleClassFunctions implements SkylarkRuleFunctionsApi<Artifa
     }
 
     ImmutableList<Pair<String, SkylarkAttr.Descriptor>> descriptors =
-        attrObjectToAttributesList(attrs, ast);
+        attrObjectToAttributesList(attrs, ast.getLocation(), funcallEnv);
     ImmutableList.Builder<Attribute> attributes = ImmutableList.builder();
     ImmutableSet.Builder<String> requiredParams = ImmutableSet.builder();
     for (Pair<String, Descriptor> nameDescriptorPair : descriptors) {
@@ -562,7 +593,11 @@ public class SkylarkRuleClassFunctions implements SkylarkRuleFunctionsApi<Artifa
         HostTransition.INSTANCE,
         ImmutableSet.copyOf(hostFragments.getContents(String.class, "host_fragments")),
         collectToolchainLabels(
-            toolchains.getContents(String.class, "toolchains"), ast.getLocation()));
+            toolchains.getContents(String.class, "toolchains"),
+            ast.getLocation(),
+            // TODO(https://github.com/bazelbuild/bazel/issues/7773): Update to get the
+            // repository mapping from a context, like in rule().
+            ImmutableMap.of()));
   }
 
   /**
@@ -668,7 +703,9 @@ public class SkylarkRuleClassFunctions implements SkylarkRuleFunctionsApi<Artifa
         throw new EvalException(definitionLocation, "Invalid rule class name '" + ruleClassName
             + "', test rule class names must end with '_test' and other rule classes must not");
       }
-      boolean hasStarlarkDefinedTransition = false;
+      // Thus far, we only know if we have a rule transition. While iterating through attributes,
+      // check if we have an attribute transition.
+      boolean hasStarlarkDefinedTransition = builder.hasStarlarkRuleTransition();
       boolean hasFunctionTransitionWhitelist = false;
       for (Pair<String, SkylarkAttr.Descriptor> attribute : attributes) {
         String name = attribute.getFirst();
@@ -697,11 +734,20 @@ public class SkylarkRuleClassFunctions implements SkylarkRuleFunctionsApi<Artifa
             throw new EvalException(
                 location, "_whitelist_function_transition attribute must have a default value");
           }
-          if (!attr.getDefaultValueUnchecked()
-              .equals(FunctionSplitTransitionWhitelist.WHITELIST_LABEL)) {
+          Label defaultLabel = (Label) attr.getDefaultValueUnchecked();
+          // Check the label value for package and target name, to make sure this works properly
+          // in Bazel where it is expected to be found under @bazel_tools.
+          if (!defaultLabel
+                  .getPackageName()
+                  .equals(FunctionSplitTransitionWhitelist.WHITELIST_LABEL.getPackageName())
+              || !defaultLabel
+                  .getName()
+                  .equals(FunctionSplitTransitionWhitelist.WHITELIST_LABEL.getName())) {
             throw new EvalException(
                 location,
-                "_whitelist_function_transition attribute does not have the expected value "
+                "_whitelist_function_transition attribute ("
+                    + defaultLabel
+                    + ") does not have the expected value "
                     + FunctionSplitTransitionWhitelist.WHITELIST_LABEL);
           }
           hasFunctionTransitionWhitelist = true;
@@ -715,7 +761,7 @@ public class SkylarkRuleClassFunctions implements SkylarkRuleFunctionsApi<Artifa
           throw new EvalException(
               location,
               String.format(
-                  "Use of function-based split transition without whitelist: %s %s",
+                  "Use of Starlark transition without whitelist: %s %s",
                   builder.getRuleDefinitionEnvironmentLabel(), builder.getType()));
         }
       } else {
@@ -783,18 +829,5 @@ public class SkylarkRuleClassFunctions implements SkylarkRuleFunctionsApi<Artifa
     } catch (LabelValidator.BadLabelException | LabelSyntaxException | ExecutionException e) {
       throw new EvalException(loc, "Illegal absolute label syntax: " + labelString);
     }
-  }
-
-  @Override
-  public SkylarkFileType fileType(SkylarkList types, Location loc, Environment env)
-      throws EvalException {
-    if (env.getSemantics().incompatibleDisallowFileType()) {
-      throw new EvalException(
-          loc,
-          "FileType function is not available. You may use a list of strings instead. "
-              + "You can temporarily reenable the function by passing the flag "
-              + "--incompatible_disallow_filetype=false");
-    }
-    return SkylarkFileType.of(types.getContents(String.class, "types"));
   }
 }

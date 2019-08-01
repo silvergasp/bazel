@@ -14,7 +14,6 @@
 
 package com.google.devtools.build.lib.skyframe;
 
-import com.google.common.base.MoreObjects;
 import com.google.common.base.Objects;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ImmutableList;
@@ -445,7 +444,7 @@ public final class AspectValue extends BasicActionLookupValue {
       ConfiguredAspect configuredAspect,
       NestedSet<Package> transitivePackagesForPackageRootResolution,
       BigInteger nonceVersion) {
-    super(configuredAspect.getActions(), configuredAspect.getGeneratingActionIndex(), nonceVersion);
+    super(configuredAspect.getActions(), nonceVersion);
     this.label = Preconditions.checkNotNull(label, actions);
     this.aspect = Preconditions.checkNotNull(aspect, label);
     this.location = Preconditions.checkNotNull(location, label);
@@ -507,7 +506,7 @@ public final class AspectValue extends BasicActionLookupValue {
 
   @Override
   public String toString() {
-    return MoreObjects.toStringHelper(this)
+    return getStringHelper()
         .add("label", label)
         .add("key", key)
         .add("location", location)

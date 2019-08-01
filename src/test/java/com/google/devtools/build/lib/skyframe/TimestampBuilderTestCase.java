@@ -38,9 +38,7 @@ import com.google.devtools.build.lib.actions.ActionLookupValue;
 import com.google.devtools.build.lib.actions.ActionResult;
 import com.google.devtools.build.lib.actions.Actions;
 import com.google.devtools.build.lib.actions.Artifact;
-import com.google.devtools.build.lib.actions.ArtifactOwner;
 import com.google.devtools.build.lib.actions.ArtifactRoot;
-import com.google.devtools.build.lib.actions.ArtifactSkyKey;
 import com.google.devtools.build.lib.actions.BasicActionLookupValue;
 import com.google.devtools.build.lib.actions.BuildFailedException;
 import com.google.devtools.build.lib.actions.Executor;
@@ -54,6 +52,7 @@ import com.google.devtools.build.lib.actions.TestExecException;
 import com.google.devtools.build.lib.actions.cache.ActionCache;
 import com.google.devtools.build.lib.actions.cache.Protos.ActionCacheStatistics;
 import com.google.devtools.build.lib.actions.cache.Protos.ActionCacheStatistics.MissReason;
+import com.google.devtools.build.lib.actions.util.ActionsTestUtil;
 import com.google.devtools.build.lib.actions.util.DummyExecutor;
 import com.google.devtools.build.lib.actions.util.InjectedActionLookupKey;
 import com.google.devtools.build.lib.actions.util.TestAction;
@@ -70,6 +69,7 @@ import com.google.devtools.build.lib.events.StoredEventHandler;
 import com.google.devtools.build.lib.exec.SingleBuildFileCache;
 import com.google.devtools.build.lib.packages.WorkspaceFileValue;
 import com.google.devtools.build.lib.pkgcache.PathPackageLocator;
+import com.google.devtools.build.lib.remote.options.RemoteOutputsMode;
 import com.google.devtools.build.lib.runtime.KeepGoingOption;
 import com.google.devtools.build.lib.skyframe.AspectValue.AspectKey;
 import com.google.devtools.build.lib.skyframe.ExternalFilesHelper.ExternalFileAction;
@@ -88,6 +88,7 @@ import com.google.devtools.build.lib.vfs.FileSystemUtils;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.lib.vfs.Root;
+import com.google.devtools.build.lib.vfs.UnixGlob;
 import com.google.devtools.build.skyframe.CycleInfo;
 import com.google.devtools.build.skyframe.ErrorInfo;
 import com.google.devtools.build.skyframe.EvaluationContext;
@@ -112,6 +113,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -138,16 +140,25 @@ public abstract class TimestampBuilderTestCase extends FoundationTestCase {
   protected OptionsParser options;
 
   protected final ActionKeyContext actionKeyContext = new ActionKeyContext();
+  private TopDownActionCache topDownActionCache;
 
   @Before
   public final void initialize() throws Exception  {
-    options = OptionsParser.newOptionsParser(KeepGoingOption.class, BuildRequestOptions.class);
+    options =
+        OptionsParser.builder()
+            .optionsClasses(KeepGoingOption.class, BuildRequestOptions.class)
+            .build();
     options.parse();
     inMemoryCache = new InMemoryActionCache();
     tsgm = new TimestampGranularityMonitor(clock);
     ResourceManager.instance().setAvailableResources(ResourceSet.createWithRamCpu(100, 1));
-    actions = new HashSet<>();
+    actions = new LinkedHashSet<>();
     actionTemplateExpansionFunction = new ActionTemplateExpansionFunction(actionKeyContext);
+    topDownActionCache = initTopDownActionCache();
+  }
+
+  protected TopDownActionCache initTopDownActionCache() {
+    return null;
   }
 
   protected void clearActions() {
@@ -156,6 +167,11 @@ public abstract class TimestampBuilderTestCase extends FoundationTestCase {
 
   protected <T extends ActionAnalysisMetadata> T registerAction(T action) {
     actions.add(action);
+    ActionLookupData actionLookupData =
+        ActionLookupData.create(ACTION_LOOKUP_KEY, actions.size() - 1);
+    for (Artifact output : action.getOutputs()) {
+      ((Artifact.DerivedArtifact) output).setGeneratingActionKey(actionLookupData);
+    }
     return action;
   }
 
@@ -197,7 +213,7 @@ public abstract class TimestampBuilderTestCase extends FoundationTestCase {
     differencer = new SequencedRecordingDifferencer();
 
     ActionExecutionStatusReporter statusReporter =
-        ActionExecutionStatusReporter.create(new StoredEventHandler());
+        ActionExecutionStatusReporter.create(new StoredEventHandler(), eventBus);
     final SkyframeActionExecutor skyframeActionExecutor =
         new SkyframeActionExecutor(
             actionKeyContext,
@@ -216,7 +232,12 @@ public abstract class TimestampBuilderTestCase extends FoundationTestCase {
     final InMemoryMemoizingEvaluator evaluator =
         new InMemoryMemoizingEvaluator(
             ImmutableMap.<SkyFunctionName, SkyFunction>builder()
-                .put(FileStateValue.FILE_STATE, new FileStateFunction(tsgmRef, externalFilesHelper))
+                .put(
+                    FileStateValue.FILE_STATE,
+                    new FileStateFunction(
+                        tsgmRef,
+                        new AtomicReference<>(UnixGlob.DEFAULT_SYSCALLS),
+                        externalFilesHelper))
                 .put(FileValue.FILE, new FileFunction(pkgLocator))
                 .put(Artifact.ARTIFACT, new ArtifactFunction(() -> true))
                 .put(
@@ -247,6 +268,7 @@ public abstract class TimestampBuilderTestCase extends FoundationTestCase {
                 .put(
                     SkyFunctions.ACTION_TEMPLATE_EXPANSION,
                     new DelegatingActionTemplateExpansionFunction())
+                .put(SkyFunctions.ACTION_SKETCH, new ActionSketchFunction(actionKeyContext))
                 .build(),
             differencer,
             evaluationProgressReceiver);
@@ -254,6 +276,7 @@ public abstract class TimestampBuilderTestCase extends FoundationTestCase {
     PrecomputedValue.BUILD_ID.set(differencer, UUID.randomUUID());
     PrecomputedValue.ACTION_ENV.set(differencer, ImmutableMap.<String, String>of());
     PrecomputedValue.PATH_PACKAGE_LOCATOR.set(differencer, pkgLocator.get());
+    PrecomputedValue.REMOTE_OUTPUTS_MODE.set(differencer, RemoteOutputsMode.ALL);
 
     return new Builder() {
       private void setGeneratingActions() throws ActionConflictException {
@@ -262,8 +285,11 @@ public abstract class TimestampBuilderTestCase extends FoundationTestCase {
               ImmutableMap.of(
                   ACTION_LOOKUP_KEY,
                   new BasicActionLookupValue(
-                      Actions.filterSharedActionsAndThrowActionConflict(
-                          actionKeyContext, ImmutableList.copyOf(actions)),
+                      Actions.assignOwnersAndFilterSharedActionsAndThrowActionConflict(
+                          actionKeyContext,
+                          ImmutableList.copyOf(actions),
+                          ACTION_LOOKUP_KEY,
+                          /*outputFiles=*/ null),
                       /*nonceVersion=*/ null)));
         }
       }
@@ -291,13 +317,14 @@ public abstract class TimestampBuilderTestCase extends FoundationTestCase {
             options,
             new ActionCacheChecker(
                 actionCache, null, actionKeyContext, ALWAYS_EXECUTE_FILTER, null),
+            topDownActionCache,
             null);
         skyframeActionExecutor.setActionExecutionProgressReportingObjects(
             EMPTY_PROGRESS_SUPPLIER, EMPTY_COMPLETION_RECEIVER);
 
         List<SkyKey> keys = new ArrayList<>();
         for (Artifact artifact : artifacts) {
-          keys.add(ArtifactSkyKey.key(artifact, true));
+          keys.add(Artifact.key(artifact));
         }
 
         try {
@@ -363,10 +390,8 @@ public abstract class TimestampBuilderTestCase extends FoundationTestCase {
 
   private static Artifact createSourceArtifact(FileSystem fs, String name) {
     Path root = fs.getPath(TestUtils.tmpDir());
-    return new Artifact.SourceArtifact(
-        ArtifactRoot.asSourceRoot(Root.fromPath(root)),
-        PathFragment.create(name),
-        ArtifactOwner.NullArtifactOwner.INSTANCE);
+    return ActionsTestUtil.createArtifactWithExecPath(
+        ArtifactRoot.asSourceRoot(Root.fromPath(root)), PathFragment.create(name));
   }
 
   protected Artifact createDerivedArtifact(String name) {
@@ -376,7 +401,7 @@ public abstract class TimestampBuilderTestCase extends FoundationTestCase {
   Artifact createDerivedArtifact(FileSystem fs, String name) {
     Path execRoot = fs.getPath(TestUtils.tmpDir());
     PathFragment execPath = PathFragment.create("out").getRelative(name);
-    return new Artifact(
+    return new Artifact.DerivedArtifact(
         ArtifactRoot.asDerivedRoot(execRoot, execRoot.getRelative("out")),
         execPath,
         ACTION_LOOKUP_KEY);
@@ -423,13 +448,11 @@ public abstract class TimestampBuilderTestCase extends FoundationTestCase {
   protected void buildArtifacts(Builder builder, Artifact... artifacts)
       throws BuildFailedException, AbruptExitException, InterruptedException, TestExecException,
           OptionsParsingException {
-    buildArtifacts(builder, new DummyExecutor(fileSystem, rootDirectory, reporter), artifacts);
+    buildArtifacts(builder, new DummyExecutor(fileSystem, rootDirectory), artifacts);
   }
 
   protected void buildArtifacts(Builder builder, Executor executor, Artifact... artifacts)
-      throws BuildFailedException, AbruptExitException, InterruptedException, TestExecException,
-          OptionsParsingException {
-
+      throws BuildFailedException, AbruptExitException, InterruptedException, TestExecException {
     tsgm.setCommandStartTime();
     Set<Artifact> artifactsToBuild = Sets.newHashSet(artifacts);
     Set<ConfiguredTargetKey> builtTargets = new HashSet<>();

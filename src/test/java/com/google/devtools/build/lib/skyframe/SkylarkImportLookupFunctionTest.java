@@ -14,6 +14,7 @@
 package com.google.devtools.build.lib.skyframe;
 
 import static com.google.common.truth.Truth.assertThat;
+import static com.google.devtools.build.lib.testutil.MoreAsserts.assertThrows;
 import static com.google.devtools.build.skyframe.EvaluationResultSubjectFactory.assertThatEvaluationResult;
 import static org.junit.Assert.fail;
 
@@ -195,8 +196,8 @@ public class SkylarkImportLookupFunctionTest extends BuildViewTestCase {
     ErrorInfo errorInfo = result.getError(skylarkImportLookupKey);
     String errorMessage = errorInfo.getException().getMessage();
     assertThat(errorMessage)
-        .isEqualTo(
-            "Unable to load package for '//pkg:ext.bzl': BUILD file not found on package path");
+        .contains(
+            "Every .bzl file must have a corresponding package, but '//pkg:ext.bzl' does not");
   }
 
   @Test
@@ -211,27 +212,25 @@ public class SkylarkImportLookupFunctionTest extends BuildViewTestCase {
     assertThat(result.hasError()).isTrue();
     ErrorInfo errorInfo = result.getError(skylarkImportLookupKey);
     String errorMessage = errorInfo.getException().getMessage();
-    assertThat(errorMessage)
-        .isEqualTo(
-            "Unable to load package for '//pkg:ext.bzl': BUILD file not found on package path");
+    assertThat(errorMessage).contains("Every .bzl file must have a corresponding package");
   }
 
   @Test
   public void testSkylarkImportFilenameWithControlChars() throws Exception {
     scratch.file("pkg/BUILD", "");
     scratch.file("pkg/ext.bzl", "load('//pkg:oops\u0000.bzl', 'a')");
-    try {
-      SkyKey skylarkImportLookupKey = key("//pkg:ext.bzl");
-      SkyframeExecutorTestUtils.evaluate(
-          getSkyframeExecutor(), skylarkImportLookupKey, /*keepGoing=*/ false, reporter);
-      fail("Expected exception");
-    } catch (AssertionError e) {
-      String errorMessage = e.getMessage();
-      assertThat(errorMessage)
-          .contains(
-              "invalid target name 'oops<?>.bzl': "
-                  + "target names may not contain non-printable characters: '\\x00'");
-    }
+    SkyKey skylarkImportLookupKey = key("//pkg:ext.bzl");
+    AssertionError e =
+        assertThrows(
+            AssertionError.class,
+            () ->
+                SkyframeExecutorTestUtils.evaluate(
+                    getSkyframeExecutor(), skylarkImportLookupKey, /*keepGoing=*/ false, reporter));
+    String errorMessage = e.getMessage();
+    assertThat(errorMessage)
+        .contains(
+            "invalid target name 'oops<?>.bzl': "
+                + "target names may not contain non-printable characters: '\\x00'");
   }
 
   @Test
@@ -275,19 +274,7 @@ public class SkylarkImportLookupFunctionTest extends BuildViewTestCase {
   }
 
   @Test
-  public void testLoadUsingLabelThatCrossesBoundaryOfPackage_Allow_OfSamePkg() throws Exception {
-    scratch.file("a/BUILD");
-    scratch.file("a/a.bzl", "load('//a:b/b.bzl', 'b')");
-    scratch.file("a/b/BUILD", "");
-    scratch.file("a/b/b.bzl", "b = 42");
-
-    checkSuccessfulLookup("//a:a.bzl");
-  }
-
-  @Test
   public void testLoadUsingLabelThatCrossesBoundaryOfPackage_Disallow_OfSamePkg() throws Exception {
-    setSkylarkSemanticsOptions("--incompatible_disallow_load_labels_to_cross_package_boundaries");
-
     scratch.file("a/BUILD");
     scratch.file("a/a.bzl", "load('//a:b/b.bzl', 'b')");
     scratch.file("a/b/BUILD", "");
@@ -307,27 +294,13 @@ public class SkylarkImportLookupFunctionTest extends BuildViewTestCase {
         .hasExceptionThat()
         .hasMessageThat()
         .contains(
-            "Label '//a:b/b.bzl' crosses boundary of subpackage 'a/b' (perhaps you meant to put "
-                + "the colon here: '//a/b:b.bzl'?)");
-  }
-
-  @Test
-  public void testLoadUsingLabelThatCrossesBoundaryOfPackage_Allow_OfDifferentPkgUnder()
-      throws Exception {
-    scratch.file("a/BUILD");
-    scratch.file("a/a.bzl", "load('//a/b:c/c.bzl', 'c')");
-    scratch.file("a/b/BUILD", "");
-    scratch.file("a/b/c/BUILD", "");
-    scratch.file("a/b/c/c.bzl", "c = 42");
-
-    checkSuccessfulLookup("//a:a.bzl");
+            "Label '//a:b/b.bzl' is invalid because 'a/b' is a subpackage; perhaps you meant to"
+                + " put the colon here: '//a/b:b.bzl'?");
   }
 
   @Test
   public void testLoadUsingLabelThatCrossesBoundaryOfPackage_Disallow_OfDifferentPkgUnder()
       throws Exception {
-    setSkylarkSemanticsOptions("--incompatible_disallow_load_labels_to_cross_package_boundaries");
-
     scratch.file("a/BUILD");
     scratch.file("a/a.bzl", "load('//a/b:c/c.bzl', 'c')");
     scratch.file("a/b/BUILD", "");
@@ -348,49 +321,13 @@ public class SkylarkImportLookupFunctionTest extends BuildViewTestCase {
         .hasExceptionThat()
         .hasMessageThat()
         .contains(
-            "Label '//a/b:c/c.bzl' crosses boundary of subpackage 'a/b/c' (perhaps you meant to "
-                + "put the colon here: '//a/b/c:c.bzl'?)");
-  }
-
-  @Test
-  public void testLoadUsingLabelThatCrossesBoundaryOfPackage_Allow_OfDifferentPkgAbove()
-      throws Exception {
-    scratch.file("a/b/BUILD");
-    scratch.file("a/b/b.bzl", "load('//a/c:c/c.bzl', 'c')");
-    scratch.file("a/BUILD");
-    scratch.file("a/c/c/c.bzl", "c = 42");
-
-    // With the default of
-    // --incompatible_disallow_load_labels_to_cross_subpackage_boundaries=false,
-    // SkylarkImportLookupValue(//a/b:b.bzl) has an error because ASTFileLookupValue(//a/c:c/c.bzl)
-    // because package //a/c doesn't exist. The behavior with
-    // --incompatible_disallow_load_labels_to_cross_subpackage_boundaries=true is stricter, but we
-    // still have an explicit test for this case so that way we don't forget to think about it when
-    // we address the TODO in ASTFileLookupFunction.
-
-    SkyKey skylarkImportLookupKey = key("//a/b:b.bzl");
-    EvaluationResult<SkylarkImportLookupValue> result =
-        SkyframeExecutorTestUtils.evaluate(
-            getSkyframeExecutor(), skylarkImportLookupKey, /*keepGoing=*/ false, reporter);
-    assertThat(result.hasError()).isTrue();
-    assertThatEvaluationResult(result)
-        .hasErrorEntryForKeyThat(skylarkImportLookupKey)
-        .hasExceptionThat()
-        .isInstanceOf(SkylarkImportFailedException.class);
-    assertThatEvaluationResult(result)
-        .hasErrorEntryForKeyThat(skylarkImportLookupKey)
-        .hasExceptionThat()
-        .hasMessageThat()
-        .contains(
-            "Unable to load package for '//a/c:c/c.bzl': BUILD file not "
-                + "found on package path");
+            "Label '//a/b:c/c.bzl' is invalid because 'a/b/c' is a subpackage; perhaps you meant"
+                + " to put the colon here: '//a/b/c:c.bzl'?");
   }
 
   @Test
   public void testLoadUsingLabelThatCrossesBoundaryOfPackage_Disallow_OfDifferentPkgAbove()
       throws Exception {
-    setSkylarkSemanticsOptions("--incompatible_disallow_load_labels_to_cross_package_boundaries");
-
     scratch.file("a/b/BUILD");
     scratch.file("a/b/b.bzl", "load('//a/c:c/c.bzl', 'c')");
     scratch.file("a/BUILD");
@@ -410,15 +347,13 @@ public class SkylarkImportLookupFunctionTest extends BuildViewTestCase {
         .hasExceptionThat()
         .hasMessageThat()
         .contains(
-            "Label '//a/c:c/c.bzl' crosses boundary of package 'a' (perhaps you meant to put the "
-                + "colon here: '//a:c/c/c.bzl'?)");
+            "Label '//a/c:c/c.bzl' is invalid because 'a/c' is not a package; perhaps you meant to "
+                + "put the colon here: '//a:c/c/c.bzl'?");
   }
 
   @Test
   public void testWithNonExistentRepository_And_DisallowLoadUsingLabelThatCrossesBoundaryOfPackage()
       throws Exception {
-    setSkylarkSemanticsOptions("--incompatible_disallow_load_labels_to_cross_package_boundaries");
-
     scratch.file("BUILD", "load(\"@repository//dir:file.bzl\", \"foo\")");
 
     SkyKey skylarkImportLookupKey = key("@repository//dir:file.bzl");
@@ -477,7 +412,5 @@ public class SkylarkImportLookupFunctionTest extends BuildViewTestCase {
 
     assertThat(result.get(skylarkImportLookupKey).getEnvironmentExtension().getBindings())
         .containsEntry("a_symbol", 5);
-    assertThat(result.get(skylarkImportLookupKey).getEnvironmentExtension().getBindings())
-        .containsEntry("y_symbol", 5);
   }
 }

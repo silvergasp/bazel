@@ -19,6 +19,8 @@
 # TODO(bazel-team): This file is currently an append of the old testenv.sh and
 # test-setup.sh files. This must be cleaned up eventually.
 
+# TODO(bazel-team): Factor each test suite's is-this-windows setup check to use
+# this var instead, or better yet a common $IS_WINDOWS var.
 PLATFORM="$(uname -s | tr [:upper:] [:lower:])"
 
 function is_darwin() {
@@ -68,9 +70,10 @@ fi
 # Convert PATH_TO_BAZEL_WRAPPER to Unix path style on Windows, because it will be
 # added into PATH. There's problem if PATH=C:/msys64/usr/bin:/usr/local,
 # because ':' is used as both path separator and in C:/msys64/...
-if [[ $PLATFORM =~ msys ]]; then
+case "$(uname -s | tr [:upper:] [:lower:])" in
+msys*|mingw*|cygwin*)
   PATH_TO_BAZEL_WRAPPER="$(cygpath -u "$PATH_TO_BAZEL_WRAPPER")"
-fi
+esac
 [ ! -f "${PATH_TO_BAZEL_WRAPPER}/bazel" ] \
   && log_fatal "Unable to find the Bazel binary at $PATH_TO_BAZEL_WRAPPER/bazel"
 export PATH="$PATH_TO_BAZEL_WRAPPER:$PATH"
@@ -133,14 +136,11 @@ EOF
 # This function copies the tools directory from Bazel.
 function copy_tools_directory() {
   cp -RL ${tools_dir}/* tools
-  # tools/jdk/BUILD file for JDK 7 is generated.
-  # Only works if there's 0 or 1 matches.
-  # If there are multiple, the test fails.
-  if [ -f tools/jdk/BUILD.* ]; then
-    cp tools/jdk/BUILD.* tools/jdk/BUILD
-  fi
   if [ -f tools/jdk/BUILD ]; then
     chmod +w tools/jdk/BUILD
+  fi
+  if [ -f tools/build_defs/repo/BUILD.repo ]; then
+      cp tools/build_defs/repo/BUILD.repo tools/build_defs/repo/BUILD
   fi
   # To support custom langtools
   cp ${langtools} tools/jdk/langtools.jar
@@ -284,6 +284,9 @@ common --show_progress_rate_limit=-1
 # Disable terminal-specific features.
 common --color=no --curses=no
 
+# TODO(#7899): Remove once we flip the flag default.
+build --incompatible_use_python_toolchains=true
+
 ${EXTRA_BAZELRC:-}
 EOF
 
@@ -363,6 +366,54 @@ java_import(
 EOF
 }
 
+# If the current platform is Windows, defines a Python toolchain for our
+# Windows CI machines. Otherwise does nothing.
+#
+# Our Windows CI machines have Python 2 and 3 installed at C:\Python2 and
+# C:\Python3 respectively.
+#
+# Since the tools directory is not cleared between test cases, this only needs
+# to run once per suite. However, the toolchain must still be registered
+# somehow.
+#
+# TODO(#7844): Delete this custom (and machine-specific) test setup once we have
+# an autodetecting Python toolchain for Windows.
+function maybe_setup_python_windows_tools() {
+  if [[ ! $PLATFORM =~ msys ]]; then
+    return
+  fi
+
+  mkdir -p tools/python/windows
+  cat > tools/python/windows/BUILD << EOF
+load("@bazel_tools//tools/python:toolchain.bzl", "py_runtime_pair")
+
+py_runtime(
+  name = "py2_runtime",
+  interpreter_path = r"C:\Python2\python.exe",
+  python_version = "PY2",
+)
+
+py_runtime(
+  name = "py3_runtime",
+  interpreter_path = r"C:\Python3\python.exe",
+  python_version = "PY3",
+)
+
+py_runtime_pair(
+  name = "py_runtime_pair",
+  py2_runtime = ":py2_runtime",
+  py3_runtime = ":py3_runtime",
+)
+
+toolchain(
+  name = "py_toolchain",
+  toolchain = ":py_runtime_pair",
+  toolchain_type = "@bazel_tools//tools/python:toolchain_type",
+  target_compatible_with = ["@platforms//os:windows"],
+)
+EOF
+}
+
 function setup_skylark_javatest_support() {
   setup_javatest_common
   grep -q "name = \"junit4-jars\"" third_party/BUILD \
@@ -398,10 +449,73 @@ new_local_repository(
 EOF
 }
 
+function add_rules_cc_to_workspace() {
+  cat >> "$1"<<EOF
+load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+http_archive(
+    name = "rules_cc",
+    sha256 = "36fa66d4d49debd71d05fba55c1353b522e8caef4a20f8080a3d17cdda001d89",
+    strip_prefix = "rules_cc-0d5f3f2768c6ca2faca0079a997a97ce22997a0c",
+    urls = [
+        "https://mirror.bazel.build/github.com/bazelbuild/rules_cc/archive/0d5f3f2768c6ca2faca0079a997a97ce22997a0c.zip",
+        "https://github.com/bazelbuild/rules_cc/archive/0d5f3f2768c6ca2faca0079a997a97ce22997a0c.zip",
+    ],
+)
+EOF
+}
+
+# TODO(https://github.com/bazelbuild/bazel/issues/8986): Build this dynamically
+# from //WORKSPACE
+function add_rules_pkg_to_workspace() {
+  cat >> "$1"<<EOF
+load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+http_archive(
+    name = "rules_pkg",
+    sha256 = "5bdc04987af79bd27bc5b00fe30f59a858f77ffa0bd2d8143d5b31ad8b1bd71c",
+    urls = [
+        "https://mirror.bazel.build/github.com/bazelbuild/rules_pkg/rules_pkg-0.2.0.tar.gz",
+        "https://github.com/bazelbuild/rules_pkg/releases/download/0.2.0/rules_pkg-0.2.0.tar.gz",
+    ],
+)
+EOF
+}
+
+function create_workspace_with_default_repos() {
+  touch "$1"
+  add_rules_cc_to_workspace "$1"
+  add_rules_pkg_to_workspace "$1"
+  echo "$1"
+}
+
 # Write the default WORKSPACE file, wiping out any custom WORKSPACE setup.
 function write_workspace_file() {
   cat > WORKSPACE << EOF
 workspace(name = '$WORKSPACE_NAME')
+EOF
+  add_rules_cc_to_workspace "WORKSPACE"
+  add_rules_pkg_to_workspace "WORKSPACE"
+
+  maybe_setup_python_windows_workspace
+}
+
+# If the current platform is Windows, registers our custom Windows Python
+# toolchain. Otherwise does nothing.
+#
+# Since this modifies the WORKSPACE file, it must be called between test cases.
+function maybe_setup_python_windows_workspace() {
+  if [[ ! $PLATFORM =~ msys ]]; then
+    return
+  fi
+
+  # --extra_toolchains has left-to-right precedence semantics, but the bazelrc
+  # is processed before the command line. This means that any matching
+  # toolchains added to the bazelrc will always take precedence over toolchains
+  # set up by test cases. Instead, we add the toolchain to WORKSPACE so that it
+  # has lower priority than whatever is passed on the command line.
+  cat >> WORKSPACE << EOF
+register_toolchains("//tools/python/windows:py_toolchain")
 EOF
 }
 
@@ -422,6 +536,8 @@ function create_new_workspace() {
     || ln -s "${langtools_path}"  third_party/java/jdk/langtools/javac-9+181-r4173-1.jar
 
   write_workspace_file
+
+  maybe_setup_python_windows_tools
 }
 
 
@@ -445,7 +561,7 @@ function cleanup_workspace() {
   if [ -d "${WORKSPACE_DIR:-}" ]; then
     log_info "Cleaning up workspace" >> $TEST_log
     cd ${WORKSPACE_DIR}
-    bazel clean &> "$TEST_log"
+    bazel clean >> "$TEST_log" 2>&1
 
     for i in *; do
       if ! is_tools_directory "$i"; then
@@ -572,11 +688,13 @@ function use_fake_python_runtimes_for_testsuite() {
     PYTHON3_FILENAME="python3.sh"
   fi
 
-  add_to_bazelrc "build --python_top=//tools/python:default_runtime"
+  add_to_bazelrc "build --extra_toolchains=//tools/python:fake_python_toolchain"
 
   mkdir -p tools/python
 
   cat > tools/python/BUILD << EOF
+load("@bazel_tools//tools/python:toolchain.bzl", "py_runtime_pair")
+
 package(default_visibility=["//visibility:public"])
 
 sh_binary(
@@ -584,23 +702,28 @@ sh_binary(
     srcs = ['2to3.sh']
 )
 
-config_setting(
-    name = "py3_mode",
-    values = {"force_python": "PY3"},
+py_runtime(
+    name = "fake_py2_interpreter",
+    interpreter = ":${PYTHON2_FILENAME}",
+    python_version = "PY2",
 )
 
-# TODO(brandjon): Replace dependency on "force_python" with a 2-valued feature
-# flag instead
 py_runtime(
-    name = "default_runtime",
-    files = select({
-        "py3_mode": [":${PYTHON3_FILENAME}"],
-        "//conditions:default": [":${PYTHON2_FILENAME}"],
-    }),
-    interpreter = select({
-        "py3_mode": ":${PYTHON3_FILENAME}",
-        "//conditions:default": ":${PYTHON2_FILENAME}",
-    }),
+    name = "fake_py3_interpreter",
+    interpreter = ":${PYTHON3_FILENAME}",
+    python_version = "PY3",
+)
+
+py_runtime_pair(
+    name = "fake_py_runtime_pair",
+    py2_runtime = ":fake_py2_interpreter",
+    py3_runtime = ":fake_py3_interpreter",
+)
+
+toolchain(
+    name = "fake_python_toolchain",
+    toolchain = ":fake_py_runtime_pair",
+    toolchain_type = "@bazel_tools//tools/python:toolchain_type",
 )
 EOF
 

@@ -52,9 +52,18 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import javax.annotation.Nullable;
+import org.junit.Before;
 
 /** Common methods shared between Android related {@link BuildViewTestCase}s. */
 public abstract class AndroidBuildViewTestCase extends BuildViewTestCase {
+
+  @Before
+  public void setup() throws Exception {
+    // Force tests to use aapt to unblock global aapt2 migration, until these
+    // tests are migrated to use aapt2.
+    // TODO(jingwen): https://github.com/bazelbuild/bazel/issues/6907
+    useConfiguration("--android_aapt=aapt");
+  }
 
   protected Iterable<Artifact> getNativeLibrariesInApk(ConfiguredTarget target) {
     return Iterables.filter(
@@ -78,7 +87,7 @@ public abstract class AndroidBuildViewTestCase extends BuildViewTestCase {
           .isNotEqualTo(target.getLabel());
     }
     assertThat(artifactsToStrings(copiedLibs))
-        .containsAllIn(ImmutableSet.copyOf(Arrays.asList(expectedLibNames)));
+        .containsAtLeastElementsIn(ImmutableSet.copyOf(Arrays.asList(expectedLibNames)));
   }
 
   protected String flagValue(String flag, List<String> args) {
@@ -136,7 +145,7 @@ public abstract class AndroidBuildViewTestCase extends BuildViewTestCase {
       ConfiguredTarget target, boolean transitive) {
     Preconditions.checkNotNull(target);
     final AndroidResourcesInfo info = target.get(AndroidResourcesInfo.PROVIDER);
-    assertThat(info).named("No android resources exported from the target.").isNotNull();
+    assertWithMessage("No android resources exported from the target.").that(info).isNotNull();
     return getOnlyElement(
         transitive ? info.getTransitiveAndroidResources() : info.getDirectAndroidResources());
   }
@@ -173,7 +182,7 @@ public abstract class AndroidBuildViewTestCase extends BuildViewTestCase {
     } else {
       fail(String.format("Failed to parse --primaryData: %s", actualFlagValue));
     }
-    assertThat(actualPaths).containsAllIn(expectedPaths);
+    assertThat(actualPaths).containsAtLeastElementsIn(expectedPaths);
   }
 
   protected List<String> getDirectDependentResourceDirs(List<String> actualArgs) {
@@ -338,7 +347,7 @@ public abstract class AndroidBuildViewTestCase extends BuildViewTestCase {
     return getAndroidSdk().getProguard().getExecutable();
   }
 
-  private AndroidSdkProvider getAndroidSdk() {
+  private AndroidSdkProvider getAndroidSdk() throws Exception {
     Label sdk = targetConfig.getFragment(AndroidConfiguration.class).getSdk();
     return getConfiguredTarget(sdk, targetConfig).get(AndroidSdkProvider.PROVIDER);
   }

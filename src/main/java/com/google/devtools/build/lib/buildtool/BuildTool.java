@@ -46,9 +46,9 @@ import com.google.devtools.build.lib.util.AbruptExitException;
 import com.google.devtools.build.lib.util.ExitCode;
 import com.google.devtools.build.lib.vfs.Path;
 import com.google.devtools.common.options.OptionsProvider;
+import com.google.devtools.common.options.RegexPatternOption;
 import java.util.logging.Level;
 import java.util.logging.Logger;
-import java.util.regex.Pattern;
 
 /**
  * Provides the bulk of the implementation of the 'blaze build' command.
@@ -109,10 +109,6 @@ public class BuildTool {
     BuildOptions buildOptions;
     try (SilentCloseable c = Profiler.instance().profile("createBuildOptions")) {
       buildOptions = runtime.createBuildOptions(request);
-    }
-    // Sync the package manager before sending the BuildStartingEvent in runLoadingPhase()
-    try (SilentCloseable c = Profiler.instance().profile("setupPackageCache")) {
-      env.setupPackageCache(request);
     }
 
     ExecutionTool executionTool = null;
@@ -342,9 +338,11 @@ public class BuildTool {
    * Initializes the output filter to the value given with {@code --output_filter}.
    */
   private void initializeOutputFilter(BuildRequest request) {
-    Pattern outputFilter = request.getBuildOptions().outputFilter;
-    if (outputFilter != null) {
-      getReporter().setOutputFilter(OutputFilter.RegexOutputFilter.forPattern(outputFilter));
+    RegexPatternOption outputFilterOption = request.getBuildOptions().outputFilter;
+    if (outputFilterOption != null) {
+      getReporter()
+          .setOutputFilter(
+              OutputFilter.RegexOutputFilter.forPattern(outputFilterOption.regexPattern()));
     }
   }
 
@@ -367,7 +365,7 @@ public class BuildTool {
     result.setExitCondition(exitCondition);
     InterruptedException ie = null;
     try {
-      env.getSkyframeExecutor().notifyCommandComplete();
+      env.getSkyframeExecutor().notifyCommandComplete(env.getReporter());
     } catch (InterruptedException e) {
       env.getReporter().handle(Event.error("Build interrupted during command completion"));
       ie = e;

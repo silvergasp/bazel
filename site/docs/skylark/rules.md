@@ -5,37 +5,43 @@ title: Rules
 
 # Rules
 
-A rule defines a series of [actions](#actions) that Bazel should perform on
-inputs to get a set of outputs. For example, a C++ binary rule might take a set
-of `.cpp` files (the inputs), run `g++` on them (the action), and return an
-executable file (the output).
+A **rule** defines a series of [**actions**](#actions) that Bazel performs on
+inputs to produce a set of outputs. For example, a C++ binary rule might:
 
-Note that, from Bazel's perspective, `g++` and the standard C++ libraries are
-also inputs to this rule. As a rule writer, you must consider not only the
-user-provided inputs to a rule, but also all of the tools and libraries required
-to execute the actions.
+1. Take a set of `.cpp` files (the inputs)
+2. Run `g++` on them (the action)
+3. Return an executable file (the output).
 
-Before creating or modifying any rule, make sure you are familiar with the
-[evaluation model](concepts.md). You must understand the three phases of
-execution and the differences between macros and rules.
+From Bazel's perspective, `g++` and the standard C++ libraries are also inputs
+to this rule. As a rule writer, you must consider not only the user-provided
+inputs to a rule, but also all of the tools and libraries required to execute
+the actions.
+
+Before creating or modifying any rule, ensure you are familiar with Bazel's
+[build phases](concepts.md). It will be important to understand the three phases
+of a build (loading, analysis and execution). It will also be useful to learn
+about [macros](macros.md) to understand the difference between rules and macros.
 
 A few rules are built into Bazel itself. These *native rules*, such as
 `cc_library` and `java_binary`, provide some core support for certain languages.
 By defining your own rules, you can add similar support for languages and tools
 that Bazel does not support natively.
 
-Rules defined in .bzl files work just like native rules. For example, their
-targets have labels, can appear in `bazel query`, and get built whenever they
-are needed for a `bazel build` command or similar. When defining your own rule,
-you get to decide what attributes it supports and how it generates its outputs.
+Bazel provides an extensibility model for writing rules using the
+[Starlark](language.md) language. These rules are written in `.bzl` files,
+which can be loaded directly from `BUILD` files.
 
-The exact behavior of a rule during the
-[analysis phase](concepts.md#evaluation-model) is governed by its
-`implementation` function. This function does not run any external commands.
-Rather, it registers [actions](#actions) that will be used later during the
-execution phase to build the rule's outputs, if they are needed. Rules also
-produce and pass along information that may be useful to other rules, in the
-form of [providers](#providers).
+When defining your own rule, you get to decide what attributes it supports and
+how it generates its outputs.
+
+The rule's `implementation` function defines its exact behavior during the
+[analysis phase](concepts.md#evaluation-model). This function does not run any
+external commands. Rather, it registers [actions](#actions) that will be used
+later during the execution phase to build the rule's outputs, if they are
+needed.
+
+Rules also produce and pass along information that may be useful to other rules
+in the form of [providers](#providers).
 
 ## Contents
 {:.no_toc}
@@ -353,11 +359,11 @@ its outputs are needed for the build.
 
 ## Configurations
 
-Imagine that you want to build a C++ binary and target a different architecture.
-The build can be complex and involve multiple steps. Some of the intermediate
-binaries, like the compilers and code generators, have to run on your machine
-(the host); some of the binaries such the final output must be built for the
-target architecture.
+Imagine that you want to build a C++ binary for a different architecture. The
+build can be complex and involve multiple steps. Some of the intermediate
+binaries, like compilers and code generators, have to run on your machine (the
+host). Some binaries like the final output must be built for the target
+architecture.
 
 For this reason, Bazel has a concept of "configurations" and transitions. The
 topmost targets (the ones requested on the command line) are built in the
@@ -368,17 +374,17 @@ the compiler. In some cases, the same library may be needed for different
 configurations. If this happens, it will be analyzed and potentially built
 multiple times.
 
-By default, Bazel builds the dependencies of a target in the same configuration
-as the target itself, i.e. without transitioning. When a target depends on a
-tool, the label attribute will specify a transition to the host configuration.
-This causes the tool and all of its dependencies to be built for the host
-machine, assuming those dependencies do not themselves have transitions.
+By default, Bazel builds a target's dependencies in the same configuration as
+the target itself, in other words without transitions. When a dependency is a tool
+that's needed to help build the target, the corresponding attribute should
+specify a transition to the host configuration. This causes the tool and all its
+dependencies to build for the host machine.
 
-For each dependency attribute, you can decide whether the dependency target
-should be built in the same configuration, or transition to the host
-configuration (using `cfg`). If a dependency attribute has the flag
-`executable=True`, the configuration must be set explicitly.
-[See example](https://github.com/bazelbuild/examples/blob/master/rules/actions_run/execute.bzl)
+For each dependency attribute, you can use `cfg` to decide if dependencies
+should build in the same configuration or transition to the host configuration.
+If a dependency attribute has the flag `executable=True`, `cfg` must be set
+explicitly. This is to guard against accidentally building a host tool for the
+wrong configuration. [See example](https://github.com/bazelbuild/examples/blob/master/rules/actions_run/execute.bzl)
 
 In general, sources, dependent libraries, and executables that will be needed at
 runtime can use the same configuration.
@@ -390,6 +396,10 @@ in the attribute.
 Otherwise, executables that are used at runtime (e.g. as part of a test) should
 be built for the target configuration. In this case, specify `cfg="target"` in
 the attribute.
+
+`cfg="target"` doesn't actually do anything: it's purely a convenience value to
+help rule designers be explicit about their intentions. When `executable=False`,
+which means `cfg` is optional, only set this when it truly helps readability.
 
 <a name="fragments"></a>
 

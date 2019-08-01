@@ -15,7 +15,7 @@
 package com.google.devtools.build.lib.rules.python;
 
 import static com.google.common.truth.Truth.assertThat;
-import static com.google.devtools.build.lib.rules.python.PythonTestUtils.ensureDefaultIsPY2;
+import static com.google.devtools.build.lib.rules.python.PythonTestUtils.assumesDefaultIsPY2;
 
 import com.google.devtools.build.lib.actions.util.ActionsTestUtil;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
@@ -34,10 +34,23 @@ public class PyLibraryConfiguredTargetTest extends PyBaseConfiguredTargetTestBas
   }
 
   @Test
+  public void pyRuntimeInfoIsNotPresent() throws Exception {
+    useConfiguration("--incompatible_use_python_toolchains=true");
+    scratch.file(
+        "pkg/BUILD", //
+        "py_library(",
+        "    name = 'foo',",
+        "    srcs = [':foo.py'],",
+        ")");
+    assertThat(getConfiguredTarget("//pkg:foo").get(PyRuntimeInfo.PROVIDER)).isNull();
+  }
+
+  @Test
   public void canBuildWithIncompatibleSrcsVersionUnderNewSemantics() throws Exception {
     // See PyBaseConfiguredTargetTestBase for the analogous test under the old semantics, which
     // applies not just to py_library but also to py_binary and py_test.
-    useConfiguration("--incompatible_allow_python_version_transitions=true", "--force_python=PY3");
+    useConfiguration(
+        "--incompatible_allow_python_version_transitions=true", "--python_version=PY3");
     scratch.file(
         "pkg/BUILD",
         "py_library(",
@@ -53,8 +66,9 @@ public class PyLibraryConfiguredTargetTest extends PyBaseConfiguredTargetTestBas
   public void versionIs3IfSetByFlagUnderNewSemantics() throws Exception {
     // See PyBaseConfiguredTargetTestBase for the analogous test under the old semantics, which
     // applies not just to py_library but also to py_binary and py_test.
-    ensureDefaultIsPY2();
-    useConfiguration("--incompatible_allow_python_version_transitions=true", "--force_python=PY3");
+    assumesDefaultIsPY2();
+    useConfiguration(
+        "--incompatible_allow_python_version_transitions=true", "--python_version=PY3");
     scratch.file(
         "pkg/BUILD",
         "py_library(",

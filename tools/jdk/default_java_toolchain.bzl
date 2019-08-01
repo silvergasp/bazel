@@ -19,10 +19,6 @@ JDK8_JVM_OPTS = [
 ]
 
 JDK9_JVM_OPTS = [
-    # In JDK9 we have seen a ~30% slow down in JavaBuilder performance when using
-    # G1 collector and having compact strings enabled.
-    "-XX:+UseParallelOldGC",
-    "-XX:-CompactStrings",
     # Allow JavaBuilder to access internal javac APIs.
     "--add-exports=jdk.compiler/com.sun.tools.javac.api=ALL-UNNAMED",
     "--add-exports=jdk.compiler/com.sun.tools.javac.code=ALL-UNNAMED",
@@ -79,6 +75,8 @@ DEFAULT_TOOLCHAIN_CONFIGURATION = {
     "compatible_javacopts": COMPATIBLE_JAVACOPTS,
     "singlejar": ["@bazel_tools//tools/jdk:singlejar"],
     "bootclasspath": ["@bazel_tools//tools/jdk:platformclasspath"],
+    "source_version": "8",
+    "target_version": "8",
 }
 
 def default_java_toolchain(name, **kwargs):
@@ -108,7 +106,7 @@ def java_runtime_files(name, srcs):
             outs = [src],
         )
 
-def _bootclasspath(ctx):
+def _bootclasspath_impl(ctx):
     host_javabase = ctx.attr.host_javabase[java_common.JavaRuntimeInfo]
 
     # explicitly list output files instead of using TreeArtifact to work around
@@ -141,7 +139,7 @@ def _bootclasspath(ctx):
         arguments = [args],
     )
 
-    bootclasspath = ctx.outputs.jar
+    bootclasspath = ctx.outputs.output_jar
 
     inputs = class_outputs + ctx.files.host_javabase
 
@@ -166,9 +164,13 @@ def _bootclasspath(ctx):
         outputs = [bootclasspath],
         arguments = [args],
     )
+    return [
+        DefaultInfo(files = depset([bootclasspath])),
+        OutputGroupInfo(jar = [bootclasspath]),
+    ]
 
-bootclasspath = rule(
-    implementation = _bootclasspath,
+_bootclasspath = rule(
+    implementation = _bootclasspath_impl,
     attrs = {
         "host_javabase": attr.label(
             cfg = "host",
@@ -181,6 +183,13 @@ bootclasspath = rule(
         "target_javabase": attr.label(
             providers = [java_common.JavaRuntimeInfo],
         ),
+        "output_jar": attr.output(mandatory = True),
     },
-    outputs = {"jar": "%{name}.jar"},
 )
+
+def bootclasspath(name, **kwargs):
+    _bootclasspath(
+        name = name,
+        output_jar = name + ".jar",
+        **kwargs
+    )

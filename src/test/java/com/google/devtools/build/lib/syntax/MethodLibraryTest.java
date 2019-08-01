@@ -78,7 +78,7 @@ public class MethodLibraryTest extends EvaluationTestCase {
                 + LINE_SEPARATOR
                 + "\t\ts[0]",
             "def foo():",
-            "  s = depset()",
+            "  s = []",
             "  if s[0] == 1:",
             "    x = 1",
             "foo()");
@@ -211,12 +211,10 @@ public class MethodLibraryTest extends EvaluationTestCase {
 
   @Test
   public void testGetAttrWithMethods() throws Exception {
-    String msg =
-        "object of type 'string' has no attribute 'count', however, "
-            + "a method of that name exists";
+    String msg = "object of type 'string' has no attribute 'cnt'";
     new SkylarkTest()
-        .testIfExactError(msg, "getattr('a string', 'count')")
-        .testStatement("getattr('a string', 'count', 'default')", "default");
+        .testIfExactError(msg, "getattr('a string', 'cnt')")
+        .testStatement("getattr('a string', 'cnt', 'default')", "default");
   }
 
   @Test
@@ -249,7 +247,9 @@ public class MethodLibraryTest extends EvaluationTestCase {
         .testEval("sorted([True, False, True])", "[False, True, True]")
         .testEval("sorted(['a','x','b','z'])", "[\"a\", \"b\", \"x\", \"z\"]")
         .testEval("sorted({1: True, 5: True, 4: False})", "[1, 4, 5]")
-        .testEval("sorted(depset([1, 5, 4]))", "[1, 4, 5]")
+        .testEval("sorted([3, 2, 1, 0], reverse=True)", "[3, 2, 1, 0]")
+        .testEval("sorted([[1], [], [1, 2]], key=len, reverse=True)", "[[1, 2], [1], []]")
+        .testEval("sorted([[0, 5], [4, 1], [1, 7]], key=max)", "[[4, 1], [0, 5], [1, 7]]")
         .testIfExactError("Cannot compare function with function", "sorted([sorted, sorted])");
   }
 
@@ -335,7 +335,8 @@ public class MethodLibraryTest extends EvaluationTestCase {
             "dict('a')")
         .testIfErrorContains("cannot convert item #0 to a sequence", "dict(['a'])")
         .testIfErrorContains("cannot convert item #0 to a sequence", "dict([('a')])")
-        .testIfErrorContains("too many (3) positional arguments", "dict((3,4), (3,2), (1,2))")
+        .testIfErrorContains(
+            "expected no more than 1 positional arguments, but got 3", "dict((3,4), (3,2), (1,2))")
         .testIfErrorContains(
             "item #0 has length 3, but exactly two elements are required",
             "dict([('a', 'b', 'c')])");
@@ -464,8 +465,8 @@ public class MethodLibraryTest extends EvaluationTestCase {
         .testStatement("hash('skylark')", "skylark".hashCode())
         .testStatement("hash('google')", "google".hashCode())
         .testIfErrorContains(
-            "argument 'value' has type 'NoneType', but should be 'string'\n"
-                + "in call to builtin function hash(value)",
+            "expected value of type 'string' for parameter 'value', "
+                + "for call to function hash(value)",
             "hash(None)");
   }
 
@@ -534,8 +535,8 @@ public class MethodLibraryTest extends EvaluationTestCase {
   public void testEnumerateBadArg() throws Exception {
     new BothModesTest()
         .testIfErrorContains(
-            "argument 'list' has type 'string', but should be 'sequence'\n"
-                + "in call to builtin function enumerate(list)",
+            "expected value of type 'sequence' for parameter 'list', "
+                + "for call to function enumerate(list, start = 0)",
             "enumerate('a')");
   }
 
@@ -636,8 +637,7 @@ public class MethodLibraryTest extends EvaluationTestCase {
         .testStatement("str(zip([1], {2: 'a'}))", "[(1, 2)]")
         .testStatement("str(zip([1], []))", "[]")
         .testIfErrorContains("type 'int' is not iterable", "zip(123)")
-        .testIfErrorContains("type 'int' is not iterable", "zip([1], 1)")
-        .testStatement("str(zip([1], depset([2])))", "[(1, 2)]");
+        .testIfErrorContains("type 'int' is not iterable", "zip([1], 1)");
   }
 
   /**
@@ -700,7 +700,6 @@ public class MethodLibraryTest extends EvaluationTestCase {
   public void testTupleCoercion() throws Exception {
     new BothModesTest()
         .testStatement("tuple([1, 2]) == (1, 2)", true)
-        .testStatement("tuple(depset([1, 2])) == (1, 2)", true)
         // Depends on current implementation of dict
         .testStatement("tuple({1: 'foo', 2: 'bar'}) == (1, 2)", true);
   }
@@ -714,7 +713,7 @@ public class MethodLibraryTest extends EvaluationTestCase {
         // Parameters which may be specified by keyword but are not explicitly 'named'.
         .testStatement("all(elements=[True, True])", Boolean.TRUE)
         .testStatement("any(elements=[True, False])", Boolean.TRUE)
-        .testEval("sorted(self=[3, 0, 2])", "[0, 2, 3]")
+        .testEval("sorted(self=[3, 0, 2], key=None, reverse=False)", "[0, 2, 3]")
         .testEval("reversed(sequence=[3, 2, 0])", "[0, 2, 3]")
         .testEval("tuple(x=[1, 2])", "(1, 2)")
         .testEval("list(x=(1, 2))", "[1, 2]")
@@ -730,7 +729,7 @@ public class MethodLibraryTest extends EvaluationTestCase {
         .testEval("range(start_or_stop=3, stop_or_none=9, step=2)", "range(3, 9, 2)")
         .testStatement("hasattr(x=depset(), name='union')", Boolean.TRUE)
         .testStatement("bool(x=3)", Boolean.TRUE)
-        .testStatement("getattr(x='hello', name='count', default='default')", "default")
+        .testStatement("getattr(x='hello', name='cnt', default='default')", "default")
         .testEval(
             "dir(x={})",
             "[\"clear\", \"get\", \"items\", \"keys\","
@@ -744,5 +743,27 @@ public class MethodLibraryTest extends EvaluationTestCase {
         .testEval("dir(None)", "[]")
         .testIfErrorContains("None", "fail(msg=None)")
         .testEval("type(None)", "'NoneType'");
+  }
+
+  @Test
+  public void testExperimentalStarlarkConfig() throws Exception {
+    new SkylarkTest("--incompatible_restrict_named_params")
+        .testIfErrorContains(
+            "parameter 'elements' may not be specified by name, "
+                + "for call to method join(elements) of 'string'",
+            "','.join(elements=['foo', 'bar'])");
+  }
+
+  @Test
+  public void testStringJoinRequiresStrings() throws Exception {
+    new SkylarkTest("--incompatible_string_join_requires_strings")
+        .testIfErrorContains(
+            "sequence element must be a string (got 'int')", "', '.join(['foo', 2])");
+  }
+
+  @Test
+  public void testStringJoinDoesNotRequireStrings() throws Exception {
+    new SkylarkTest("--incompatible_string_join_requires_strings=false")
+        .testEval("', '.join(['foo', 2])", "'foo, 2'");
   }
 }

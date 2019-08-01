@@ -49,10 +49,10 @@ import com.google.devtools.build.lib.syntax.Identifier;
 import com.google.devtools.build.lib.syntax.LoadStatement;
 import com.google.devtools.build.lib.syntax.Mutability;
 import com.google.devtools.build.lib.syntax.SkylarkImport;
-import com.google.devtools.build.lib.syntax.SkylarkImports;
-import com.google.devtools.build.lib.syntax.SkylarkImports.SkylarkImportSyntaxException;
+import com.google.devtools.build.lib.syntax.SkylarkImport.SkylarkImportSyntaxException;
 import com.google.devtools.build.lib.syntax.StarlarkSemantics;
 import com.google.devtools.build.lib.syntax.Statement;
+import com.google.devtools.build.lib.syntax.ValidationEnvironment;
 import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.lib.vfs.RootedPath;
 import com.google.devtools.build.skyframe.RecordingSkyFunctionEnvironment;
@@ -209,6 +209,41 @@ public class SkylarkImportLookupFunction implements SkyFunction {
             .build();
   }
 
+  private static ContainingPackageLookupValue getContainingPackageLookupValue(
+      Environment env, Label fileLabel)
+      throws InconsistentFilesystemException, SkylarkImportFailedException, InterruptedException {
+    PathFragment dir = Label.getContainingDirectory(fileLabel);
+    PackageIdentifier dirId =
+        PackageIdentifier.create(fileLabel.getPackageIdentifier().getRepository(), dir);
+    ContainingPackageLookupValue containingPackageLookupValue;
+    try {
+      containingPackageLookupValue =
+          (ContainingPackageLookupValue)
+              env.getValueOrThrow(
+                  ContainingPackageLookupValue.key(dirId),
+                  BuildFileNotFoundException.class,
+                  InconsistentFilesystemException.class);
+    } catch (BuildFileNotFoundException e) {
+      throw SkylarkImportFailedException.errorReadingFile(
+          fileLabel.toPathFragment(), new ErrorReadingSkylarkExtensionException(e));
+    }
+    if (containingPackageLookupValue == null) {
+      return null;
+    }
+    // Ensure the label doesn't cross package boundaries.
+    if (!containingPackageLookupValue.hasContainingPackage()) {
+      throw SkylarkImportFailedException.noBuildFile(
+          fileLabel, containingPackageLookupValue.getReasonForNoContainingPackage());
+    }
+    if (!containingPackageLookupValue
+        .getContainingPackageName()
+        .equals(fileLabel.getPackageIdentifier())) {
+      throw SkylarkImportFailedException.labelCrossesPackageBoundary(
+          fileLabel, containingPackageLookupValue);
+    }
+    return containingPackageLookupValue;
+  }
+
   // It is vital that we don't return any value if any call to env#getValue(s)OrThrow throws an
   // exception. We are allowed to wrap the thrown exception and rethrow it for any calling functions
   // to handle though.
@@ -230,33 +265,8 @@ public class SkylarkImportLookupFunction implements SkyFunction {
       return null;
     }
 
-    if (starlarkSemantics.incompatibleDisallowLoadLabelsToCrossPackageBoundaries()) {
-      PathFragment dir = Label.getContainingDirectory(fileLabel);
-      PackageIdentifier dirId =
-          PackageIdentifier.create(fileLabel.getPackageIdentifier().getRepository(), dir);
-      ContainingPackageLookupValue containingPackageLookupValue;
-      try {
-        containingPackageLookupValue = (ContainingPackageLookupValue) env.getValueOrThrow(
-            ContainingPackageLookupValue.key(dirId),
-            BuildFileNotFoundException.class,
-            InconsistentFilesystemException.class);
-      } catch (BuildFileNotFoundException e) {
-        throw SkylarkImportFailedException.errorReadingFile(
-            fileLabel.toPathFragment(),
-            new ErrorReadingSkylarkExtensionException(e));
-      }
-      if (containingPackageLookupValue == null) {
-        return null;
-      }
-      if (!containingPackageLookupValue.hasContainingPackage()) {
-        throw SkylarkImportFailedException.noBuildFile(
-            fileLabel, containingPackageLookupValue.getReasonForNoContainingPackage());
-      }
-      if (!containingPackageLookupValue.getContainingPackageName().equals(
-          fileLabel.getPackageIdentifier())) {
-        throw SkylarkImportFailedException.labelCrossesPackageBoundary(
-            fileLabel, containingPackageLookupValue);
-      }
+    if (getContainingPackageLookupValue(env, fileLabel) == null) {
+      return null;
     }
 
     // Load the AST corresponding to this file.
@@ -396,7 +406,7 @@ public class SkylarkImportLookupFunction implements SkyFunction {
     return result;
   }
 
-  private ImmutableMap<RepositoryName, RepositoryName> getRepositoryMapping(
+  private static ImmutableMap<RepositoryName, RepositoryName> getRepositoryMapping(
       int workspaceChunk, RootedPath workspacePath, Label enclosingFileLabel, Environment env)
       throws InterruptedException {
 
@@ -448,13 +458,13 @@ public class SkylarkImportLookupFunction implements SkyFunction {
    * @param workspaceChunk the workspaceChunk we are currently evaluating that this load statement
    *     originated from. WORKSPACE files are chunked at every non-consecutive load statement and
    *     evaluated separately. See {@link WorkspaceFileValue} for more information.
-   * @param repositoryMapping map from original repository names to new repository names given
-   *     by the main repository
+   * @param repositoryMapping map from original repository names to new repository names given by
+   *     the main repository
    * @return a list of remapped {@link SkylarkImport}s or null if any SkyValue requested wasn't
    *     fully computed yet
    * @throws InterruptedException
    */
-  private ImmutableList<SkylarkImport> remapImports(
+  private static ImmutableList<SkylarkImport> remapImports(
       ImmutableList<SkylarkImport> unRemappedImports,
       int workspaceChunk,
       ImmutableMap<RepositoryName, RepositoryName> repositoryMapping) {
@@ -468,7 +478,7 @@ public class SkylarkImportLookupFunction implements SkyFunction {
     for (SkylarkImport notRemappedImport : unRemappedImports) {
       try {
         SkylarkImport newImport =
-            SkylarkImports.create(notRemappedImport.getImportString(), repositoryMapping);
+            SkylarkImport.create(notRemappedImport.getImportString(), repositoryMapping);
         builder.add(newImport);
       } catch (SkylarkImportSyntaxException ignored) {
         // This won't happen because we are constructing a SkylarkImport from a SkylarkImport so
@@ -542,6 +552,7 @@ public class SkylarkImportLookupFunction implements SkyFunction {
   public static void execAndExport(BuildFileAST ast, Label extensionLabel,
       EventHandler eventHandler,
       com.google.devtools.build.lib.syntax.Environment extensionEnv) throws InterruptedException {
+    ast.replayLexerEvents(extensionEnv, eventHandler);
     ImmutableList<Statement> statements = ast.getStatements();
     for (Statement statement : statements) {
       ast.execTopLevelStatement(statement, extensionEnv, eventHandler);
@@ -556,7 +567,8 @@ public class SkylarkImportLookupFunction implements SkyFunction {
       return;
     }
     AssignmentStatement assignmentStatement = (AssignmentStatement) statement;
-    ImmutableSet<Identifier> boundIdentifiers = assignmentStatement.getLValue().boundIdentifiers();
+    ImmutableSet<Identifier> boundIdentifiers =
+        ValidationEnvironment.boundIdentifiers(assignmentStatement.getLHS());
     for (Identifier ident : boundIdentifiers) {
       Object lookup = extensionEnv.moduleLookup(ident.getName());
       if (lookup instanceof SkylarkExportable) {

@@ -17,7 +17,6 @@ import static com.google.common.truth.Truth.assertThat;
 import static com.google.common.truth.Truth.assertWithMessage;
 
 import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.ImmutableSet;
 import com.google.devtools.build.lib.analysis.DependencyResolver.DependencyKind;
 import com.google.devtools.build.lib.analysis.util.AnalysisTestCase;
 import com.google.devtools.build.lib.analysis.util.TestAspects;
@@ -102,7 +101,7 @@ public class DependencyResolverTest extends AnalysisTestCase {
             getHostConfiguration(),
             aspect != null ? Aspect.forNative(aspect) : null,
             ImmutableMap.of(),
-            /*toolchainLabels=*/ ImmutableSet.of(),
+            /*toolchainContext=*/ null,
             /*trimmingTransitionFactory=*/ null);
 
     return prerequisiteMap;
@@ -184,20 +183,6 @@ public class DependencyResolverTest extends AnalysisTestCase {
     OrderedSetMultimap<DependencyKind, Dependency> map =
         dependentNodeMap("//a:a", TestAspects.EXTRA_ATTRIBUTE_ASPECT);
     assertDep(map, "$dep", "//extra:extra");
-  }
-
-  /**
-   * Null configurations should always be explicit (vs. holding transitions). This lets Bazel skip
-   * its complicated dependency configuration logic for these cases.
-   */
-  @Test
-  public void nullConfigurationsAlwaysExplicit() throws Exception {
-    pkg("a",
-        "genrule(name = 'gen', srcs = ['gen.in'], cmd = '', outs = ['gen.out'])");
-    update();
-    Dependency dep = assertDep(dependentNodeMap("//a:gen", null), "srcs", "//a:gen.in");
-    assertThat(dep.hasExplicitConfiguration()).isTrue();
-    assertThat(dep.getConfiguration()).isNull();
   }
 
   /** Runs the same test with trimmed configurations. */

@@ -31,12 +31,14 @@ import com.google.devtools.build.lib.analysis.configuredtargets.FileConfiguredTa
 import com.google.devtools.build.lib.analysis.util.BuildViewTestCase;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.collect.nestedset.NestedSet;
-import com.google.devtools.build.lib.packages.util.MockCcSupport;
 import com.google.devtools.build.lib.rules.java.JavaCompilationArgsProvider;
+import com.google.devtools.build.lib.rules.java.JavaCompilationInfoProvider;
 import com.google.devtools.build.lib.rules.java.JavaConfiguration.ImportDepsCheckingLevel;
 import com.google.devtools.build.lib.rules.java.JavaInfo;
 import com.google.devtools.build.lib.rules.java.JavaRuleOutputJarsProvider;
 import com.google.devtools.build.lib.rules.java.JavaRuleOutputJarsProvider.OutputJar;
+import com.google.devtools.build.lib.rules.java.JavaSourceInfoProvider;
+import com.google.devtools.build.lib.rules.java.JavaSourceJarsProvider;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Set;
@@ -74,17 +76,27 @@ public class AarImportTest extends BuildViewTestCase {
         ")");
     scratch.file(
         "a/BUILD",
+        "java_import(",
+        "    name = 'foo_src',",
+        "    jars = ['foo-src.jar'],",
+        ")",
         "aar_import(",
         "    name = 'foo',",
         "    aar = 'foo.aar',",
+        "    srcjar = ':foo_src',",
         ")",
         "aar_import(",
         "    name = 'baz',",
         "    aar = 'baz.aar',",
         ")",
+        "java_import(",
+        "    name = 'bar_src',",
+        "    jars = ['bar-src.jar'],",
+        ")",
         "aar_import(",
         "    name = 'bar',",
         "    aar = 'bar.aar',",
+        "    srcjar = ':bar_src',",
         "    deps = [':baz'],",
         "    exports = [':foo', '//java:baz'],",
         ")",
@@ -123,12 +135,7 @@ public class AarImportTest extends BuildViewTestCase {
         "    jars = ['baz.jar'],",
         "    constraints = ['android'],",
         ")");
-    getAnalysisMock()
-        .ccSupport()
-        .setupCrosstool(
-            mockToolsConfig,
-            /* appendToCurrentToolchain=*/ false,
-            MockCcSupport.emptyToolchainForCpu("armeabi-v7a"));
+    getAnalysisMock().ccSupport().setupCcToolchainConfigForCpu(mockToolsConfig, "armeabi-v7a");
   }
 
   @Test
@@ -190,6 +197,43 @@ public class AarImportTest extends BuildViewTestCase {
   }
 
   @Test
+  public void testSourceJarsProvided() throws Exception {
+    ConfiguredTarget aarImportTarget = getConfiguredTarget("//a:foo");
+
+    Iterable<Artifact> srcJars =
+        JavaInfo.getProvider(JavaSourceJarsProvider.class, aarImportTarget).getSourceJars();
+    assertThat(srcJars).hasSize(1);
+    Artifact srcJar = Iterables.getOnlyElement(srcJars);
+    assertThat(srcJar.getExecPathString()).endsWith("foo-src.jar");
+
+    Iterable<Artifact> srcInfoJars =
+        JavaInfo.getProvider(JavaSourceInfoProvider.class, aarImportTarget)
+            .getSourceJarsForJarFiles();
+    assertThat(srcInfoJars).hasSize(1);
+    Artifact srcInfoJar = Iterables.getOnlyElement(srcInfoJars);
+    assertThat(srcInfoJar.getExecPathString()).endsWith("foo-src.jar");
+  }
+
+  @Test
+  public void testSourceJarsCollectedTransitively() throws Exception {
+    ConfiguredTarget aarImportTarget = getConfiguredTarget("//a:bar");
+
+    Iterable<Artifact> srcJars =
+        JavaInfo.getProvider(JavaSourceJarsProvider.class, aarImportTarget)
+            .getTransitiveSourceJars();
+    assertThat(srcJars).hasSize(2);
+    assertThat(ActionsTestUtil.baseArtifactNames(srcJars))
+        .containsExactly("foo-src.jar", "bar-src.jar");
+
+    Iterable<Artifact> srcInfoJars =
+        JavaInfo.getProvider(JavaSourceInfoProvider.class, aarImportTarget)
+            .getSourceJarsForJarFiles();
+    assertThat(srcInfoJars).hasSize(1);
+    Artifact srcInfoJar = Iterables.getOnlyElement(srcInfoJars);
+    assertThat(srcInfoJar.getExecPathString()).endsWith("bar-src.jar");
+  }
+
+  @Test
   public void testResourcesExtractor() throws Exception {
     ValidatedAndroidResources resourceContainer =
         getConfiguredTarget("//a:foo")
@@ -247,7 +291,7 @@ public class AarImportTest extends BuildViewTestCase {
     SpawnAction checkerAction = getGeneratingSpawnAction(artifact);
     List<String> arguments = checkerAction.getArguments();
     assertThat(arguments)
-        .containsAllOf(
+        .containsAtLeast(
             "--bootclasspath_entry",
             "--classpath_entry",
             "--directdep",
@@ -259,9 +303,9 @@ public class AarImportTest extends BuildViewTestCase {
     ensureArgumentsHaveClassEntryOptionWithSuffix(
         arguments, "/intermediate/classes_and_libs_merged.jar");
     assertThat(arguments.stream().filter(arg -> "--classpath_entry".equals(arg)).count())
-        .isEqualTo(5); // transitive classpath
+        .isEqualTo(9); // transitive classpath
     assertThat(arguments.stream().filter(arg -> "--directdep".equals(arg)).count())
-        .isEqualTo(1); // 1 declared dep
+        .isEqualTo(2); // 1 declared dep
   }
 
   @Test
@@ -270,8 +314,14 @@ public class AarImportTest extends BuildViewTestCase {
   }
 
   @Test
-  public void testDepsCheckerActionExistsForLevelOff() throws Exception {
-    checkDepsCheckerActionExistsForLevel(ImportDepsCheckingLevel.OFF, "silence");
+  public void testDepsCheckerActionDoesNotExistsForLevelOff() throws Exception {
+    useConfiguration("--experimental_import_deps_checking=off");
+    ConfiguredTarget aarImportTarget = getConfiguredTarget("//a:bar");
+    OutputGroupInfo outputGroupInfo = aarImportTarget.get(OutputGroupInfo.SKYLARK_CONSTRUCTOR);
+    NestedSet<Artifact> outputGroup =
+        outputGroupInfo.getOutputGroup(OutputGroupInfo.HIDDEN_TOP_LEVEL);
+    assertThat(outputGroup).hasSize(1);
+    assertThat(ActionsTestUtil.getFirstArtifactEndingWith(outputGroup, "jdeps.proto")).isNull();
   }
 
   private void checkDepsCheckerActionExistsForLevel(
@@ -301,7 +351,7 @@ public class AarImportTest extends BuildViewTestCase {
     SpawnAction checkerAction = getGeneratingSpawnAction(artifact);
     List<String> arguments = checkerAction.getArguments();
     assertThat(arguments)
-        .containsAllOf(
+        .containsAtLeast(
             "--bootclasspath_entry",
             "--classpath_entry",
             "--input",
@@ -412,7 +462,7 @@ public class AarImportTest extends BuildViewTestCase {
                 "libapp.jar"));
     assertThat(appCompileAction).isNotNull();
     assertThat(ActionsTestUtil.prettyArtifactNames(appCompileAction.getInputs()))
-        .containsAllOf(
+        .containsAtLeast(
             "a/_aar/foo/classes_and_libs_merged.jar",
             "a/_aar/bar/classes_and_libs_merged.jar",
             "a/_aar/baz/classes_and_libs_merged.jar");
@@ -464,6 +514,7 @@ public class AarImportTest extends BuildViewTestCase {
 
   @Test
   public void testJavaCompilationArgsProvider() throws Exception {
+    useConfiguration("--experimental_import_deps_checking=ERROR");
     ConfiguredTarget aarImportTarget = getConfiguredTarget("//a:bar");
 
     JavaCompilationArgsProvider provider =
@@ -516,7 +567,7 @@ public class AarImportTest extends BuildViewTestCase {
             Iterables.transform(
                 getGeneratingAction(binaryMergedManifest).getInputs(),
                 Artifact::getRootRelativePathString))
-        .containsAllOf(getAndroidManifest("//a:foo"), getAndroidManifest("//a:bar"));
+        .containsAtLeast(getAndroidManifest("//a:foo"), getAndroidManifest("//a:bar"));
   }
 
   private String getAndroidManifest(String aarImport) throws Exception {
@@ -535,5 +586,18 @@ public class AarImportTest extends BuildViewTestCase {
         .containsExactly(
             Label.parseAbsolute("//a:foo", ImmutableMap.of()),
             Label.parseAbsolute("//java:baz", ImmutableMap.of()));
+  }
+
+  @Test
+  public void testRClassFromAarImportInCompileClasspath() throws Exception {
+    NestedSet<Artifact> compilationClasspath =
+        JavaInfo.getProvider(JavaCompilationInfoProvider.class, getConfiguredTarget("//a:library"))
+            .getCompilationClasspath();
+
+    assertThat(
+            compilationClasspath.toList().stream()
+                .filter(artifact -> artifact.getFilename().equalsIgnoreCase("foo_resources.jar"))
+                .count())
+        .isEqualTo(1);
   }
 }

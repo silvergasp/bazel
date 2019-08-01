@@ -16,9 +16,10 @@ package com.google.devtools.build.lib.analysis.config;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Joiner;
+import com.google.common.base.Preconditions;
 import com.google.common.base.Verify;
 import com.google.common.base.VerifyException;
-import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.LinkedHashMultimap;
 import com.google.common.collect.LinkedListMultimap;
@@ -27,9 +28,11 @@ import com.google.common.collect.Sets;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
 import com.google.devtools.build.lib.analysis.Dependency;
 import com.google.devtools.build.lib.analysis.DependencyResolver.DependencyKind;
+import com.google.devtools.build.lib.analysis.PlatformOptions;
 import com.google.devtools.build.lib.analysis.TargetAndConfiguration;
 import com.google.devtools.build.lib.analysis.config.transitions.ConfigurationTransition;
 import com.google.devtools.build.lib.analysis.config.transitions.NoTransition;
+import com.google.devtools.build.lib.analysis.config.transitions.NullTransition;
 import com.google.devtools.build.lib.analysis.skylark.StarlarkTransition;
 import com.google.devtools.build.lib.analysis.skylark.StarlarkTransition.TransitionException;
 import com.google.devtools.build.lib.cmdline.Label;
@@ -38,22 +41,28 @@ import com.google.devtools.build.lib.events.Event;
 import com.google.devtools.build.lib.events.ExtendedEventHandler;
 import com.google.devtools.build.lib.packages.Attribute;
 import com.google.devtools.build.lib.packages.RuleClassProvider;
-import com.google.devtools.build.lib.packages.RuleTransitionFactory;
 import com.google.devtools.build.lib.packages.Target;
+import com.google.devtools.build.lib.packages.TargetUtils;
 import com.google.devtools.build.lib.skyframe.BuildConfigurationValue;
 import com.google.devtools.build.lib.skyframe.ConfiguredTargetFunction;
 import com.google.devtools.build.lib.skyframe.ConfiguredTargetValue;
+import com.google.devtools.build.lib.skyframe.PackageValue;
+import com.google.devtools.build.lib.skyframe.PlatformMappingValue;
 import com.google.devtools.build.lib.skyframe.SkyframeExecutor;
+import com.google.devtools.build.lib.skyframe.SkyframeExecutor.ConfigurationsResult;
 import com.google.devtools.build.lib.skyframe.TransitiveTargetKey;
 import com.google.devtools.build.lib.skyframe.TransitiveTargetValue;
 import com.google.devtools.build.lib.util.OrderedSetMultimap;
+import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.skyframe.SkyFunction;
 import com.google.devtools.build.skyframe.SkyKey;
 import com.google.devtools.build.skyframe.ValueOrException;
+import com.google.devtools.common.options.OptionsParsingException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
@@ -83,9 +92,9 @@ public final class ConfigurationResolver {
    * Translates a set of {@link Dependency} objects with configuration transition requests to the
    * same objects with resolved configurations.
    *
-   * <p>If {@link BuildConfiguration.Options#trimConfigurations()} is true, these configurations
-   * only contain the fragments needed by the dep and its transitive closure. Else they
-   * unconditionally include all fragments.
+   * <p>If {@link BuildConfiguration#trimConfigurations()} is true, these configurations only
+   * contain the fragments needed by the dep and its transitive closure. Else they unconditionally
+   * include all fragments.
    *
    * <p>This method is heavily performance-optimized. Because {@link ConfiguredTargetFunction} calls
    * it over every edge in the configured target graph, small inefficiencies can have observable
@@ -125,9 +134,7 @@ public final class ConfigurationResolver {
     // Split transitions may map to multiple values. All other transitions map to one.
     Map<FragmentsAndTransition, List<BuildOptions>> transitionsMap = new LinkedHashMap<>();
 
-    // The fragments used by the current target's configuration.
-    FragmentClassSet ctgFragments = ctgValue.getConfiguration().fragmentClasses();
-    BuildOptions ctgOptions = ctgValue.getConfiguration().getOptions();
+    BuildConfiguration currentConfiguration = ctgValue.getConfiguration();
 
     // Stores the configuration-resolved versions of each dependency. This method must preserve the
     // original label ordering of each attribute. For example, if originalDeps.get("data") is
@@ -157,16 +164,17 @@ public final class ConfigurationResolver {
       Dependency dep = depsEntry.getValue();
       DependencyEdge dependencyEdge = new DependencyEdge(depsEntry.getKey(), dep.getLabel());
       attributesAndLabels.add(dependencyEdge);
-      // Certain targets (like output files) trivially re-use their input configuration. Likewise,
-      // deps with null configurations (e.g. source files), can be trivially computed. So we skip
-      // all logic in this method for these cases and just reinsert their original configurations
-      // when preparing final results. Note that null-configured deps are received with
-      // NullConfigurationDependency instead of
-      // Dependency(label, transition=Attribute.Configuration.Transition.NULL)).
-      //
-      // A *lot* of targets have null deps, so this produces real savings. Profiling tests over a
-      // simple cc_binary show this saves ~1% of total analysis phase time.
-      if (dep.hasExplicitConfiguration()) {
+      // DependencyResolver should never emit a Dependency with an explicit configuration
+      Preconditions.checkState(!dep.hasExplicitConfiguration());
+
+      // The null configuration can be trivially computed (it's, well, null), so special-case that
+      // transition here and skip the rest of the logic. A *lot* of targets have null deps, so
+      // this produces real savings. Profiling tests over a simple cc_binary show this saves ~1% of
+      // total analysis phase time.
+      ConfigurationTransition transition = dep.getTransition();
+      if (transition == NullTransition.INSTANCE) {
+        putOnlyEntry(
+            resolvedDeps, dependencyEdge, Dependency.withNullConfiguration(dep.getLabel()));
         continue;
       }
 
@@ -184,24 +192,46 @@ public final class ConfigurationResolver {
             env, ctgValue, dependencyEdge.dependencyKind.getAttribute(), dep, depFragments);
       }
 
-      boolean sameFragments = depFragments.equals(ctgFragments.fragmentClasses());
-      ConfigurationTransition transition = dep.getTransition();
+      boolean sameFragments =
+          depFragments.equals(currentConfiguration.fragmentClasses().fragmentClasses());
 
       if (sameFragments) {
         if (transition == NoTransition.INSTANCE) {
-          // The dep uses the same exact configuration.
+          if (ctgValue.getConfiguration().trimConfigurationsRetroactively()
+              && !dep.getAspects().isEmpty()) {
+            String message =
+                ctgValue.getLabel()
+                    + " has aspects attached, but these are not supported in retroactive"
+                    + " trimming mode.";
+            env.getListener()
+                .handle(Event.error(TargetUtils.getLocationMaybe(ctgValue.getTarget()), message));
+            throw new ConfiguredTargetFunction.DependencyEvaluationException(
+                new InvalidConfigurationException(message));
+          }
+          // The dep uses the same exact configuration. Let's re-use the current configuration and
+          // skip adding a Skyframe dependency edge on it.
           putOnlyEntry(
               resolvedDeps,
               dependencyEdge,
               Dependency.withConfigurationAndAspects(
                   dep.getLabel(), ctgValue.getConfiguration(), dep.getAspects()));
           continue;
-        } else if (transition == HostTransition.INSTANCE) {
+        } else if (transition.isHostTransition()) {
           // The current rule's host configuration can also be used for the dep. We short-circuit
           // the standard transition logic for host transitions because these transitions are
           // uniquely frequent. It's possible, e.g., for every node in the configured target graph
           // to incur multiple host transitions. So we aggressively optimize to avoid hurting
           // analysis time.
+          if (hostConfiguration.trimConfigurationsRetroactively() && !dep.getAspects().isEmpty()) {
+            String message =
+                ctgValue.getLabel()
+                    + " has aspects attached, but these are not supported in retroactive"
+                    + " trimming mode.";
+            env.getListener()
+                .handle(Event.error(TargetUtils.getLocationMaybe(ctgValue.getTarget()), message));
+            throw new ConfiguredTargetFunction.DependencyEvaluationException(
+                new InvalidConfigurationException(message));
+          }
           putOnlyEntry(
               resolvedDeps,
               dependencyEdge,
@@ -215,21 +245,39 @@ public final class ConfigurationResolver {
       FragmentsAndTransition transitionKey = new FragmentsAndTransition(depFragments, transition);
       List<BuildOptions> toOptions = transitionsMap.get(transitionKey);
       if (toOptions == null) {
-        toOptions = applyTransition(ctgOptions, transition, depFragments, ruleClassProvider,
-            !sameFragments);
+        try {
+          HashMap<PackageValue.Key, PackageValue> buildSettingPackages =
+              StarlarkTransition.getBuildSettingPackages(env, transition);
+          if (buildSettingPackages == null) {
+            return null;
+          }
+          toOptions =
+              applyTransition(
+                  currentConfiguration.getOptions(),
+                  transition,
+                  buildSettingPackages,
+                  env.getListener());
+        } catch (TransitionException e) {
+          throw new ConfiguredTargetFunction.DependencyEvaluationException(e);
+        }
         transitionsMap.put(transitionKey, toOptions);
       }
-
-      try {
-        StarlarkTransition.postProcessStarlarkTransitions(env.getListener(), transition);
-      } catch (TransitionException e) {
-        throw new ConfiguredTargetFunction.DependencyEvaluationException(e);
-      }
-
       // If the transition doesn't change the configuration, trivially re-use the original
       // configuration.
-      if (sameFragments && toOptions.size() == 1
-          && Iterables.getOnlyElement(toOptions).equals(ctgOptions)) {
+      if (sameFragments
+          && toOptions.size() == 1
+          && Iterables.getOnlyElement(toOptions).equals(currentConfiguration.getOptions())) {
+        if (ctgValue.getConfiguration().trimConfigurationsRetroactively()
+            && !dep.getAspects().isEmpty()) {
+          String message =
+              ctgValue.getLabel()
+                  + " has aspects attached, but these are not supported in retroactive"
+                  + " trimming mode.";
+          env.getListener()
+              .handle(Event.error(TargetUtils.getLocationMaybe(ctgValue.getTarget()), message));
+          throw new ConfiguredTargetFunction.DependencyEvaluationException(
+              new InvalidConfigurationException(message));
+        }
         putOnlyEntry(
             resolvedDeps,
             dependencyEdge,
@@ -239,19 +287,38 @@ public final class ConfigurationResolver {
       }
 
       // If we get here, we have to get the configuration from Skyframe.
-      for (BuildOptions options : toOptions) {
-        if (sameFragments) {
-          keysToEntries.put(
-              BuildConfigurationValue.key(
-                  ctgFragments, BuildOptions.diffForReconstruction(defaultBuildOptions, options)),
-              depsEntry);
+      PathFragment platformMappingPath =
+          currentConfiguration.getOptions().get(PlatformOptions.class).platformMappings;
+      PlatformMappingValue platformMappingValue =
+          (PlatformMappingValue) env.getValue(PlatformMappingValue.Key.create(platformMappingPath));
+      if (platformMappingValue == null) {
+        return null;
+      }
 
-        } else {
-          keysToEntries.put(
-              BuildConfigurationValue.key(
-                  depFragments, BuildOptions.diffForReconstruction(defaultBuildOptions, options)),
-              depsEntry);
+      try {
+        for (BuildOptions options : toOptions) {
+          if (sameFragments) {
+            keysToEntries.put(
+                BuildConfigurationValue.keyWithPlatformMapping(
+                    platformMappingValue,
+                    defaultBuildOptions,
+                    currentConfiguration.fragmentClasses(),
+                    BuildOptions.diffForReconstruction(defaultBuildOptions, options)),
+                depsEntry);
+
+          } else {
+            keysToEntries.put(
+                BuildConfigurationValue.keyWithPlatformMapping(
+                    platformMappingValue,
+                    defaultBuildOptions,
+                    depFragments,
+                    BuildOptions.diffForReconstruction(defaultBuildOptions, options)),
+                depsEntry);
+          }
         }
+      } catch (OptionsParsingException e) {
+        throw new ConfiguredTargetFunction.DependencyEvaluationException(
+            new InvalidConfigurationException(e));
       }
     }
 
@@ -285,14 +352,27 @@ public final class ConfigurationResolver {
           // null out on missing values from *this specific Skyframe request*.
           return null;
         }
-        BuildConfigurationValue trimmedConfig = (BuildConfigurationValue) valueOrException.get();
+        BuildConfiguration trimmedConfig =
+            ((BuildConfigurationValue) valueOrException.get()).getConfiguration();
         for (Map.Entry<DependencyKind, Dependency> info : keysToEntries.get(key)) {
           Dependency originalDep = info.getValue();
+          if (trimmedConfig.trimConfigurationsRetroactively()
+              && !originalDep.getAspects().isEmpty()) {
+            String message =
+                ctgValue.getLabel()
+                    + " has aspects attached, but these are not supported in retroactive"
+                    + " trimming mode.";
+            env.getListener()
+                .handle(Event.error(TargetUtils.getLocationMaybe(ctgValue.getTarget()), message));
+            throw new ConfiguredTargetFunction.DependencyEvaluationException(
+                new InvalidConfigurationException(message));
+          }
           DependencyEdge attr = new DependencyEdge(info.getKey(), originalDep.getLabel());
-          Dependency resolvedDep = Dependency.withConfigurationAndAspects(originalDep.getLabel(),
-              trimmedConfig.getConfiguration(), originalDep.getAspects());
+          Dependency resolvedDep =
+              Dependency.withConfigurationAndAspects(
+                  originalDep.getLabel(), trimmedConfig, originalDep.getAspects());
           Attribute attribute = attr.dependencyKind.getAttribute();
-          if (attribute != null && attribute.hasSplitConfigurationTransition()) {
+          if (attribute != null && attribute.getTransitionFactory().isSplit()) {
             resolvedDeps.put(attr, resolvedDep);
           } else {
             putOnlyEntry(resolvedDeps, attr, resolvedDep);
@@ -439,29 +519,52 @@ public final class ConfigurationResolver {
   /**
    * Applies a configuration transition over a set of build options.
    *
-   * @return the build options for the transitioned configuration. If trimResults is true,
-   *     only options needed by the required fragments are included. Else the same options as the
-   *     original input are included (with different possible values, of course).
+   * <p>prework - load all default values for read build settings in Starlark transitions (by
+   * design, {@link BuildOptions} never holds default values of build settings)
+   *
+   * <p>postwork - replay events/throw errors from transition implementation function and validate
+   * the outputs of the transition
+   *
+   * @return the build options for the transitioned configuration.
    */
   @VisibleForTesting
-  public static List<BuildOptions> applyTransition(BuildOptions fromOptions,
+  public static List<BuildOptions> applyTransition(
+      BuildOptions fromOptions,
       ConfigurationTransition transition,
-      Iterable<Class<? extends BuildConfiguration.Fragment>> requiredFragments,
-      RuleClassProvider ruleClassProvider, boolean trimResults) {
+      Map<PackageValue.Key, PackageValue> buildSettingPackages,
+      ExtendedEventHandler eventHandler)
+      throws TransitionException {
+    boolean doesStarlarkTransition = StarlarkTransition.doesStarlarkTransition(transition);
+    if (doesStarlarkTransition) {
+      fromOptions =
+          addDefaultStarlarkOptions(
+              fromOptions,
+              StarlarkTransition.getDefaultInputValues(buildSettingPackages, transition));
+    }
 
     // TODO(bazel-team): safety-check that this never mutates fromOptions.
     List<BuildOptions> result = transition.apply(fromOptions);
 
-    if (!trimResults) {
-      return result;
-    } else {
-      ImmutableList.Builder<BuildOptions> trimmedOptions = ImmutableList.builder();
-      for (BuildOptions toOptions : result) {
-        trimmedOptions.add(toOptions.trim(
-            BuildConfiguration.getOptionsClasses(requiredFragments, ruleClassProvider)));
-      }
-      return trimmedOptions.build();
+    if (doesStarlarkTransition) {
+      StarlarkTransition.replayEvents(eventHandler, transition);
+      result = StarlarkTransition.validate(transition, buildSettingPackages, result);
     }
+    return result;
+  }
+
+  private static BuildOptions addDefaultStarlarkOptions(
+      BuildOptions fromOptions, ImmutableMap<Label, Object> buildSettingDefaults) {
+    BuildOptions.Builder optionsWithDefaults = null;
+    for (Map.Entry<Label, Object> buildSettingDefault : buildSettingDefaults.entrySet()) {
+      Label buildSetting = buildSettingDefault.getKey();
+      if (!fromOptions.getStarlarkOptions().containsKey(buildSetting)) {
+        if (optionsWithDefaults == null) {
+          optionsWithDefaults = fromOptions.toBuilder();
+        }
+        optionsWithDefaults.addStarlarkOption(buildSetting, buildSettingDefault.getValue());
+      }
+    }
+    return optionsWithDefaults == null ? fromOptions : optionsWithDefaults.build();
   }
 
   /**
@@ -556,9 +659,11 @@ public final class ConfigurationResolver {
    *
    * <ol>
    *   <li>Apply the per-target transitions specified in {@code asDeps}. This can be used, e.g., to
-   *       apply {@link RuleTransitionFactory}s over global top-level configurations.
+   *       apply {@link
+   *       com.google.devtools.build.lib.analysis.config.transitions.TransitionFactory}s over global
+   *       top-level configurations.
    *   <li>(Optionally) trim configurations to only the fragments the targets actually need. This is
-   *       triggered by {@link BuildConfiguration.Options#trimConfigurations}.
+   *       triggered by {@link BuildConfiguration#trimConfigurations}.
    * </ol>
    *
    * <p>Preserves the original input order (but merges duplicate nodes that might occur due to
@@ -576,19 +681,18 @@ public final class ConfigurationResolver {
    *     transitions
    * @param eventHandler the error event handler
    * @param skyframeExecutor the executor used for resolving Skyframe keys
-   * @throws TransitionException if there was an issue applying a Starlark-defined transition
    */
   // TODO(bazel-team): error out early for targets that fail - failed configuration evaluations
   //   should never make it through analysis (and especially not seed ConfiguredTargetValues)
   // TODO(gregce): merge this more with resolveConfigurations? One crucial difference is
   //   resolveConfigurations can null-return on missing deps since it executes inside Skyfunctions.
   // Keep this in sync with {@link PrepareAnalysisPhaseFunction#resolveConfigurations}.
-  public static LinkedHashSet<TargetAndConfiguration> getConfigurationsFromExecutor(
+  public static TopLevelTargetsAndConfigsResult getConfigurationsFromExecutor(
       Iterable<TargetAndConfiguration> defaultContext,
       Multimap<BuildConfiguration, Dependency> targetsToEvaluate,
       ExtendedEventHandler eventHandler,
       SkyframeExecutor skyframeExecutor)
-      throws TransitionException {
+      throws InvalidConfigurationException {
 
     Map<Label, Target> labelsToTargets = new LinkedHashMap<>();
     for (TargetAndConfiguration targetAndConfig : defaultContext) {
@@ -599,13 +703,15 @@ public final class ConfigurationResolver {
     // could be successfully Skyframe-evaluated.
     Map<TargetAndConfiguration, TargetAndConfiguration> successfullyEvaluatedTargets =
         new LinkedHashMap<>();
+    boolean hasError = false;
     if (!targetsToEvaluate.isEmpty()) {
       for (BuildConfiguration fromConfig : targetsToEvaluate.keySet()) {
-        Multimap<Dependency, BuildConfiguration> evaluatedTargets =
+        ConfigurationsResult configurationsResult =
             skyframeExecutor.getConfigurations(
                 eventHandler, fromConfig.getOptions(), targetsToEvaluate.get(fromConfig));
+        hasError |= configurationsResult.hasError();
         for (Map.Entry<Dependency, BuildConfiguration> evaluatedTarget :
-            evaluatedTargets.entries()) {
+            configurationsResult.getConfigurationMap().entries()) {
           Target target = labelsToTargets.get(evaluatedTarget.getKey().getLabel());
           successfullyEvaluatedTargets.put(
               new TargetAndConfiguration(target, fromConfig),
@@ -624,7 +730,30 @@ public final class ConfigurationResolver {
         result.add(originalInput);
       }
     }
-    return result;
+    return new TopLevelTargetsAndConfigsResult(result, hasError);
+  }
+
+  /**
+   * The result of {@link #getConfigurationsFromExecutor} which also registers if an error was
+   * recorded.
+   */
+  public static class TopLevelTargetsAndConfigsResult {
+    private final Collection<TargetAndConfiguration> configurations;
+    private final boolean hasError;
+
+    public TopLevelTargetsAndConfigsResult(
+        Collection<TargetAndConfiguration> configurations, boolean hasError) {
+      this.configurations = configurations;
+      this.hasError = hasError;
+    }
+
+    public boolean hasError() {
+      return hasError;
+    }
+
+    public Collection<TargetAndConfiguration> getTargetsAndConfigs() {
+      return configurations;
+    }
   }
 }
 

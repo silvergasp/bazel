@@ -59,7 +59,10 @@ http_archive(
     name = "bazel_skylib",
     sha256 = "54ee22e5b9f0dd2b42eb8a6c1878dee592cfe8eb33223a7dbbc583a383f6ee1a",
     strip_prefix = "bazel-skylib-0.6.0",
-    urls = ["https://github.com/bazelbuild/bazel-skylib/archive/0.6.0.zip"],
+    urls = [
+        "https://mirror.bazel.build/github.com/bazelbuild/bazel-skylib/archive/0.6.0.zip",
+        "https://github.com/bazelbuild/bazel-skylib/archive/0.6.0.zip",
+    ],
     type = "zip",
 )
 
@@ -67,7 +70,10 @@ http_archive(
     name = "com_google_protobuf",
     strip_prefix = "protobuf-7b28271a61a3da0a37f6fda399b0c4c86464e5b3",
     sha256 = "d625beb4a43304409429a0466bb4fb44c89f7e7d90aeced972b8a61dbe92c80b",
-    urls = ["https://github.com/google/protobuf/archive/7b28271a61a3da0a37f6fda399b0c4c86464e5b3.zip"],  # 2018-11-16
+    urls = [
+        "https://mirror.bazel.build/github.com/google/protobuf/archive/7b28271a61a3da0a37f6fda399b0c4c86464e5b3.zip",
+        "https://github.com/google/protobuf/archive/7b28271a61a3da0a37f6fda399b0c4c86464e5b3.zip",
+    ],
 )
 
 # java_lite_proto_library rules implicitly depend on @com_google_protobuf_javalite//:javalite_toolchain,
@@ -76,7 +82,10 @@ http_archive(
     name = "com_google_protobuf_javalite",
     sha256 = "d8a2fed3708781196f92e1e7e7e713cf66804bd2944894401057214aff4f468e",
     strip_prefix = "protobuf-5e8916e881c573c5d83980197a6f783c132d4276",
-    urls = ["https://github.com/google/protobuf/archive/5e8916e881c573c5d83980197a6f783c132d4276.zip"],
+    urls = [
+        "https://mirror.bazel.build/github.com/google/protobuf/archive/5e8916e881c573c5d83980197a6f783c132d4276.zip",
+        "https://github.com/google/protobuf/archive/5e8916e881c573c5d83980197a6f783c132d4276.zip",
+    ],
 )
 EOF
 }
@@ -121,6 +130,7 @@ $proto_library_name(
 $proto_library_name(
   name = "phonenumber_proto",
   srcs = ["phonenumber/phonenumber.proto"],
+  $proto_source_root
 )
 EOF
 
@@ -381,7 +391,7 @@ EOF
 function test_proto_source_root() {
   write_workspace ""
   write_setup "proto_library" "proto_source_root = 'x/person'" ""
-  bazel build //x/person:person_proto > "$TEST_log" || fail "Expected success"
+  bazel build --verbose_failures //x/person:person_proto > "$TEST_log" || fail "Expected success"
 }
 
 function test_proto_source_root_fails() {
@@ -415,13 +425,6 @@ function test_proto_source_root_glob() {
   bazel build //proto_library/src:all >& "$TEST_log" || fail "Expected success"
 }
 
-function test_proto_source_root_glob() {
-  write_workspace ""
-  write_regression_setup
-  bazel build //proto_library/src:all --strict_proto_deps=off >& "$TEST_log" \
-      || fail "Expected success"
-}
-
 function test_proto_source_root_multiple_workspaces() {
   write_workspace "a/b/"
   write_workspace "c/d/"
@@ -430,6 +433,62 @@ function test_proto_source_root_multiple_workspaces() {
   write_workspaces_setup
 
   bazel build @main_repo//src:all_protos >& "$TEST_log" || fail "Expected success"
+}
+
+function test_cc_proto_library() {
+  write_workspace ""
+  mkdir -p a
+  cat > a/BUILD <<EOF
+proto_library(name='p', srcs=['p.proto'])
+cc_proto_library(name='cp', deps=[':p'])
+cc_library(name='c', srcs=['c.cc'], deps=[':cp'])
+EOF
+
+  cat > a/p.proto <<EOF
+syntax = "proto2";
+package a;
+message A {
+  optional int32 a = 1;
+}
+EOF
+
+  cat > a/c.cc <<EOF
+#include "a/p.pb.h"
+
+void f() {
+  a::A a;
+}
+EOF
+
+  bazel build //a:c || fail "build failed"
+}
+
+function test_cc_proto_library_import_prefix_stripping() {
+  write_workspace ""
+  mkdir -p a/dir
+  cat > a/BUILD <<EOF
+proto_library(name='p', srcs=['dir/p.proto'], strip_import_prefix='/a')
+cc_proto_library(name='cp', deps=[':p'])
+cc_library(name='c', srcs=['c.cc'], deps=[':cp'])
+EOF
+
+  cat > a/dir/p.proto <<EOF
+syntax = "proto2";
+package a;
+message A {
+  optional int32 a = 1;
+}
+EOF
+
+  cat > a/c.cc <<EOF
+#include "dir/p.pb.h"
+
+void f() {
+  a::A a;
+}
+EOF
+
+  bazel build //a:c || fail "build failed"
 }
 
 function test_import_prefix_stripping() {

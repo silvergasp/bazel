@@ -20,8 +20,9 @@
 #include <string>
 #include <vector>
 
-#include "src/main/cpp/util/port.h"
 #include "src/main/cpp/blaze_util.h"
+#include "src/main/cpp/server_process_info.h"
+#include "src/main/cpp/util/port.h"
 
 namespace blaze {
 
@@ -69,25 +70,33 @@ Dumper* Create(std::string* error = nullptr);
 
 }  // namespace embedded_binaries
 
-struct GlobalVariables;
+class StartupOptions;
 
 class SignalHandler {
  public:
   typedef void (* Callback)();
 
   static SignalHandler& Get() { return INSTANCE; }
-  GlobalVariables* GetGlobals() { return _globals; }
-  void CancelServer() { _cancel_server(); }
-  void Install(GlobalVariables* globals, Callback cancel_server);
+  const ServerProcessInfo* GetServerProcessInfo() const {
+    return server_process_info_;
+  }
+  const std::string& GetProductName() const { return product_name_; }
+  const std::string& GetOutputBase() const { return output_base_; }
+  void CancelServer() { cancel_server_(); }
+  void Install(
+      const std::string &product_name, const std::string &output_base,
+      const ServerProcessInfo* server_process_info, Callback cancel_server);
   ATTRIBUTE_NORETURN void PropagateSignalOrExit(int exit_code);
 
  private:
   static SignalHandler INSTANCE;
 
-  GlobalVariables* _globals;
-  Callback _cancel_server;
+  std::string product_name_;
+  std::string output_base_;
+  const ServerProcessInfo* server_process_info_;
+  Callback cancel_server_;
 
-  SignalHandler() : _globals(nullptr), _cancel_server(nullptr) {}
+  SignalHandler() : server_process_info_(nullptr), cancel_server_(nullptr) {}
 };
 
 // A signal-safe version of fprintf(stderr, ...).
@@ -95,7 +104,8 @@ void SigPrintf(const char *format, ...);
 
 std::string GetProcessIdAsString();
 
-// Get the absolute path to the binary being executed.
+// Get an absolute path to the binary being executed that is guaranteed to be
+// readable.
 std::string GetSelfPath();
 
 // Returns the directory Bazel can use to store output.
@@ -156,6 +166,7 @@ int ExecuteDaemon(const std::string& exe,
                   const bool daemon_output_append,
                   const std::string& binaries_dir,
                   const std::string& server_dir,
+                  const StartupOptions &options,
                   BlazeServerStartup** server_startup);
 
 // A character used to separate paths in a list.
@@ -212,6 +223,8 @@ void CreateSecureOutputRoot(const std::string& path);
 
 std::string GetEnv(const std::string& name);
 
+std::string GetPathEnv(const std::string& name);
+
 bool ExistsEnv(const std::string& name);
 
 void SetEnv(const std::string& name, const std::string& value);
@@ -231,13 +244,15 @@ std::string GetUserName();
 // Returns true iff the current terminal is running inside an Emacs.
 bool IsEmacsTerminal();
 
-// Returns true if stderr is connected to a terminal that can support color
-// and cursor movement.
-bool IsStderrStandardTerminal();
+// Returns true iff both stdout and stderr support color and cursor movement.
+// This is used to determine whether or not to use stylized output, which relies
+// on both stdout and stderr being standard terminals to avoid confusing UI
+// issues (ie one stream deleting a line the other intended to be displayed).
+bool IsStandardTerminal();
 
-// Returns the number of columns of the terminal to which stderr is
-// connected, or 80 if there is no such terminal.
-int GetStderrTerminalColumns();
+// Returns the number of columns of the terminal to which stdout is connected,
+// or 80 if there is no such terminal.
+int GetTerminalColumns();
 
 // Gets the system-wide explicit limit for the given resource.
 //
@@ -263,7 +278,6 @@ bool UnlimitCoredumps();
 
 #if defined(_WIN32) || defined(__CYGWIN__)
 std::string DetectBashAndExportBazelSh();
-void DetectBashOrDie();
 #endif  // if defined(_WIN32) || defined(__CYGWIN__)
 
 // This function has no effect on Unix platforms.

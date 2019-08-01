@@ -159,9 +159,7 @@ function test_bazelrc_option() {
     local -r pkg="${FUNCNAME}"
     mkdir -p "$pkg" || fail "could not create \"$pkg\""
 
-    if [[ "$(get_real_path "${bazelrc}")" != "$(get_real_path ".${PRODUCT_NAME}rc")" ]]; then
-      cp "${bazelrc}" ".${PRODUCT_NAME}rc"
-    fi
+    cp "${bazelrc}" ".${PRODUCT_NAME}rc" || true
 
     echo "build --subcommands" >>".${PRODUCT_NAME}rc"    # default bazelrc
     $PATH_TO_BAZEL_BIN info --announce_rc >/dev/null 2>$TEST_log
@@ -325,36 +323,32 @@ function test_no_package_loading_on_benign_workspace_file_changes() {
 
   echo 'workspace(name="wsname1")' > WORKSPACE
   echo 'sh_library(name="shname1")' > $pkg/foo/BUILD
-  # TODO(b/37617303): make tests UI-independent
-  bazel query --noexperimental_ui //$pkg/foo:all >& "$TEST_log" \
+  bazel query --experimental_ui_debug_all_events //$pkg/foo:all >& "$TEST_log" \
       || fail "Expected success"
   expect_log "Loading package: $pkg/foo"
   expect_log "//$pkg/foo:shname1"
 
   echo 'sh_library(name="shname2")' > $pkg/foo/BUILD
-  # TODO(b/37617303): make tests UI-independent
-  bazel query --noexperimental_ui //$pkg/foo:all >& "$TEST_log" \
+  bazel query --experimental_ui_debug_all_events //$pkg/foo:all >& "$TEST_log" \
       || fail "Expected success"
   expect_log "Loading package: $pkg/foo"
   expect_log "//$pkg/foo:shname2"
 
   # Test that comment changes do not cause package reloading
   echo '#benign comment' >> WORKSPACE
-  # TODO(b/37617303): make tests UI-independent
-  bazel query --noexperimental_ui //$pkg/foo:all >& "$TEST_log" \
+  bazel query --experimental_ui_debug_all_events //$pkg/foo:all >& "$TEST_log" \
       || fail "Expected success"
   expect_not_log "Loading package: $pkg/foo"
   expect_log "//$pkg/foo:shname2"
 
   echo 'workspace(name="wsname2")' > WORKSPACE
-  # TODO(b/37617303): make tests UI-independent
-  bazel query --noexperimental_ui //$pkg/foo:all >& "$TEST_log" \
+  bazel query --experimental_ui_debug_all_events //$pkg/foo:all >& "$TEST_log" \
       || fail "Expected success"
   expect_log "Loading package: $pkg/foo"
   expect_log "//$pkg/foo:shname2"
 }
 
-function test_incompatible_disallow_load_labels_to_cross_package_boundaries() {
+function test_disallow_load_labels_to_cross_package_boundaries() {
   local -r pkg="${FUNCNAME}"
   mkdir -p "$pkg" || fail "could not create \"$pkg\""
 
@@ -365,16 +359,8 @@ function test_incompatible_disallow_load_labels_to_cross_package_boundaries() {
   touch "$pkg"/foo/a/b/BUILD
   echo "b = 42" > "$pkg"/foo/a/b/b.bzl
 
-  bazel query "$pkg/foo:BUILD" >& "$TEST_log" || fail "Expected success"
-  expect_log "//$pkg/foo:BUILD"
-
-  bazel query \
-    --incompatible_disallow_load_labels_to_cross_package_boundaries=true \
-    "$pkg/foo:BUILD" >& "$TEST_log" && fail "Expected failure"
-  expect_log "Label '//$pkg/foo/a:b/b.bzl' crosses boundary of subpackage '$pkg/foo/a/b'"
-
-  bazel query "$pkg/foo:BUILD" >& "$TEST_log" || fail "Expected success"
-  expect_log "//$pkg/foo:BUILD"
+  bazel query "$pkg/foo:BUILD" >& "$TEST_log" && fail "Expected failure"
+  expect_log "Label '//$pkg/foo/a:b/b.bzl' is invalid because '$pkg/foo/a/b' is a subpackage"
 }
 
 function test_package_loading_errors_in_target_parsing() {
@@ -390,6 +376,24 @@ function test_package_loading_errors_in_target_parsing() {
       expect_log "Build did NOT complete successfully"
     done
   done
+}
+
+function test_illegal_glob_exclude_pattern_in_bzl() {
+  mkdir badglob-bzl || fail "mkdir failed"
+  cat > badglob-bzl/BUILD <<EOF
+load("//badglob-bzl:badglob.bzl", "f")
+f()
+EOF
+  cat > badglob-bzl/badglob.bzl  <<EOF
+def f():
+  return native.glob(include = ["BUILD"], exclude = ["a/**b/c"])
+EOF
+
+  bazel query //badglob-bzl:BUILD >& "$TEST_log" && fail "Expected failure"
+  local exit_code=$?
+  assert_equals 7 "$exit_code"
+  expect_log "illegal argument in call to glob"
+  expect_not_log "IllegalArgumentException"
 }
 
 run_suite "Integration tests of ${PRODUCT_NAME} using loading/analysis phases."

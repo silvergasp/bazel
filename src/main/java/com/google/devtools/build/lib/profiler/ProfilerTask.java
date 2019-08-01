@@ -77,7 +77,7 @@ public enum ProfilerTask {
   CRITICAL_PATH_COMPONENT("critical path component", 0x666699),
   HANDLE_GC_NOTIFICATION("gc notification", 0x996633),
   LOCAL_CPU_USAGE("cpu counters", 0x000000),
-  __INCLUSION_PARSE("inclusion parse", 0x000000), // unused
+  ACTION_COUNTS("action counters", 0x000000),
   __PROCESS_SCAN("process scan", 0x000000), // unused
   __LOOP_OUTPUT_ARTIFACTS("loop output artifacts"), // unused
   __LOCATE_RELATIVE("locate relative"), // unused
@@ -89,6 +89,8 @@ public enum ProfilerTask {
   STARLARK_BUILTIN_FN("Starlark builtin function call", 0x990033),
   STARLARK_USER_COMPILED_FN("Starlark compiled user function call", 0xCC0033),
   ACTION_FS_STAGING("Staging per-action file system", 0x000000),
+  REMOTE_CACHE_CHECK("remote action cache check", 0x9999CC),
+  REMOTE_DOWNLOAD("remote output download", 0x9999CC),
   UNKNOWN("Unknown event",  0x339966);
 
   // Size of the ProfilerTask value space.

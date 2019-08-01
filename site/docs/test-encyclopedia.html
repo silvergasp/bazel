@@ -238,9 +238,6 @@ test unless the user explicitly requests it.</p>
     <tr><td><code>TEST_SRCDIR</code></td><td>absolute path to the base of the runfiles tree</td><td>required</td></tr>
     <tr><td><code>TEST_TOTAL_SHARDS</code></td><td>total shard count, if sharding is used</td><td>optional</td></tr>
     <tr><td><code>TEST_TMPDIR</code></td><td>absolute path to a private writable directory</td><td>required</td></tr>
-    <tr><td><code>TEST_UNDECLARED_OUTPUTS_DIR</code></td><td>absolute path to a private writable directory (used to write undeclared test outputs)</td><td>optional</td></tr>
-    <tr><td><code>TEST_UNDECLARED_OUTPUTS_ANNOTATIONS_DIR</code></td><td>absolute path to a private writable directory (used to write undeclared test output annotation .part files).
-
     </td><td>optional</td></tr>
     <tr><td><code>TEST_WARNINGS_OUTPUT_FILE</code></td><td>absolute path to a private file in a writable directory (used to write test target warnings)</td><td>optional</td></tr>
     <tr><td><code>TESTBRIDGE_TEST_ONLY</code></td><td>value of <a href="user-manual.html#flag--test_filter"><code>--test_filter</code></a>, if specified</td><td>optional</td></tr>
@@ -321,7 +318,8 @@ The root directory observed by a test may or may not be the real root directory.
 <code>/proc</code> shall be mounted.<br>
 All build tools shall be present at the absolute paths under <code>/usr</code> used by a local installation.<br>
 Paths starting with <code>/home</code> may not be available. Tests should not access any such paths.<br>
-<code>/tmp</code> and <code>/export/hda3/tmp</code> shall be writable, but tests should avoid using these paths.<br>
+<code>/tmp</code>
+shall be writable, but tests should avoid using these paths.<br>
 
 Tests must not assume that any constant path is available for their exclusive use.<br>
 Tests must not assume that atimes are enabled for any mounted filesystem.<br>

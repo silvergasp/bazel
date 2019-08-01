@@ -22,7 +22,6 @@ import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.util.ActionsTestUtil;
 import com.google.devtools.build.lib.analysis.ConfiguredTarget;
 import com.google.devtools.build.lib.analysis.FileProvider;
-import com.google.devtools.build.lib.packages.util.MockCcSupport;
 import com.google.devtools.build.lib.rules.java.JavaPrimaryClassProvider;
 import com.google.devtools.build.lib.testutil.MoreAsserts;
 import java.util.List;
@@ -37,12 +36,7 @@ public abstract class AndroidLocalTestTest extends AbstractAndroidLocalTestTestB
 
   @Before
   public void setupCcToolchain() throws Exception {
-    getAnalysisMock()
-        .ccSupport()
-        .setupCrosstool(
-            mockToolsConfig,
-            /* appendToCurrentToolchain=*/ false,
-            MockCcSupport.emptyToolchainForCpu("armeabi-v7a"));
+    getAnalysisMock().ccSupport().setupCcToolchainConfigForCpu(mockToolsConfig, "armeabi-v7a");
   }
 
   @Test
@@ -247,10 +241,10 @@ public abstract class AndroidLocalTestTest extends AbstractAndroidLocalTestTestB
     assertThat(args).contains("--uncompressedExtensions");
     assertThat(args.get(args.indexOf("--uncompressedExtensions") + 1)).isEqualTo(".apk,.so");
     assertThat(getGeneratingSpawnActionArgs(compressedUnsignedApk))
-        .containsAllOf("--nocompress_suffixes", ".apk", ".so")
+        .containsAtLeast("--nocompress_suffixes", ".apk", ".so")
         .inOrder();
     assertThat(getGeneratingSpawnActionArgs(finalUnsignedApk))
-        .containsAllOf("--nocompress_suffixes", ".apk", ".so")
+        .containsAtLeast("--nocompress_suffixes", ".apk", ".so")
         .inOrder();
   }
 

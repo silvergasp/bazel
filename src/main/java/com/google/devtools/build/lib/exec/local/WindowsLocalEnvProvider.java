@@ -26,6 +26,8 @@ public final class WindowsLocalEnvProvider implements LocalEnvProvider {
   /**
    * Create a new {@link WindowsLocalEnvProvider}.
    *
+   * <p>Use {@link LocalEnvProvider#forCurrentOs(Map)} to instantiate this.
+   *
    * @param clientEnv a map of the current Bazel command's environment
    */
   public WindowsLocalEnvProvider(Map<String, String> clientEnv) {

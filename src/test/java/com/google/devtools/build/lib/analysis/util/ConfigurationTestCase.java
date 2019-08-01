@@ -13,7 +13,7 @@
 // limitations under the License.
 package com.google.devtools.build.lib.analysis.util;
 
-import static org.junit.Assert.fail;
+import static com.google.devtools.build.lib.testutil.MoreAsserts.assertThrows;
 
 import com.google.common.base.Optional;
 import com.google.common.collect.ImmutableList;
@@ -40,10 +40,8 @@ import com.google.devtools.build.lib.pkgcache.PackageCacheOptions;
 import com.google.devtools.build.lib.pkgcache.PathPackageLocator;
 import com.google.devtools.build.lib.rules.repository.RepositoryDelegatorFunction;
 import com.google.devtools.build.lib.skyframe.BazelSkyframeExecutorConstants;
-import com.google.devtools.build.lib.skyframe.DiffAwareness;
 import com.google.devtools.build.lib.skyframe.PrecomputedValue;
 import com.google.devtools.build.lib.skyframe.SequencedSkyframeExecutor;
-import com.google.devtools.build.lib.skyframe.SkyValueDirtinessChecker;
 import com.google.devtools.build.lib.testutil.FoundationTestCase;
 import com.google.devtools.build.lib.testutil.TestConstants;
 import com.google.devtools.build.lib.util.io.TimestampGranularityMonitor;
@@ -52,7 +50,6 @@ import com.google.devtools.build.lib.vfs.PathFragment;
 import com.google.devtools.build.lib.vfs.Root;
 import com.google.devtools.build.lib.vfs.RootedPath;
 import com.google.devtools.common.options.Converters;
-import com.google.devtools.common.options.InvocationPolicyEnforcer;
 import com.google.devtools.common.options.Option;
 import com.google.devtools.common.options.OptionDocumentationCategory;
 import com.google.devtools.common.options.OptionEffectTag;
@@ -117,6 +114,11 @@ public abstract class ConfigurationTestCase extends FoundationTestCase {
     mockToolsConfig.create("/bazel_tools_workspace/WORKSPACE", "workspace(name = 'bazel_tools')");
     mockToolsConfig.create("/bazel_tools_workspace/tools/build_defs/repo/BUILD");
     mockToolsConfig.create(
+        "/bazel_tools_workspace/tools/build_defs/repo/utils.bzl",
+        "def maybe(repo_rule, name, **kwargs):",
+        "  if name not in native.existing_rules():",
+        "    repo_rule(name = name, **kwargs)");
+    mockToolsConfig.create(
         "/bazel_tools_workspace/tools/build_defs/repo/http.bzl",
         "def http_archive(**kwargs):",
         "  pass",
@@ -134,22 +136,17 @@ public abstract class ConfigurationTestCase extends FoundationTestCase {
     AnalysisTestUtil.DummyWorkspaceStatusActionFactory workspaceStatusActionFactory =
         new AnalysisTestUtil.DummyWorkspaceStatusActionFactory();
     skyframeExecutor =
-        SequencedSkyframeExecutor.create(
-            pkgFactory,
-            fileSystem,
-            directories,
-            actionKeyContext,
-            workspaceStatusActionFactory,
-            ruleClassProvider.getBuildInfoFactories(),
-            ImmutableList.<DiffAwareness.Factory>of(),
-            analysisMock.getSkyFunctions(directories),
-            ImmutableList.<SkyValueDirtinessChecker>of(),
-            BazelSkyframeExecutorConstants.HARDCODED_BLACKLISTED_PACKAGE_PREFIXES,
-            BazelSkyframeExecutorConstants.ADDITIONAL_BLACKLISTED_PACKAGE_PREFIXES_FILE,
-            BazelSkyframeExecutorConstants.CROSS_REPOSITORY_LABEL_VIOLATION_STRATEGY,
-            BazelSkyframeExecutorConstants.BUILD_FILES_BY_PRIORITY,
-            BazelSkyframeExecutorConstants.ACTION_ON_IO_EXCEPTION_READING_BUILD_FILE,
-            DefaultBuildOptionsForTesting.getDefaultBuildOptionsForTest(ruleClassProvider));
+        BazelSkyframeExecutorConstants.newBazelSkyframeExecutorBuilder()
+            .setPkgFactory(pkgFactory)
+            .setFileSystem(fileSystem)
+            .setDirectories(directories)
+            .setActionKeyContext(actionKeyContext)
+            .setBuildInfoFactories(ruleClassProvider.getBuildInfoFactories())
+            .setDefaultBuildOptions(
+                DefaultBuildOptionsForTesting.getDefaultBuildOptionsForTest(ruleClassProvider))
+            .setWorkspaceStatusActionFactory(workspaceStatusActionFactory)
+            .setExtraSkyFunctions(analysisMock.getSkyFunctions(directories))
+            .build();
     TestConstants.processSkyframeExecutorForTesting(skyframeExecutor);
     skyframeExecutor.injectExtraPrecomputedValues(
         ImmutableList.of(
@@ -190,24 +187,21 @@ public abstract class ConfigurationTestCase extends FoundationTestCase {
 
   protected void checkError(String expectedMessage, String... options) throws Exception {
     reporter.removeHandler(failFastHandler);
-    try {
-      create(options);
-      fail();
-    } catch (InvalidConfigurationException e) {
-      assertContainsEvent(expectedMessage);
-    }
+    assertThrows(InvalidConfigurationException.class, () -> create(options));
+    assertContainsEvent(expectedMessage);
   }
 
   protected BuildConfigurationCollection createCollection(String... args) throws Exception {
-    OptionsParser parser = OptionsParser.newOptionsParser(
-        ImmutableList.<Class<? extends OptionsBase>>builder()
-        .addAll(buildOptionClasses)
-        .add(TestOptions.class)
-        .build());
+    OptionsParser parser =
+        OptionsParser.builder()
+            .optionsClasses(
+                ImmutableList.<Class<? extends OptionsBase>>builder()
+                    .addAll(buildOptionClasses)
+                    .add(TestOptions.class)
+                    .build())
+            .build();
+    parser.parse(TestConstants.PRODUCT_SPECIFIC_FLAGS);
     parser.parse(args);
-
-    InvocationPolicyEnforcer optionsPolicyEnforcer = analysisMock.getInvocationPolicyEnforcer();
-    optionsPolicyEnforcer.enforce(parser);
 
     ImmutableSortedSet<String> multiCpu = ImmutableSortedSet.copyOf(
         parser.getOptions(TestOptions.class).multiCpus);

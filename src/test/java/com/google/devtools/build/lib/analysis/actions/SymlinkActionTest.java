@@ -22,7 +22,9 @@ import com.google.devtools.build.lib.actions.ActionInputPrefetcher;
 import com.google.devtools.build.lib.actions.ActionResult;
 import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.Executor;
+import com.google.devtools.build.lib.actions.util.ActionsTestUtil;
 import com.google.devtools.build.lib.analysis.util.BuildViewTestCase;
+import com.google.devtools.build.lib.events.StoredEventHandler;
 import com.google.devtools.build.lib.exec.util.TestExecutorBuilder;
 import com.google.devtools.build.lib.skyframe.serialization.testutils.SerializationDepsUtils;
 import com.google.devtools.build.lib.skyframe.serialization.testutils.SerializationTester;
@@ -44,7 +46,7 @@ public class SymlinkActionTest extends BuildViewTestCase {
   private Path input;
   private Artifact inputArtifact;
   private Path output;
-  private Artifact outputArtifact;
+  private Artifact.DerivedArtifact outputArtifact;
   private SymlinkAction action;
 
   @Before
@@ -56,6 +58,7 @@ public class SymlinkActionTest extends BuildViewTestCase {
     FileSystemUtils.createDirectoryAndParents(linkedInput.getParentDirectory());
     linkedInput.createSymbolicLink(input);
     outputArtifact = getBinArtifactWithNoOwner("destination.txt");
+    outputArtifact.setGeneratingActionKey(ActionsTestUtil.NULL_ACTION_LOOKUP_DATA);
     output = outputArtifact.getPath();
     FileSystemUtils.createDirectoryAndParents(output.getParentDirectory());
     action = SymlinkAction.toArtifact(NULL_ACTION_OWNER,
@@ -86,7 +89,7 @@ public class SymlinkActionTest extends BuildViewTestCase {
                 actionKeyContext,
                 null,
                 null,
-                executor.getEventHandler(),
+                new StoredEventHandler(),
                 ImmutableMap.<String, String>of(),
                 ImmutableMap.of(),
                 null,

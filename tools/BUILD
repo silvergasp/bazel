@@ -13,6 +13,7 @@ filegroup(
         "//tools/buildstamp:srcs",
         "//tools/build_defs:srcs",
         "//tools/build_rules:srcs",
+        "//tools/config:srcs",
         "//tools/coverage:srcs",
         "//tools/java:srcs",
         "//tools/jdk:srcs",
@@ -36,6 +37,7 @@ filegroup(
     ],
 )
 
+# Sources in the built in repo '@bazel_tools'
 filegroup(
     name = "embedded_tools_srcs",
     srcs = glob(["**"]) + [
@@ -44,6 +46,7 @@ filegroup(
         "//tools/build_defs:embedded_tools",
         "//tools/build_rules:embedded_tools_srcs",
         "//tools/buildstamp:srcs",
+        "//tools/config:srcs",
         "//tools/coverage:srcs",
         "//tools/cpp:embedded_tools",
         "//tools/genrule:srcs",
@@ -81,4 +84,9 @@ test_suite(
         "//tools/test:all_windows_tests",
     ],
     visibility = ["//src:__pkg__"],
+)
+
+sh_binary(
+    name = "upload_bazel_mirror",
+    srcs = ["upload_bazel_mirror.sh"],
 )

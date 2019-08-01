@@ -1,3 +1,7 @@
+<!-- Generated with Stardoc: http://skydoc.bazel.build -->
+
+<a name="#check_sources"></a>
+
 ## check_sources
 
 <pre>
@@ -75,12 +79,14 @@ Use `bazel build` to run the check.
     <tr id="check_sources-struct_param">
       <td><code>struct_param</code></td>
       <td>
-        optional.
+        optional. default is <code>struct(foo = "bar")</code>
       </td>
     </tr>
   </tbody>
 </table>
 
+
+<a name="#undocumented_function"></a>
 
 ## undocumented_function
 

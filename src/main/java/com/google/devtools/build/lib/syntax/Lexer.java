@@ -52,6 +52,9 @@ public final class Lexer {
           .put('*', TokenKind.STAR_EQUALS)
           .put('/', TokenKind.SLASH_EQUALS)
           .put('%', TokenKind.PERCENT_EQUALS)
+          .put('^', TokenKind.CARET_EQUALS)
+          .put('&', TokenKind.AMPERSAND_EQUALS)
+          .put('|', TokenKind.PIPE_EQUALS)
           .build();
 
   private final EventHandler eventHandler;
@@ -104,6 +107,14 @@ public final class Lexer {
   private int dents; // number of saved INDENT (>0) or OUTDENT (<0) tokens to return
 
   /**
+   * StringEscapeEvents contains the errors related to invalid escape sequences like "\a". This is
+   * not handled by the normal eventHandler. Instead, it is passed to the parser and then the AST.
+   * During the evaluation, we can decide to show the events based on a flag in StarlarkSemantics.
+   * This code is temporary, during the migration.
+   */
+  private final List<Event> stringEscapeEvents = new ArrayList<>();
+
+  /**
    * Constructs a lexer which tokenizes the contents of the specified InputBuffer. Any errors during
    * lexing are reported on "handler".
    */
@@ -127,6 +138,10 @@ public final class Lexer {
 
   List<Comment> getComments() {
     return comments;
+  }
+
+  List<Event> getStringEscapeEvents() {
+    return stringEscapeEvents;
   }
 
   /**
@@ -286,9 +301,9 @@ public final class Lexer {
       } else if (c == '\r') {
         pos++;
       } else if (c == '\t') {
-        error("Tab characters are not allowed for indentation. Use spaces instead.");
         indentLen++;
         pos++;
+        error("Tab characters are not allowed for indentation. Use spaces instead.");
       } else if (c == '\n') { // entirely blank line: discard
         indentLen = 0;
         pos++;
@@ -457,10 +472,18 @@ public final class Lexer {
             case 'v':
             case 'x':
               // exists in Python but not implemented in Blaze => error
-              error("escape sequence not implemented: \\" + c, literalStartPos, pos);
+              error("invalid escape sequence: \\" + c, literalStartPos, pos);
               break;
             default:
               // unknown char escape => "\literal"
+              stringEscapeEvents.add(
+                  Event.error(
+                      createLocation(pos - 1, pos),
+                      "invalid escape sequence: \\"
+                          + c
+                          + ". You can enable unknown escape sequences by passing the flag "
+                          + "--incompatible_restrict_string_escapes=false"));
+
               literal.append('\\');
               literal.append(c);
               break;
@@ -689,6 +712,7 @@ public final class Lexer {
     } else if (literal.startsWith("0") && literal.length() > 1) {
       radix = 8;
       substring = literal.substring(1);
+      error("invalid octal value `" + literal + "`, should be: `0o" + substring + "`");
     } else {
       radix = 10;
       substring = literal;
@@ -788,10 +812,26 @@ public final class Lexer {
           popParen();
           break;
         case '>':
-          setToken(TokenKind.GREATER, pos - 1, pos);
+          if (lookaheadIs(0, '>') && lookaheadIs(1, '=')) {
+            setToken(TokenKind.GREATER_GREATER_EQUALS, pos - 1, pos + 2);
+            pos += 2;
+          } else if (lookaheadIs(0, '>')) {
+            setToken(TokenKind.GREATER_GREATER, pos - 1, pos + 1);
+            pos += 1;
+          } else {
+            setToken(TokenKind.GREATER, pos - 1, pos);
+          }
           break;
         case '<':
-          setToken(TokenKind.LESS, pos - 1, pos);
+          if (lookaheadIs(0, '<') && lookaheadIs(1, '=')) {
+            setToken(TokenKind.LESS_LESS_EQUALS, pos - 1, pos + 2);
+            pos += 2;
+          } else if (lookaheadIs(0, '<')) {
+            setToken(TokenKind.LESS_LESS, pos - 1, pos + 1);
+            pos += 1;
+          } else {
+            setToken(TokenKind.LESS, pos - 1, pos);
+          }
           break;
         case ':':
           setToken(TokenKind.COLON, pos - 1, pos);
@@ -813,6 +853,15 @@ public final class Lexer {
           break;
         case '%':
           setToken(TokenKind.PERCENT, pos - 1, pos);
+          break;
+        case '~':
+          setToken(TokenKind.TILDE, pos - 1, pos);
+          break;
+        case '&':
+          setToken(TokenKind.AMPERSAND, pos - 1, pos);
+          break;
+        case '^':
+          setToken(TokenKind.CARET, pos - 1, pos);
           break;
         case '/':
           if (lookaheadIs(0, '/') && lookaheadIs(1, '=')) {

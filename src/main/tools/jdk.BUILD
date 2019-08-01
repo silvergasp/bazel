@@ -38,44 +38,54 @@ filegroup(
 
 filegroup(
     name = "java",
-    deprecation = DEPRECATION_MESSAGE,
     srcs = select({
         ":windows": ["bin/java.exe"],
         "//conditions:default": ["bin/java"],
     }),
     data = [":jdk"],
+    deprecation = DEPRECATION_MESSAGE,
 )
 
 filegroup(
     name = "jar",
-    deprecation = DEPRECATION_MESSAGE,
     srcs = select({
         ":windows": ["bin/jar.exe"],
         "//conditions:default": ["bin/jar"],
     }),
     data = [":jdk"],
+    deprecation = DEPRECATION_MESSAGE,
 )
 
 filegroup(
-    deprecation = DEPRECATION_MESSAGE,
     name = "javac",
     srcs = select({
         ":windows": ["bin/javac.exe"],
         "//conditions:default": ["bin/javac"],
     }),
     data = [":jdk"],
+    deprecation = DEPRECATION_MESSAGE,
 )
 
 filegroup(
+    name = "javadoc",
+    srcs = select({
+        ":windows": ["bin/javadoc.exe"],
+        "//conditions:default": ["bin/javadoc"],
+    }),
+    data = [":jdk"],
     deprecation = DEPRECATION_MESSAGE,
+)
+
+filegroup(
     name = "xjc",
     srcs = ["bin/xjc"],
+    deprecation = DEPRECATION_MESSAGE,
 )
 
 filegroup(
-    deprecation = DEPRECATION_MESSAGE,
     name = "wsimport",
     srcs = ["bin/wsimport"],
+    deprecation = DEPRECATION_MESSAGE,
 )
 
 BOOTCLASS_JARS = [
@@ -88,22 +98,28 @@ BOOTCLASS_JARS = [
 
 # TODO(cushon): this isn't compatible with JDK 9
 filegroup(
-    deprecation = DEPRECATION_MESSAGE,
     name = "bootclasspath",
     srcs = ["jre/lib/%s" % jar for jar in BOOTCLASS_JARS],
+    deprecation = DEPRECATION_MESSAGE,
 )
 
 # TODO(cushon): migrate to extclasspath and delete
 filegroup(
     name = "extdir",
+    srcs = glob(
+        ["jre/lib/ext/*.jar"],
+        allow_empty = True,
+    ),
     deprecation = DEPRECATION_MESSAGE,
-    srcs = glob(["jre/lib/ext/*.jar"]),
 )
 
 filegroup(
     name = "extclasspath",
+    srcs = glob(
+        ["jre/lib/ext/*.jar"],
+        allow_empty = True,
+    ),
     deprecation = DEPRECATION_MESSAGE,
-    srcs = glob(["jre/lib/ext/*.jar"]),
 )
 
 filegroup(
@@ -112,15 +128,25 @@ filegroup(
         # In some configurations, Java browser plugin is considered harmful and
         # common antivirus software blocks access to npjp2.dll interfering with Bazel,
         # so do not include it in JRE on Windows.
-        ":windows": glob(["jre/bin/**"], exclude = ["jre/bin/plugin2/**"]),
-        "//conditions:default": glob(["jre/bin/**"]),
+        ":windows": glob(
+            ["jre/bin/**"],
+            allow_empty = True,
+            exclude = ["jre/bin/plugin2/**"],
+        ),
+        "//conditions:default": glob(
+            ["jre/bin/**"],
+            allow_empty = True,
+        ),
     }),
     deprecation = DEPRECATION_MESSAGE,
 )
 
 filegroup(
     name = "jre-lib",
-    srcs = glob(["jre/lib/**"]),
+    srcs = glob(
+        ["jre/lib/**"],
+        allow_empty = True,
+    ),
 )
 
 filegroup(
@@ -181,9 +207,9 @@ filegroup(
 
 java_import(
     name = "langtools-neverlink",
+    deprecation = DEPRECATION_MESSAGE,
     jars = ["lib/tools.jar"],
     neverlink = 1,
-    deprecation = DEPRECATION_MESSAGE,
 )
 
 config_setting(

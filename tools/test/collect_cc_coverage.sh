@@ -68,40 +68,6 @@ function llvm_coverage() {
       "${COVERAGE_DIR}"/*.profraw
 }
 
-# Computes code coverage data using gcda files found under $COVERAGE_DIR.
-# Writes the collected coverage into the given output file in lcov format.
-function lcov_coverage() {
-  local output_file="${1}"; shift
-
-  cat "${COVERAGE_MANIFEST}" | grep ".gcno$" | while read gcno; do
-    mkdir -p "${COVERAGE_DIR}/$(dirname ${gcno})"
-    cp "${ROOT}/${gcno}" "${COVERAGE_DIR}/${gcno}"
-  done
-
-  local lcov_tool="$(which lcov)"
-  if [[ ! -x "$lcov_tool" ]]; then
-    lcov_tool=/usr/bin/lcov
-  fi
-
-  # Run lcov over the .gcno and .gcda files to generate the lcov tracefile.
-  # -c                    - Collect coverage data
-  # --no-external         - Do not collect coverage data for system files
-  # --ignore-errors graph - Ignore missing .gcno files; Bazel only instruments
-  #                         some files
-  # -q                    - Quiet mode
-  # --gcov-tool "${GCOV}" - Pass the local symlink to be uses as gcov by lcov
-  # -b /proc/self/cwd     - Use this as a prefix for all source files instead of
-  #                         the current directory
-  # -d "${COVERAGE_DIR}"  - Directory to search for .gcda files
-  # -o "${COVERAGE_OUTPUT_FILE}" - Output file
-  $lcov_tool -c --no-external --ignore-errors graph \
-      --gcov-tool "${GCOV}" -b /proc/self/cwd \
-      -d "${COVERAGE_DIR}" -o "${output_file}"
-
-  # Fix up the paths to be relative by removing the prefix we specified above.
-  sed -i -e "s*/proc/self/cwd/**g" "${output_file}"
-}
-
 # Generates a code coverage report in gcov intermediate text format by invoking
 # gcov and using the profile data (.gcda) and notes (.gcno) files.
 #
@@ -118,56 +84,58 @@ function gcov_coverage() {
 
   # Copy .gcno files next to their corresponding .gcda files in $COVERAGE_DIR
   # because gcov expects them to be in the same directory.
-  cat "${COVERAGE_MANIFEST}" | grep ".gcno$" | while read gcno_path; do
+  while read -r line; do
+    if [[ ${line: -4} == "gcno" ]]; then
+      gcno_path=${line}
+      local gcda="${COVERAGE_DIR}/$(dirname ${gcno_path})/$(basename ${gcno_path} .gcno).gcda"
+      # If the gcda file was not found we skip generating coverage from the gcno
+      # file.
+      if [[ -f "$gcda" ]]; then
+          # gcov expects both gcno and gcda files to be in the same directory.
+          # We overcome this by copying the gcno to $COVERAGE_DIR where the gcda
+          # files are expected to be.
+          if [ ! -f "${COVERAGE_DIR}/${gcno_path}" ]; then
+              mkdir -p "${COVERAGE_DIR}/$(dirname ${gcno_path})"
+              cp "$ROOT/${gcno_path}" "${COVERAGE_DIR}/${gcno_path}"
+          fi
+          # Invoke gcov to generate a code coverage report with the flags:
+          # -i              Output gcov file in an intermediate text format.
+          #                 The output is a single .gcov file per .gcda file.
+          #                 No source code is required.
+          # -o directory    The directory containing the .gcno and
+          #                 .gcda data files.
+          # "${gcda"}       The input file name. gcov is looking for data files
+          #                 named after the input filename without its extension.
+          # gcov produces files called <source file name>.gcov in the current
+          # directory. These contain the coverage information of the source file
+          # they correspond to. One .gcov file is produced for each source
+          # (or header) file containing code which was compiled to produce the
+          # .gcda files.
+          # Don't generate branch coverage (-b) because of a gcov issue that
+          # segfaults when both -i and -b are used (see
+          # https://gcc.gnu.org/bugzilla/show_bug.cgi?id=84879).
+          "${GCOV}" -i -o "$(dirname ${gcda})" "${gcda}" &> "$gcov_log"
 
-    local gcda="${COVERAGE_DIR}/$(dirname ${gcno_path})/$(basename ${gcno_path} .gcno).gcda"
-    # If the gcda file was not found we skip generating coverage from the gcno
-    # file.
-    if [[ -f "$gcda" ]]; then
-        # gcov expects both gcno and gcda files to be in the same directory.
-        # We overcome this by copying the gcno to $COVERAGE_DIR where the gcda
-        # files are expected to be.
-        if [ ! -f "${COVERAGE_DIR}/${gcno_path}" ]; then
-            mkdir -p "${COVERAGE_DIR}/$(dirname ${gcno_path})"
-            cp "$ROOT/${gcno_path}" "${COVERAGE_DIR}/${gcno_path}"
-        fi
-        # Invoke gcov to generate a code coverage report with the flags:
-        # -i              Output gcov file in an intermediate text format.
-        #                 The output is a single .gcov file per .gcda file.
-        #                 No source code is required.
-        # -o directory    The directory containing the .gcno and
-        #                 .gcda data files.
-        # "${gcda"}       The input file name. gcov is looking for data files
-        #                 named after the input filename without its extension.
-        # gcov produces files called <source file name>.gcov in the current
-        # directory. These contain the coverage information of the source file
-        # they correspond to. One .gcov file is produced for each source
-        # (or header) file containing code which was compiled to produce the
-        # .gcda files.
-        # Don't generate branch coverage (-b) because of a gcov issue that
-        # segfaults when both -i and -b are used (see
-        # https://gcc.gnu.org/bugzilla/show_bug.cgi?id=84879).
-        "${GCOV}" -i -o "$(dirname ${gcda})" "${gcda}" &> "$gcov_log"
-
-        # Go through all the files that were created by the gcov command above
-        # and append their content to the output .gcov file.
-        #
-        # For each source file gcov outputs to stdout something like this:
-        #
-        # File 'examples/cpp/hello-lib.cc'
-        # Lines executed:100.00% of 8
-        # Creating 'hello-lib.cc.gcov'
-        #
-        # We grep the names of the files that were created from that output.
-        cat "$gcov_log" | grep "Creating" | cut -d " " -f 2 | cut -d"'" -f2 | \
-            while read gcov_file; do
-          echo "Processing $gcov_file"
-          cat "$gcov_file" >> "$output_file"
-          # Remove the intermediate gcov file because it is not useful anymore.
-          rm -f "$gcov_file"
-        done
+          # Go through all the files that were created by the gcov command above
+          # and append their content to the output .gcov file.
+          #
+          # For each source file gcov outputs to stdout something like this:
+          #
+          # File 'examples/cpp/hello-lib.cc'
+          # Lines executed:100.00% of 8
+          # Creating 'hello-lib.cc.gcov'
+          #
+          # We grep the names of the files that were created from that output.
+          cat "$gcov_log" | grep "Creating" | cut -d " " -f 2 | cut -d"'" -f2 | \
+              while read gcov_file; do
+            echo "Processing $gcov_file"
+            cat "$gcov_file" >> "$output_file"
+            # Remove the intermediate gcov file because it is not useful anymore.
+            rm -f "$gcov_file"
+          done
+      fi
     fi
-  done
+  done < "${COVERAGE_MANIFEST}"
 }
 
 function main() {
@@ -191,7 +159,6 @@ function main() {
   # format, generating the final code coverage report.
   case "$BAZEL_CC_COVERAGE_TOOL" in
         ("GCOV") gcov_coverage "$COVERAGE_DIR/_cc_coverage.gcov" ;;
-        ("LCOV") lcov_coverage "$COVERAGE_DIR/_cc_coverage.dat" ;;
         ("PROFDATA") llvm_coverage "$COVERAGE_DIR/_cc_coverage.profdata" ;;
         (*) echo "Coverage tool $BAZEL_CC_COVERAGE_TOOL not supported" \
             && exit 1

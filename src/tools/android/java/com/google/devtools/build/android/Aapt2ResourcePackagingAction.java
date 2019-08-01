@@ -62,9 +62,10 @@ public class Aapt2ResourcePackagingAction {
   public static void main(String[] args) throws Exception {
     Profiler profiler = InMemoryProfiler.createAndStart("setup");
     OptionsParser optionsParser =
-        OptionsParser.newOptionsParser(Options.class, Aapt2ConfigOptions.class);
-    optionsParser.enableParamsFileSupport(
-        new ShellQuotedParamsFilePreProcessor(FileSystems.getDefault()));
+        OptionsParser.builder()
+            .optionsClasses(Options.class, Aapt2ConfigOptions.class)
+            .argsPreProcessor(new ShellQuotedParamsFilePreProcessor(FileSystems.getDefault()))
+            .build();
     optionsParser.parseAndExitUponError(args);
     aaptConfigOptions = optionsParser.getOptions(Aapt2ConfigOptions.class);
     options = optionsParser.getOptions(Options.class);
@@ -158,15 +159,18 @@ public class Aapt2ResourcePackagingAction {
               .map(DependencyAndroidData::getCompiledSymbols)
               .collect(toList());
 
+      // NB: "-A" options are in *decreasing* precedence, while "-R" options are in *increasing*
+      // precedence.  While this is internally inconsistent, it matches AAPTv1's treatment of "-A".
       List<Path> assetDirs =
           concat(
-                  options.transitiveData.stream(),
-                  options.transitiveAssets.stream(),
-                  options.directData.stream(),
-                  options.directAssets.stream())
-              .flatMap(dep -> dep.assetDirs.stream())
+                  options.primaryData.assetDirs.stream(),
+                  concat(
+                          options.directData.stream(),
+                          options.directAssets.stream(),
+                          options.transitiveData.stream(),
+                          options.transitiveAssets.stream())
+                      .flatMap(dep -> dep.assetDirs.stream()))
               .collect(toList());
-      assetDirs.addAll(options.primaryData.assetDirs);
 
       final PackagedResources packagedResources =
           ResourceLinker.create(aaptConfigOptions.aapt2, executorService, linkedOut)
@@ -179,6 +183,7 @@ public class Aapt2ResourcePackagingAction {
               .buildVersion(aaptConfigOptions.buildToolsVersion)
               .conditionalKeepRules(aaptConfigOptions.conditionalKeepRules == TriState.YES)
               .filterToDensity(options.densities)
+              .storeUncompressed(aaptConfigOptions.uncompressedExtensions)
               .debug(aaptConfigOptions.debug)
               .includeGeneratedLocales(aaptConfigOptions.generatePseudoLocale)
               .includeOnlyConfigs(aaptConfigOptions.resourceConfigs)

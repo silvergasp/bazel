@@ -11,6 +11,13 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
+
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+
+#include "src/main/native/windows/file.h"
+
 #include <stdlib.h>
 #include <string.h>
 #include <windows.h>
@@ -20,7 +27,6 @@
 #include <string>
 
 #include "gtest/gtest.h"
-#include "src/main/native/windows/file.h"
 #include "src/test/cpp/util/windows_test_util.h"
 
 #if !defined(_WIN32) && !defined(__CYGWIN__)
@@ -81,8 +87,10 @@ TEST_F(WindowsFileOperationsTest, TestCreateJunction) {
   wstring file1(target + L"\\foo");
   EXPECT_TRUE(blaze_util::CreateDummyFile(file1));
 
-  EXPECT_EQ(IS_JUNCTION_NO,
-            IsJunctionOrDirectorySymlink(target.c_str(), nullptr));
+  bool is_link = true;
+  EXPECT_EQ(IsSymlinkOrJunctionResult::kSuccess,
+            IsSymlinkOrJunction(target.c_str(), &is_link, nullptr));
+  EXPECT_FALSE(is_link);
   EXPECT_NE(INVALID_FILE_ATTRIBUTES, ::GetFileAttributesW(file1.c_str()));
 
   wstring name(tmp + L"\\junc_name");
@@ -99,14 +107,22 @@ TEST_F(WindowsFileOperationsTest, TestCreateJunction) {
             CreateJunctionResult::kSuccess);
 
   // Assert creation of the junctions.
-  ASSERT_EQ(IS_JUNCTION_YES,
-            IsJunctionOrDirectorySymlink((name + L"1").c_str(), nullptr));
-  ASSERT_EQ(IS_JUNCTION_YES,
-            IsJunctionOrDirectorySymlink((name + L"2").c_str(), nullptr));
-  ASSERT_EQ(IS_JUNCTION_YES,
-            IsJunctionOrDirectorySymlink((name + L"3").c_str(), nullptr));
-  ASSERT_EQ(IS_JUNCTION_YES,
-            IsJunctionOrDirectorySymlink((name + L"4").c_str(), nullptr));
+  is_link = false;
+  ASSERT_EQ(IsSymlinkOrJunctionResult::kSuccess,
+            IsSymlinkOrJunction((name + L"1").c_str(), &is_link, nullptr));
+  ASSERT_TRUE(is_link);
+  is_link = false;
+  ASSERT_EQ(IsSymlinkOrJunctionResult::kSuccess,
+            IsSymlinkOrJunction((name + L"2").c_str(), &is_link, nullptr));
+  ASSERT_TRUE(is_link);
+  is_link = false;
+  ASSERT_EQ(IsSymlinkOrJunctionResult::kSuccess,
+            IsSymlinkOrJunction((name + L"3").c_str(), &is_link, nullptr));
+  ASSERT_TRUE(is_link);
+  is_link = false;
+  ASSERT_EQ(IsSymlinkOrJunctionResult::kSuccess,
+            IsSymlinkOrJunction((name + L"4").c_str(), &is_link, nullptr));
+  ASSERT_TRUE(is_link);
 
   // Assert that the file is visible under all junctions.
   ASSERT_NE(INVALID_FILE_ATTRIBUTES,
@@ -358,6 +374,86 @@ TEST_F(WindowsFileOperationsTest, TestCanDeleteJunctionWhoseTargetIsBusy) {
 #undef TOWSTRING1
 #undef TOWSTRING
 #undef WLINE
+
+TEST(FileTests, TestNormalize) {
+#define ASSERT_NORMALIZE(x, y) EXPECT_EQ(Normalize(x), y);
+  ASSERT_NORMALIZE("", "");
+  ASSERT_NORMALIZE("a", "a");
+  ASSERT_NORMALIZE("foo/bar", "foo\\bar");
+  ASSERT_NORMALIZE("foo/../bar", "bar");
+  ASSERT_NORMALIZE("a/", "a");
+  ASSERT_NORMALIZE("foo", "foo");
+  ASSERT_NORMALIZE("foo/", "foo");
+  ASSERT_NORMALIZE(".", ".");
+  ASSERT_NORMALIZE("./", ".");
+  ASSERT_NORMALIZE("..", "..");
+  ASSERT_NORMALIZE("../", "..");
+  ASSERT_NORMALIZE("./..", "..");
+  ASSERT_NORMALIZE("./../", "..");
+  ASSERT_NORMALIZE("../.", "..");
+  ASSERT_NORMALIZE(".././", "..");
+  ASSERT_NORMALIZE("...", "...");
+  ASSERT_NORMALIZE(".../", "...");
+  ASSERT_NORMALIZE("a/", "a");
+  ASSERT_NORMALIZE(".a", ".a");
+  ASSERT_NORMALIZE("..a", "..a");
+  ASSERT_NORMALIZE("...a", "...a");
+  ASSERT_NORMALIZE("./a", "a");
+  ASSERT_NORMALIZE("././a", "a");
+  ASSERT_NORMALIZE("./../a", "..\\a");
+  ASSERT_NORMALIZE(".././a", "..\\a");
+  ASSERT_NORMALIZE("../../a", "..\\..\\a");
+  ASSERT_NORMALIZE("../.../a", "..\\...\\a");
+  ASSERT_NORMALIZE(".../../a", "a");
+  ASSERT_NORMALIZE("a/..", "");
+  ASSERT_NORMALIZE("a/../", "");
+  ASSERT_NORMALIZE("a/./../", "");
+
+  ASSERT_NORMALIZE("c:/", "c:\\");
+  ASSERT_NORMALIZE("c:/a", "c:\\a");
+  ASSERT_NORMALIZE("c:/foo/bar", "c:\\foo\\bar");
+  ASSERT_NORMALIZE("c:/foo/../bar", "c:\\bar");
+  ASSERT_NORMALIZE("d:/a/", "d:\\a");
+  ASSERT_NORMALIZE("D:/foo", "D:\\foo");
+  ASSERT_NORMALIZE("c:/foo/", "c:\\foo");
+  ASSERT_NORMALIZE("c:/.", "c:\\");
+  ASSERT_NORMALIZE("c:/./", "c:\\");
+  ASSERT_NORMALIZE("c:/..", "c:\\");
+  ASSERT_NORMALIZE("c:/../", "c:\\");
+  ASSERT_NORMALIZE("c:/./..", "c:\\");
+  ASSERT_NORMALIZE("c:/./../", "c:\\");
+  ASSERT_NORMALIZE("c:/../.", "c:\\");
+  ASSERT_NORMALIZE("c:/.././", "c:\\");
+  ASSERT_NORMALIZE("c:/...", "c:\\...");
+  ASSERT_NORMALIZE("c:/.../", "c:\\...");
+  ASSERT_NORMALIZE("c:/.a", "c:\\.a");
+  ASSERT_NORMALIZE("c:/..a", "c:\\..a");
+  ASSERT_NORMALIZE("c:/...a", "c:\\...a");
+  ASSERT_NORMALIZE("c:/./a", "c:\\a");
+  ASSERT_NORMALIZE("c:/././a", "c:\\a");
+  ASSERT_NORMALIZE("c:/./../a", "c:\\a");
+  ASSERT_NORMALIZE("c:/.././a", "c:\\a");
+  ASSERT_NORMALIZE("c:/../../a", "c:\\a");
+  ASSERT_NORMALIZE("c:/../.../a", "c:\\...\\a");
+  ASSERT_NORMALIZE("c:/.../../a", "c:\\a");
+  ASSERT_NORMALIZE("c:/a/..", "c:\\");
+  ASSERT_NORMALIZE("c:/a/../", "c:\\");
+  ASSERT_NORMALIZE("c:/a/./../", "c:\\");
+  ASSERT_NORMALIZE("c:/../d:/e", "c:\\d:\\e");
+  ASSERT_NORMALIZE("c:/../d:/../e", "c:\\e");
+
+  ASSERT_NORMALIZE("foo", "foo");
+  ASSERT_NORMALIZE("foo/", "foo");
+  ASSERT_NORMALIZE("foo//bar", "foo\\bar");
+  ASSERT_NORMALIZE("../..//foo/./bar", "..\\..\\foo\\bar");
+  ASSERT_NORMALIZE("../foo/baz/../bar", "..\\foo\\bar");
+  ASSERT_NORMALIZE("c:", "c:\\");
+  ASSERT_NORMALIZE("c:/", "c:\\");
+  ASSERT_NORMALIZE("c:\\", "c:\\");
+  ASSERT_NORMALIZE("c:\\..//foo/./bar/", "c:\\foo\\bar");
+  ASSERT_NORMALIZE("../foo", "..\\foo");
+#undef ASSERT_NORMALIZE
+}
 
 }  // namespace windows
 }  // namespace bazel

@@ -1,5 +1,22 @@
 # Packaging for Bazel
 
+## Deprecated
+
+These rules have been extracted from the Bazel sources and are now available at
+[bazelbuild/rules_pkg](https://github.com/bazelbuild/rules_pkg/releases).
+
+Issues and PRs against the built-in versions of these rules will no longer be
+addressed. This page will exist for reference until the code is removed from
+Bazel. You can test the removal of these rules with Bazel at version >= 0.28.0.
+
+```
+bazel build --//tools/build_defs/pkg:incompatible_no_build_defs_pkg  target...
+```
+
+For more information, follow [issue 8857](https://github.com/bazelbuild/bazel/issues/8857)
+
+## rules_pkg
+
 <div class="toc">
   <h2>Rules</h2>
   <ul>
@@ -50,7 +67,7 @@ pkg_tar(
 pkg_deb(
     name = "bazel-debian",
     architecture = "amd64",
-    built_using = "bazel (0.1.1)",
+    built_using = "unzip (6.0.1)",
     data = ":debian-data",
     depends = [
         "zlib1g-dev",
@@ -396,6 +413,31 @@ for more details on this.
       </td>
     </tr>
     <tr>
+      <td><code>config</code></td>
+      <td>
+        <code>File, optional</code>
+        <p>
+          config file used for debconf integration.
+        </p>
+        <p>
+          See <a href="https://www.debian.org/doc/debian-policy/ch-binary.html#prompting-in-maintainer-scripts">https://www.debian.org/doc/debian-policy/ch-binary.html#prompting-in-maintainer-scripts</a>.
+        </p>
+      </td>
+    </tr>
+    <tr>
+      <td><code>templates</code></td>
+      <td>
+        <code>File, optional</code>
+        <p>
+          templates file used for debconf integration.
+        </p>
+        <p>
+          See <a href="https://www.debian.org/doc/debian-policy/ch-binary.html#prompting-in-maintainer-scripts">https://www.debian.org/doc/debian-policy/ch-binary.html#prompting-in-maintainer-scripts</a>.
+        </p>
+      </td>
+    </tr>
+
+    <tr>
       <td><code>conffiles</code>, <code>conffiles_file</code></td>
       <td>
         <code>String list or File, optional</code>
@@ -432,7 +474,7 @@ for more details on this.
     <tr>
       <td><code>built_using</code>, <code>built_using_file</code></td>
       <td>
-        <code>String or File, default to 'Bazel'</code>
+        <code>String or File</code>
         <p>
           The tool that were used to build this package provided either inline
           (with <code>built_using</code>) or from a file (with <code>built_using_file</code>).

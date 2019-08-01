@@ -21,14 +21,13 @@ import com.google.devtools.build.skyframe.ShareabilityOfValue;
 import com.google.devtools.build.skyframe.SkyFunctionName;
 import com.google.devtools.build.skyframe.SkyKey;
 
-/**
- * Value types in Skyframe.
- */
+/** Value types in Skyframe. */
 public final class SkyFunctions {
   public static final SkyFunctionName PRECOMPUTED =
       SkyFunctionName.createNonHermetic("PRECOMPUTED");
   public static final SkyFunctionName CLIENT_ENVIRONMENT_VARIABLE =
       SkyFunctionName.createNonHermetic("CLIENT_ENVIRONMENT_VARIABLE");
+  static final SkyFunctionName ACTION_SKETCH = SkyFunctionName.createHermetic("ACTION_SKETCH");
   public static final SkyFunctionName ACTION_ENVIRONMENT_VARIABLE =
       SkyFunctionName.createHermetic("ACTION_ENVIRONMENT_VARIABLE");
   public static final SkyFunctionName DIRECTORY_LISTING_STATE =
@@ -54,8 +53,6 @@ public final class SkyFunctions {
   static final SkyFunctionName PACKAGE_ERROR = SkyFunctionName.createHermetic("PACKAGE_ERROR");
   public static final SkyFunctionName PACKAGE_ERROR_MESSAGE =
       SkyFunctionName.createHermetic("PACKAGE_ERROR_MESSAGE");
-  public static final SkyFunctionName TARGET_MARKER =
-      SkyFunctionName.createHermetic("TARGET_MARKER");
   // Semi-hermetic because accesses package locator
   public static final SkyFunctionName TARGET_PATTERN =
       SkyFunctionName.createSemiHermetic("TARGET_PATTERN");
@@ -120,6 +117,8 @@ public final class SkyFunctions {
   public static final SkyFunctionName BUILD_INFO = SkyFunctionName.createHermetic("BUILD_INFO");
   public static final SkyFunctionName WORKSPACE_NAME =
       SkyFunctionName.createHermetic("WORKSPACE_NAME");
+  public static final SkyFunctionName PLATFORM_MAPPING =
+      SkyFunctionName.createHermetic("PLATFORM_MAPPING");
   static final SkyFunctionName COVERAGE_REPORT = SkyFunctionName.createHermetic("COVERAGE_REPORT");
   public static final SkyFunctionName REPOSITORY = SkyFunctionName.createHermetic("REPOSITORY");
   public static final SkyFunctionName REPOSITORY_DIRECTORY =
@@ -136,7 +135,9 @@ public final class SkyFunctions {
       SkyFunctionName.createHermetic("REGISTERED_EXECUTION_PLATFORMS");
   static final SkyFunctionName REGISTERED_TOOLCHAINS =
       SkyFunctionName.createHermetic("REGISTERED_TOOLCHAINS");
-  static final SkyFunctionName TOOLCHAIN_RESOLUTION =
+  static final SkyFunctionName SINGLE_TOOLCHAIN_RESOLUTION =
+      SkyFunctionName.createHermetic("SINGLE_TOOLCHAIN_RESOLUTION");
+  public static final SkyFunctionName TOOLCHAIN_RESOLUTION =
       SkyFunctionName.createHermetic("TOOLCHAIN_RESOLUTION");
   public static final SkyFunctionName REPOSITORY_MAPPING =
       SkyFunctionName.createHermetic("REPOSITORY_MAPPING");

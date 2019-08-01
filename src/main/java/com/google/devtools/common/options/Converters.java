@@ -355,12 +355,12 @@ public final class Converters {
   }
 
   /** Checks whether a string is a valid regex pattern and compiles it. */
-  public static class RegexPatternConverter implements Converter<Pattern> {
+  public static class RegexPatternConverter implements Converter<RegexPatternOption> {
 
     @Override
-    public Pattern convert(String input) throws OptionsParsingException {
+    public RegexPatternOption convert(String input) throws OptionsParsingException {
       try {
-        return Pattern.compile(input);
+        return RegexPatternOption.create(Pattern.compile(input));
       } catch (PatternSyntaxException e) {
         throw new OptionsParsingException("Not a valid regular expression: " + e.getMessage());
       }
@@ -466,8 +466,8 @@ public final class Converters {
 
   /**
    * A converter for variable assignments from the parameter list of a blaze command invocation.
-   * Assignments are expected to have the form {@code name=value1[,..,valueN]}, where names and
-   * values are defined to be as permissive as possible.
+   * Assignments are expected to have the form {@code [name=]value1[,..,valueN]}, where names and
+   * values are defined to be as permissive as possible. If no name is provided, "" is used.
    */
   public static class AssignmentToListOfValuesConverter
       implements Converter<Map.Entry<String, List<String>>> {
@@ -477,11 +477,7 @@ public final class Converters {
     @Override
     public Map.Entry<String, List<String>> convert(String input) throws OptionsParsingException {
       int pos = input.indexOf("=");
-      if (pos <= 0) {
-        throw new OptionsParsingException(
-            "Variable definitions must be in the form of a 'name=value1[,..,valueN]' assignment");
-      }
-      String name = input.substring(0, pos);
+      String name = pos <= 0 ? "" : input.substring(0, pos);
       List<String> value = splitter.splitToList(input.substring(pos + 1));
       if (value.contains("")) {
         // If the list contains exactly the empty string, it means an empty value was passed and we
@@ -498,7 +494,7 @@ public final class Converters {
 
     @Override
     public String getTypeDescription() {
-      return "a 'name=value1[,..,valueN]' assignment";
+      return "a '[name=]value1[,..,valueN]' assignment";
     }
   }
 

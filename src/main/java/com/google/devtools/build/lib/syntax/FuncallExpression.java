@@ -22,8 +22,10 @@ import com.google.common.cache.CacheLoader;
 import com.google.common.cache.LoadingCache;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.ImmutableSortedMap;
 import com.google.common.collect.Iterables;
+import com.google.devtools.build.lib.collect.compacthashset.CompactHashSet;
 import com.google.devtools.build.lib.events.Location;
 import com.google.devtools.build.lib.skylarkinterface.SkylarkCallable;
 import com.google.devtools.build.lib.skylarkinterface.SkylarkInterfaceUtils;
@@ -39,7 +41,6 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -465,7 +466,7 @@ public final class FuncallExpression extends Expression {
         methodDescriptor.isStructField(), "Can only be invoked on structField callables");
     Preconditions.checkArgument(
         !methodDescriptor.isUseEnvironment()
-            || !methodDescriptor.isUseSkylarkSemantics()
+            || !methodDescriptor.isUseStarlarkSemantics()
             || !methodDescriptor.isUseLocation()
             || !methodDescriptor.isUseContext(),
         "Cannot be invoked on structField callables with extra interpreter params");
@@ -498,15 +499,16 @@ public final class FuncallExpression extends Expression {
         "struct field methods should be handled by DotExpression separately");
 
     ImmutableList<ParamDescriptor> parameters = method.getParameters();
-    ImmutableList.Builder<Object> builder =
-        ImmutableList.builderWithExpectedSize(parameters.size() + EXTRA_ARGS_COUNT);
+    List<Object> builder = new ArrayList<>(parameters.size() + EXTRA_ARGS_COUNT);
     boolean acceptsExtraArgs = method.isAcceptsExtraArgs();
     boolean acceptsExtraKwargs = method.isAcceptsExtraKwargs();
 
     int argIndex = 0;
 
     // Process parameters specified in callable.parameters()
-    Set<String> keys = new LinkedHashSet<>(kwargs.keySet());
+    // Many methods don't have any kwargs, so don't allocate a new hash set in that case.
+    Set<String> keys =
+        kwargs.isEmpty() ? ImmutableSet.of() : CompactHashSet.create(kwargs.keySet());
     // Positional parameters are always enumerated before non-positional parameters,
     // And default-valued positional parameters are always enumerated after other positional
     // parameters. These invariants are validated by the SkylarkCallable annotation processor.
@@ -541,7 +543,7 @@ public final class FuncallExpression extends Expression {
         }
         argIndex++;
       } else { // No more positional arguments, or no more positional parameters.
-        if (param.isNamed() && keys.remove(param.getName())) {
+        if (param.isNamed() && !keys.isEmpty() && keys.remove(param.getName())) {
           // Param specified by keyword argument.
           value = kwargs.get(param.getName());
           if (!type.contains(value)) {
@@ -553,10 +555,7 @@ public final class FuncallExpression extends Expression {
           }
         } else { // Param not specified by user. Use default value.
           if (param.getDefaultValue().isEmpty()) {
-            throw argumentMismatchException(
-                String.format("parameter '%s' has no default value", param.getName()),
-                method,
-                objClass);
+            throw unspecifiedParameterException(param, method, objClass, kwargs);
           }
           value =
               SkylarkSignatureProcessor.getDefaultValue(
@@ -610,7 +609,23 @@ public final class FuncallExpression extends Expression {
     }
     appendExtraInterpreterArgs(builder, method, this, getLocation(), environment);
 
-    return builder.build().toArray();
+    return builder.toArray();
+  }
+
+  private EvalException unspecifiedParameterException(
+      ParamDescriptor param,
+      MethodDescriptor method,
+      Class<?> objClass,
+      Map<String, Object> kwargs) {
+    if (kwargs.containsKey(param.getName())) {
+      return argumentMismatchException(
+          String.format("parameter '%s' may not be specified by name", param.getName()),
+          method,
+          objClass);
+    } else {
+      return argumentMismatchException(
+          String.format("parameter '%s' has no default value", param.getName()), method, objClass);
+    }
   }
 
   private EvalException unexpectedKeywordArgumentException(
@@ -647,7 +662,7 @@ public final class FuncallExpression extends Expression {
         String.format(
             "unexpected keyword%s %s",
             unexpectedKeywords.size() > 1 ? "s" : "",
-            Joiner.on(",").join(Iterables.transform(unexpectedKeywords, s -> "'" + s + "'"))),
+            Joiner.on(", ").join(Iterables.transform(unexpectedKeywords, s -> "'" + s + "'"))),
         method,
         objClass);
   }
@@ -688,9 +703,9 @@ public final class FuncallExpression extends Expression {
    */
   public static List<Object> extraInterpreterArgs(
       MethodDescriptor method, @Nullable FuncallExpression ast, Location loc, Environment env) {
-    ImmutableList.Builder<Object> builder = ImmutableList.builder();
+    List<Object> builder = new ArrayList<>();
     appendExtraInterpreterArgs(builder, method, ast, loc, env);
-    return builder.build();
+    return ImmutableList.copyOf(builder);
   }
 
   /**
@@ -701,7 +716,7 @@ public final class FuncallExpression extends Expression {
    * @see #extraInterpreterArgs(MethodDescriptor, FuncallExpression, Location, Environment)
    */
   private static void appendExtraInterpreterArgs(
-      ImmutableList.Builder<Object> builder,
+      List<Object> builder,
       MethodDescriptor method,
       @Nullable FuncallExpression ast,
       Location loc,
@@ -718,7 +733,7 @@ public final class FuncallExpression extends Expression {
     if (method.isUseEnvironment()) {
       builder.add(env);
     }
-    if (method.isUseSkylarkSemantics()) {
+    if (method.isUseStarlarkSemantics()) {
       builder.add(env.getSemantics());
     }
     if (method.isUseContext()) {

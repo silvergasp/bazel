@@ -28,10 +28,8 @@ BazelStartupOptions::BazelStartupOptions(
       use_system_rc(true),
       use_workspace_rc(true),
       use_home_rc(true),
-      use_master_bazelrc_(true),
-      incompatible_windows_style_arg_escaping(false) {
+      use_master_bazelrc_(true) {
   RegisterNullaryStartupFlag("home_rc");
-  RegisterNullaryStartupFlag("incompatible_windows_style_arg_escaping");
   RegisterNullaryStartupFlag("master_bazelrc");
   RegisterNullaryStartupFlag("system_rc");
   RegisterNullaryStartupFlag("workspace_rc");
@@ -106,14 +104,6 @@ blaze_exit_code::ExitCode BazelStartupOptions::ProcessArgExtra(
     }
     use_master_bazelrc_ = false;
     option_sources["blazerc"] = rcfile;
-  } else if (GetNullaryOption(arg,
-                              "--incompatible_windows_style_arg_escaping")) {
-    incompatible_windows_style_arg_escaping = true;
-    option_sources["incompatible_windows_style_arg_escaping"] = rcfile;
-  } else if (GetNullaryOption(arg,
-                              "--noincompatible_windows_style_arg_escaping")) {
-    incompatible_windows_style_arg_escaping = false;
-    option_sources["incompatible_windows_style_arg_escaping"] = rcfile;
   } else {
     *is_processed = false;
     return blaze_exit_code::SUCCESS;
@@ -145,15 +135,29 @@ void BazelStartupOptions::MaybeLogStartupOptionWarnings() const {
                             "ignored, since --ignore_all_rc_files is on.";
     }
   }
+  bool output_user_root_has_space =
+      output_user_root.find_first_of(' ') != std::string::npos;
+  if (output_user_root_has_space) {
+    BAZEL_LOG(WARNING)
+        << "Output user root \"" << output_user_root
+        << "\" contains a space. This will probably break the build. "
+           "You should set a different --output_user_root.";
+  } else if (output_base.find_first_of(' ') != std::string::npos) {
+    // output_base is computed from output_user_root by default.
+    // If output_user_root was bad, don't check output_base: while output_base
+    // may also be bad, we already warned about output_user_root so there's no
+    // point in another warning.
+    BAZEL_LOG(WARNING)
+        << "Output base \"" << output_base
+        << "\" contains a space. This will probably break the build. "
+           "You should not set --output_base and let Bazel use the default, or "
+           "set --output_base to a path without space.";
+  }
 }
 
 void BazelStartupOptions::AddExtraOptions(
     std::vector<std::string> *result) const {
-  if (incompatible_windows_style_arg_escaping) {
-    result->push_back("--incompatible_windows_style_arg_escaping");
-  } else {
-    result->push_back("--noincompatible_windows_style_arg_escaping");
-  }
+  StartupOptions::AddExtraOptions(result);
 }
 
 }  // namespace blaze

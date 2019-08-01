@@ -146,7 +146,7 @@ public final class DexArchiveAspect extends NativeAspectClass implements Configu
             // Parse labels since we don't have RuleDefinitionEnvironment.getLabel like in a rule
             .add(
                 attr(ASPECT_DESUGAR_PREREQ, LABEL)
-                    .cfg(HostTransition.INSTANCE)
+                    .cfg(HostTransition.createFactory())
                     .exec()
                     .value(
                         Label.parseAbsoluteUnchecked(
@@ -167,7 +167,7 @@ public final class DexArchiveAspect extends NativeAspectClass implements Configu
       // Marginally improves "query2" precision for targets that disable incremental dexing
       result.add(
           attr(ASPECT_DEXBUILDER_PREREQ, LABEL)
-              .cfg(HostTransition.INSTANCE)
+              .cfg(HostTransition.createFactory())
               .exec()
               .value(Label.parseAbsoluteUnchecked(toolsRepository + "//tools/android:dexbuilder")));
     }
@@ -461,6 +461,7 @@ public final class DexArchiveAspect extends NativeAspectClass implements Configu
             .addOutput(result)
             .setMnemonic("Desugar")
             .setProgressMessage("Desugaring %s for Android", jar.prettyPrint())
+            .setExecutionInfo(ExecutionRequirements.WORKER_MODE_ENABLED)
             .addCommandLine(
                 // Always use params file, so we don't need to compute command line length first
                 args.build(), ParamFileInfo.builder(UNQUOTED).setUseAlways(true).build())

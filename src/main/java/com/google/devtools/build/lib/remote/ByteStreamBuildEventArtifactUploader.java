@@ -17,6 +17,7 @@ import build.bazel.remote.execution.v2.Digest;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableSet;
+import com.google.common.hash.HashCode;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.ListeningExecutorService;
@@ -67,6 +68,11 @@ class ByteStreamBuildEventArtifactUploader implements BuildEventArtifactUploader
             Executors.newFixedThreadPool(Math.min(maxUploadThreads, 1000)));
   }
 
+  private static boolean isRemoteFile(Path file) {
+    return file.getFileSystem() instanceof RemoteActionFileSystem
+        && ((RemoteActionFileSystem) file.getFileSystem()).isRemote(file);
+  }
+
   @Override
   public ListenableFuture<PathConverter> upload(Map<Path, LocalFile> files) {
     if (files.isEmpty()) {
@@ -85,11 +91,16 @@ class ByteStreamBuildEventArtifactUploader implements BuildEventArtifactUploader
                 }
                 DigestUtil digestUtil = new DigestUtil(file.getFileSystem().getDigestFunction());
                 Digest digest = digestUtil.compute(file);
-                Chunker chunker = Chunker.builder(digestUtil).setInput(digest, file).build();
+                if (isRemoteFile(file)) {
+                  return Futures.immediateFuture(new PathDigestPair(file, digest));
+                }
+                Chunker chunker = Chunker.builder().setInput(digest.getSizeBytes(), file).build();
                 final ListenableFuture<Void> upload;
                 Context prevCtx = ctx.attach();
                 try {
-                  upload = uploader.uploadBlobAsync(chunker, /*forceUpload=*/ false);
+                  upload =
+                      uploader.uploadBlobAsync(
+                          HashCode.fromString(digest.getHash()), chunker, /* forceUpload=*/ false);
                 } finally {
                   ctx.detach(prevCtx);
                 }
@@ -103,6 +114,11 @@ class ByteStreamBuildEventArtifactUploader implements BuildEventArtifactUploader
         Futures.allAsList(uploads),
         pathDigestPairs -> new PathConverterImpl(remoteServerInstanceName, pathDigestPairs),
         MoreExecutors.directExecutor());
+  }
+
+  @Override
+  public boolean mayBeSlow() {
+    return true;
   }
 
   @Override

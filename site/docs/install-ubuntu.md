@@ -9,7 +9,6 @@ Supported Ubuntu Linux platforms:
 
 *   18.04 (LTS)
 *   16.04 (LTS)
-*   14.04 (LTS)
 
 Install Bazel on Ubuntu using one of the following methods:
 
@@ -26,15 +25,15 @@ Bazel comes with two completion scripts. After installing Bazel, you can:
 
 The binary installers are on Bazel's [GitHub releases page](https://github.com/bazelbuild/bazel/releases).
 
-The installer contains the Bazel binary<sup>1</sup>. Some additional libraries must
-also be installed for Bazel to work.
+The installer contains the Bazel binary. Some additional libraries must also be
+installed for Bazel to work.
 
 ### Step 1: Install required packages
 
-First, install the prerequisites: `pkg-config`, `zip`, `g++`, `zlib1g-dev`, `unzip`, and `python`.
+First, install the prerequisites: `pkg-config`, `zip`, `g++`, `zlib1g-dev`, `unzip`, and `python3`.
 
 ```bash
-sudo apt-get install pkg-config zip g++ zlib1g-dev unzip python
+sudo apt-get install pkg-config zip g++ zlib1g-dev unzip python3
 ```
 
 ### Step 2: Download Bazel
@@ -67,21 +66,18 @@ export PATH="$PATH:$HOME/bin"
 
 You can also add this command to your `~/.bashrc` file.
 
-<h2 id="install-on-ubuntu"> Using Bazel custom APT repository</h2>
+<h2 id="install-on-ubuntu"> Using Bazel's APT repository</h2>
 
-### Step 1: Install the JDK
+### Step 1: Install the JDK (optional)
 
-Install JDK 8:
+If you want to build Java code using Bazel, install a JDK:
 
 ```bash
+# Ubuntu 16.04 (LTS) uses OpenJDK 8 by default:
 sudo apt-get install openjdk-8-jdk
-```
 
-On Ubuntu 14.04 LTS you must use a PPA:
-
-```bash
-sudo add-apt-repository ppa:webupd8team/java
-sudo apt-get update && sudo apt-get install oracle-java8-installer
+# Ubuntu 18.04 (LTS) uses OpenJDK 11 by default:
+sudo apt-get install openjdk-11-jdk
 ```
 
 ### Step 2: Add Bazel distribution URI as a package source
@@ -89,7 +85,7 @@ sudo apt-get update && sudo apt-get install oracle-java8-installer
 **Note:** This is a one-time setup step.
 
 ```bash
-echo "deb [arch=amd64] http://storage.googleapis.com/bazel-apt stable jdk1.8" | sudo tee /etc/apt/sources.list.d/bazel.list
+echo "deb [arch=amd64] https://storage.googleapis.com/bazel-apt stable jdk1.8" | sudo tee /etc/apt/sources.list.d/bazel.list
 curl https://bazel.build/bazel-release.pub.gpg | sudo apt-key add -
 ```
 

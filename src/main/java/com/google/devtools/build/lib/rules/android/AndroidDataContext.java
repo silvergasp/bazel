@@ -18,12 +18,14 @@ import com.google.devtools.build.lib.actions.Artifact;
 import com.google.devtools.build.lib.actions.ArtifactRoot;
 import com.google.devtools.build.lib.analysis.FilesToRunProvider;
 import com.google.devtools.build.lib.analysis.RuleContext;
+import com.google.devtools.build.lib.analysis.Whitelist;
 import com.google.devtools.build.lib.analysis.actions.ActionConstructionContext;
 import com.google.devtools.build.lib.analysis.actions.SpawnAction;
 import com.google.devtools.build.lib.analysis.config.CompilationMode;
 import com.google.devtools.build.lib.analysis.configuredtargets.RuleConfiguredTarget.Mode;
 import com.google.devtools.build.lib.cmdline.Label;
 import com.google.devtools.build.lib.packages.ImplicitOutputsFunction.SafeImplicitOutputsFunction;
+import com.google.devtools.build.lib.packages.RuleErrorConsumer;
 import com.google.devtools.build.lib.skylarkbuildapi.android.AndroidDataContextApi;
 import com.google.devtools.build.lib.vfs.PathFragment;
 
@@ -41,10 +43,13 @@ import com.google.devtools.build.lib.vfs.PathFragment;
 public class AndroidDataContext implements AndroidDataContextApi {
 
   private final Label label;
-  private final ActionConstructionContext actionConstructionContext;
+  private final RuleContext ruleContext;
   private final FilesToRunProvider busybox;
   private final AndroidSdkProvider sdk;
   private final boolean persistentBusyboxToolsEnabled;
+  private final boolean throwOnProguardApplyDictionary;
+  private final boolean throwOnProguardApplyMapping;
+  private final boolean throwOnResourceConflict;
   private final boolean useDataBindingV2;
 
   public static AndroidDataContext forNative(RuleContext ruleContext) {
@@ -52,9 +57,8 @@ public class AndroidDataContext implements AndroidDataContextApi {
   }
 
   public static AndroidDataContext makeContext(RuleContext ruleContext) {
-    AndroidConfiguration androidConfig = ruleContext
-        .getConfiguration()
-        .getFragment(AndroidConfiguration.class);
+    AndroidConfiguration androidConfig =
+        ruleContext.getConfiguration().getFragment(AndroidConfiguration.class);
 
     return new AndroidDataContext(
         ruleContext.getLabel(),
@@ -62,21 +66,37 @@ public class AndroidDataContext implements AndroidDataContextApi {
         ruleContext.getExecutablePrerequisite("$android_resources_busybox", Mode.HOST),
         androidConfig.persistentBusyboxTools(),
         AndroidSdkProvider.fromRuleContext(ruleContext),
+        shouldThrowIfNotOnWhitelist(ruleContext, "allow_proguard_apply_dictionary"),
+        shouldThrowIfNotOnWhitelist(ruleContext, "allow_proguard_apply_mapping"),
+        shouldThrowIfNotOnWhitelist(ruleContext, "allow_resource_conflicts")
+            || androidConfig.throwOnResourceConflict(),
         androidConfig.useDataBindingV2());
+  }
+
+  private static boolean shouldThrowIfNotOnWhitelist(
+      RuleContext ruleContext, String whitelistName) {
+    return Whitelist.hasWhitelist(ruleContext, whitelistName)
+        && !Whitelist.isAvailable(ruleContext, whitelistName);
   }
 
   protected AndroidDataContext(
       Label label,
-      ActionConstructionContext actionConstructionContext,
+      RuleContext ruleContext,
       FilesToRunProvider busybox,
       boolean persistentBusyboxToolsEnabled,
       AndroidSdkProvider sdk,
+      boolean throwOnProguardApplyDictionary,
+      boolean throwOnProguardApplyMapping,
+      boolean throwOnResourceConflict,
       boolean useDataBindingV2) {
     this.label = label;
     this.persistentBusyboxToolsEnabled = persistentBusyboxToolsEnabled;
-    this.actionConstructionContext = actionConstructionContext;
+    this.ruleContext = ruleContext;
     this.busybox = busybox;
     this.sdk = sdk;
+    this.throwOnProguardApplyDictionary = throwOnProguardApplyDictionary;
+    this.throwOnProguardApplyMapping = throwOnProguardApplyMapping;
+    this.throwOnResourceConflict = throwOnResourceConflict;
     this.useDataBindingV2 = useDataBindingV2;
   }
 
@@ -85,7 +105,11 @@ public class AndroidDataContext implements AndroidDataContextApi {
   }
 
   public ActionConstructionContext getActionConstructionContext() {
-    return actionConstructionContext;
+    return ruleContext;
+  }
+
+  public RuleErrorConsumer getRuleErrorConsumer() {
+    return ruleContext;
   }
 
   public FilesToRunProvider getBusybox() {
@@ -102,41 +126,41 @@ public class AndroidDataContext implements AndroidDataContextApi {
 
   /** Builds and registers a {@link SpawnAction.Builder}. */
   public void registerAction(SpawnAction.Builder spawnActionBuilder) {
-    registerAction(spawnActionBuilder.build(actionConstructionContext));
+    registerAction(spawnActionBuilder.build(ruleContext));
   }
 
   /** Registers one or more actions. */
   public void registerAction(ActionAnalysisMetadata... actions) {
-    actionConstructionContext.registerAction(actions);
+    ruleContext.registerAction(actions);
   }
 
   public Artifact createOutputArtifact(SafeImplicitOutputsFunction function)
       throws InterruptedException {
-    return actionConstructionContext.getImplicitOutputArtifact(function);
+    return ruleContext.getImplicitOutputArtifact(function);
   }
 
   public Artifact getUniqueDirectoryArtifact(String uniqueDirectorySuffix, String relative) {
-    return actionConstructionContext.getUniqueDirectoryArtifact(uniqueDirectorySuffix, relative);
+    return ruleContext.getUniqueDirectoryArtifact(uniqueDirectorySuffix, relative);
   }
 
   public Artifact getUniqueDirectoryArtifact(String uniqueDirectorySuffix, PathFragment relative) {
-    return actionConstructionContext.getUniqueDirectoryArtifact(uniqueDirectorySuffix, relative);
+    return ruleContext.getUniqueDirectoryArtifact(uniqueDirectorySuffix, relative);
   }
 
   public PathFragment getUniqueDirectory(PathFragment fragment) {
-    return actionConstructionContext.getUniqueDirectory(fragment);
+    return ruleContext.getUniqueDirectory(fragment);
   }
 
   public ArtifactRoot getBinOrGenfilesDirectory() {
-    return actionConstructionContext.getBinOrGenfilesDirectory();
+    return ruleContext.getBinOrGenfilesDirectory();
   }
 
   public PathFragment getPackageDirectory() {
-    return actionConstructionContext.getPackageDirectory();
+    return ruleContext.getPackageDirectory();
   }
 
   public AndroidConfiguration getAndroidConfig() {
-    return actionConstructionContext.getConfiguration().getFragment(AndroidConfiguration.class);
+    return ruleContext.getConfiguration().getFragment(AndroidConfiguration.class);
   }
 
   /** Indicates whether Busybox actions should be passed the "--debug" flag */
@@ -147,6 +171,18 @@ public class AndroidDataContext implements AndroidDataContextApi {
 
   public boolean isPersistentBusyboxToolsEnabled() {
     return persistentBusyboxToolsEnabled;
+  }
+
+  public boolean throwOnProguardApplyDictionary() {
+    return throwOnProguardApplyDictionary;
+  }
+
+  public boolean throwOnProguardApplyMapping() {
+    return throwOnProguardApplyMapping;
+  }
+
+  public boolean throwOnResourceConflict() {
+    return throwOnResourceConflict;
   }
 
   public boolean useDataBindingV2() {

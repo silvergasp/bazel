@@ -21,13 +21,15 @@ import com.google.devtools.build.lib.skylarkbuildapi.android.AndroidInstrumentat
 import com.google.devtools.build.lib.skylarkbuildapi.android.AndroidNativeLibsInfoApi.AndroidNativeLibsInfoApiProvider;
 import com.google.devtools.build.lib.skylarkbuildapi.android.AndroidResourcesInfoApi.AndroidResourcesInfoApiProvider;
 import com.google.devtools.build.lib.skylarkbuildapi.android.ApkInfoApi.ApkInfoApiProvider;
+import com.google.devtools.build.lib.syntax.FlagGuardedValue;
+import com.google.devtools.build.lib.syntax.StarlarkSemantics.FlagIdentifier;
 
 /**
  * {@link Bootstrap} for skylark objects related to Android rules.
  */
 public class AndroidBootstrap implements Bootstrap {
 
-  private final AndroidSkylarkCommonApi<?> androidCommon;
+  private final AndroidSkylarkCommonApi<?, ?> androidCommon;
   private final ApkInfoApiProvider apkInfoProvider;
   private final AndroidInstrumentationInfoApiProvider<?> androidInstrumentationInfoProvider;
   private final AndroidDeviceBrokerInfoApiProvider androidDeviceBrokerInfoProvider;
@@ -36,7 +38,7 @@ public class AndroidBootstrap implements Bootstrap {
   private final AndroidNativeLibsInfoApiProvider androidNativeLibsInfoProvider;
 
   public AndroidBootstrap(
-      AndroidSkylarkCommonApi<?> androidCommon,
+      AndroidSkylarkCommonApi<?, ?> androidCommon,
       ApkInfoApiProvider apkInfoProvider,
       AndroidInstrumentationInfoApiProvider<?> androidInstrumentationInfoProvider,
       AndroidDeviceBrokerInfoApiProvider androidDeviceBrokerInfoProvider,
@@ -52,11 +54,32 @@ public class AndroidBootstrap implements Bootstrap {
 
   @Override
   public void addBindingsToBuilder(ImmutableMap.Builder<String, Object> builder) {
+    // TODO: Make an incompatible change flag to hide android_common behind
+    // --experimental_google_legacy_api.
+    // Rationale: android_common module contains commonly used functions used outside of
+    // the Android Starlark migration. Let's not break them without an incompatible
+    // change process.
     builder.put("android_common", androidCommon);
-    builder.put(ApkInfoApi.NAME, apkInfoProvider);
-    builder.put(AndroidInstrumentationInfoApi.NAME, androidInstrumentationInfoProvider);
-    builder.put(AndroidDeviceBrokerInfoApi.NAME, androidDeviceBrokerInfoProvider);
-    builder.put(AndroidResourcesInfoApi.NAME, androidResourcesInfoProvider);
-    builder.put(AndroidNativeLibsInfoApi.NAME, androidNativeLibsInfoProvider);
+
+    builder.put(
+        ApkInfoApi.NAME,
+        FlagGuardedValue.onlyWhenExperimentalFlagIsTrue(
+            FlagIdentifier.EXPERIMENTAL_GOOGLE_LEGACY_API, apkInfoProvider));
+    builder.put(
+        AndroidInstrumentationInfoApi.NAME,
+        FlagGuardedValue.onlyWhenExperimentalFlagIsTrue(
+            FlagIdentifier.EXPERIMENTAL_GOOGLE_LEGACY_API, androidInstrumentationInfoProvider));
+    builder.put(
+        AndroidDeviceBrokerInfoApi.NAME,
+        FlagGuardedValue.onlyWhenExperimentalFlagIsTrue(
+            FlagIdentifier.EXPERIMENTAL_GOOGLE_LEGACY_API, androidDeviceBrokerInfoProvider));
+    builder.put(
+        AndroidResourcesInfoApi.NAME,
+        FlagGuardedValue.onlyWhenExperimentalFlagIsTrue(
+            FlagIdentifier.EXPERIMENTAL_GOOGLE_LEGACY_API, androidResourcesInfoProvider));
+    builder.put(
+        AndroidNativeLibsInfoApi.NAME,
+        FlagGuardedValue.onlyWhenExperimentalFlagIsTrue(
+            FlagIdentifier.EXPERIMENTAL_GOOGLE_LEGACY_API, androidNativeLibsInfoProvider));
   }
 }

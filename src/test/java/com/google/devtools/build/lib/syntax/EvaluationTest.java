@@ -62,7 +62,7 @@ public class EvaluationTest extends EvaluationTestCase {
         .testStatement("8 % 3", 2)
         .testIfErrorContains("unsupported operand type(s) for %: 'int' and 'string'", "3 % 'foo'")
         .testStatement("-5", -5)
-        .testIfErrorContains("unsupported operand type for -: 'string'", "-'foo'");
+        .testIfErrorContains("unsupported unary operation: -string", "-'foo'");
   }
 
   @Test
@@ -677,5 +677,43 @@ public class EvaluationTest extends EvaluationTestCase {
             "got multiple values for keyword argument 'old', for call to method "
                 + "replace(old, new, maxsplit = None) of 'string'",
             "'banana'.replace('a', 'o', 3, old='a')");
+  }
+
+  @Test
+  public void testStaticNameResolution() throws Exception {
+    newTest().testIfErrorContains("name 'foo' is not defined", "[foo for x in []]");
+  }
+
+  @Test
+  public void testDefInBuild() throws Exception {
+    new BuildTest()
+        .testIfErrorContains(
+            "function definitions are not allowed in BUILD files", "def func(): pass");
+  }
+
+  @Test
+  public void testForStatementForbiddenInBuild() throws Exception {
+    new BuildTest().testIfErrorContains("for loops are not allowed", "for _ in []: pass");
+  }
+
+  @Test
+  public void testIfStatementForbiddenInBuild() throws Exception {
+    new BuildTest().testIfErrorContains("if statements are not allowed", "if False: pass");
+  }
+
+  @Test
+  public void testKwargsForbiddenInBuild() throws Exception {
+    new BuildTest()
+        .testIfErrorContains("**kwargs arguments are not allowed in BUILD files", "print(**dict)");
+
+    new BuildTest()
+        .testIfErrorContains(
+            "**kwargs arguments are not allowed in BUILD files", "len(dict(**{'a': 1}))");
+  }
+
+  @Test
+  public void testArgsForbiddenInBuild() throws Exception {
+    new BuildTest()
+        .testIfErrorContains("*args arguments are not allowed in BUILD files", "print(*['a'])");
   }
 }

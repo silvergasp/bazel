@@ -14,6 +14,7 @@
 package com.google.devtools.build.lib.runtime;
 
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.MoreObjects;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.ArrayListMultimap;
 import com.google.common.collect.ComparisonChain;
@@ -139,9 +140,21 @@ public class TestSummary implements Comparable<TestSummary>, BuildEventWithOrder
       return this;
     }
 
+    public Builder addPassedLog(Path passedLog) {
+      checkMutation(passedLog);
+      summary.passedLogs.add(passedLog);
+      return this;
+    }
+
     public Builder addFailedLogs(List<Path> failedLogs) {
       checkMutation(failedLogs);
       summary.failedLogs.addAll(failedLogs);
+      return this;
+    }
+
+    public Builder addFailedLog(Path failedLog) {
+      checkMutation(failedLog);
+      summary.failedLogs.add(failedLog);
       return this;
     }
 
@@ -356,15 +369,6 @@ public class TestSummary implements Comparable<TestSummary>, BuildEventWithOrder
     return new Builder();
   }
 
-  /**
-   * Creates a new Builder initialized with a copy of the existing object's values.
-   */
-  public static Builder newBuilderFromExisting(TestSummary existing) {
-    Builder builder = new Builder();
-    builder.mergeFrom(existing);
-    return builder;
-  }
-
   public Label getLabel() {
     return AliasProvider.getDependencyLabel(target);
   }
@@ -474,6 +478,18 @@ public class TestSummary implements Comparable<TestSummary>, BuildEventWithOrder
             that.getTarget().getConfigurationChecksum())
         .compare(this.getTotalTestCases(), that.getTotalTestCases())
         .result();
+  }
+
+  @Override
+  public String toString() {
+    return MoreObjects.toStringHelper(this)
+        .add("target", this.getTarget())
+        .add("status", status)
+        .add("numCached", numCached)
+        .add("numLocalActionCached", numLocalActionCached)
+        .add("actionRan", actionRan)
+        .add("ranRemotely", ranRemotely)
+        .toString();
   }
 
   public List<Long> getTestTimes() {

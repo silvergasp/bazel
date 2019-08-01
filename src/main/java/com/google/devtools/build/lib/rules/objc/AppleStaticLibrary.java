@@ -37,7 +37,6 @@ import com.google.devtools.build.lib.rules.apple.ApplePlatform.PlatformType;
 import com.google.devtools.build.lib.rules.cpp.CcInfo;
 import com.google.devtools.build.lib.rules.cpp.CcToolchainProvider;
 import com.google.devtools.build.lib.rules.objc.ObjcProvider.Key;
-import com.google.devtools.build.lib.rules.proto.ProtoInfo;
 import com.google.devtools.build.lib.skyframe.ConfiguredTargetAndData;
 import java.util.List;
 import java.util.Map;
@@ -49,21 +48,12 @@ import java.util.TreeMap;
 public class AppleStaticLibrary implements RuleConfiguredTargetFactory {
 
   /**
-   * Set of {@link ObjcProvider} values which are propagated from dependencies to dependers by
-   * this rule.
+   * Set of {@link ObjcProvider} values which are propagated from dependencies to dependers by this
+   * rule.
    */
   private static final ImmutableSet<Key<?>> PROPAGATE_KEYS =
       ImmutableSet.<Key<?>>of(
-          ObjcProvider.ASSET_CATALOG,
-          ObjcProvider.BUNDLE_FILE,
-          ObjcProvider.SDK_DYLIB,
-          ObjcProvider.SDK_FRAMEWORK,
-          ObjcProvider.STORYBOARD,
-          ObjcProvider.STRINGS,
-          ObjcProvider.WEAK_SDK_FRAMEWORK,
-          ObjcProvider.XCDATAMODEL,
-          ObjcProvider.XIB,
-          ObjcProvider.XCASSETS_DIR);
+          ObjcProvider.SDK_DYLIB, ObjcProvider.SDK_FRAMEWORK, ObjcProvider.WEAK_SDK_FRAMEWORK);
 
   @VisibleForTesting
   static final String UNSUPPORTED_PLATFORM_TYPE_ERROR_FORMAT =
@@ -123,20 +113,25 @@ public class AppleStaticLibrary implements RuleConfiguredTargetFactory {
       BuildConfiguration childToolchainConfig = entry.getKey();
       String childCpu = entry.getKey().getCpu();
       CcToolchainProvider childToolchain = entry.getValue();
-      Iterable<ObjcProtoProvider> objcProtoProviders = objcProtoProvidersMap.get(childCpu);
-      ProtobufSupport protoSupport =
-          new ProtobufSupport(
-                  ruleContext,
-                  childToolchainConfig,
-                  protosToAvoid,
-                  ImmutableList.<ProtoInfo>of(),
-                  objcProtoProviders,
-                  ProtobufSupport.getTransitivePortableProtoFilters(objcProtoProviders),
-                  childToolchain)
-              .registerGenerationActions()
-              .registerCompilationActions();
 
-      Optional<ObjcProvider> protosObjcProvider = protoSupport.getObjcProvider();
+      Optional<ObjcProvider> protosObjcProvider;
+      if (ObjcRuleClasses.objcConfiguration(ruleContext).enableAppleBinaryNativeProtos()) {
+        Iterable<ObjcProtoProvider> objcProtoProviders = objcProtoProvidersMap.get(childCpu);
+        ProtobufSupport protoSupport =
+            new ProtobufSupport(
+                    ruleContext,
+                    childToolchainConfig,
+                    protosToAvoid,
+                    objcProtoProviders,
+                    ProtobufSupport.getTransitivePortableProtoFilters(objcProtoProviders),
+                    childToolchain)
+                .registerGenerationActions()
+                .registerCompilationActions();
+
+        protosObjcProvider = protoSupport.getObjcProvider();
+      } else {
+        protosObjcProvider = Optional.absent();
+      }
 
       IntermediateArtifacts intermediateArtifacts =
           ObjcRuleClasses.intermediateArtifacts(ruleContext, childToolchainConfig);

@@ -14,6 +14,9 @@
 
 package com.google.devtools.build.lib.remote;
 
+import static com.google.common.base.Strings.isNullOrEmpty;
+import static java.lang.String.format;
+
 import build.bazel.remote.execution.v2.Action;
 import build.bazel.remote.execution.v2.ActionCacheGrpc;
 import build.bazel.remote.execution.v2.ActionCacheGrpc.ActionCacheBlockingStub;
@@ -32,24 +35,33 @@ import com.google.bytestream.ByteStreamGrpc.ByteStreamStub;
 import com.google.bytestream.ByteStreamProto.ReadRequest;
 import com.google.bytestream.ByteStreamProto.ReadResponse;
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.base.Ascii;
 import com.google.common.base.Preconditions;
 import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
+import com.google.common.collect.Maps;
+import com.google.common.hash.HashCode;
 import com.google.common.hash.HashingOutputStream;
+import com.google.common.util.concurrent.FutureCallback;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
+import com.google.common.util.concurrent.MoreExecutors;
 import com.google.common.util.concurrent.SettableFuture;
 import com.google.devtools.build.lib.actions.ActionInput;
 import com.google.devtools.build.lib.actions.ExecException;
 import com.google.devtools.build.lib.concurrent.ThreadSafety.ThreadSafe;
-import com.google.devtools.build.lib.remote.TreeNodeRepository.TreeNode;
+import com.google.devtools.build.lib.remote.RemoteRetrier.ProgressiveBackoff;
+import com.google.devtools.build.lib.remote.merkletree.MerkleTree;
+import com.google.devtools.build.lib.remote.options.RemoteOptions;
 import com.google.devtools.build.lib.remote.util.DigestUtil;
 import com.google.devtools.build.lib.remote.util.DigestUtil.ActionKey;
 import com.google.devtools.build.lib.remote.util.TracingMetadataUtils;
 import com.google.devtools.build.lib.util.io.FileOutErr;
 import com.google.devtools.build.lib.vfs.Path;
+import com.google.protobuf.ByteString;
+import com.google.protobuf.Message;
 import io.grpc.CallCredentials;
 import io.grpc.Context;
 import io.grpc.Status;
@@ -59,13 +71,13 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Supplier;
 import javax.annotation.Nullable;
 
 /** A RemoteActionCache implementation that uses gRPC calls to a remote cache server. */
@@ -87,7 +99,7 @@ public class GrpcRemoteCache extends AbstractRemoteActionCache {
       RemoteRetrier retrier,
       DigestUtil digestUtil,
       ByteStreamUploader uploader) {
-    super(options, digestUtil, retrier);
+    super(options, digestUtil);
     this.credentials = credentials;
     this.channel = channel;
     this.retrier = retrier;
@@ -144,14 +156,24 @@ public class GrpcRemoteCache extends AbstractRemoteActionCache {
     channel.release();
   }
 
+  /** Returns true if 'options.remoteCache' uses 'grpc' or an empty scheme */
   public static boolean isRemoteCacheOptions(RemoteOptions options) {
-    return options.remoteCache != null;
+    if (isNullOrEmpty(options.remoteCache)) {
+      return false;
+    }
+    // TODO(ishikhman): add proper URI validation/parsing for remote options
+    return !(Ascii.toLowerCase(options.remoteCache).startsWith("http://")
+        || Ascii.toLowerCase(options.remoteCache).startsWith("https://"));
   }
 
   private ListenableFuture<FindMissingBlobsResponse> getMissingDigests(
       FindMissingBlobsRequest request) throws IOException, InterruptedException {
     Context ctx = Context.current();
-    return retrier.executeAsync(() -> ctx.call(() -> casFutureStub().findMissingBlobs(request)));
+    try {
+      return retrier.executeAsync(() -> ctx.call(() -> casFutureStub().findMissingBlobs(request)));
+    } catch (StatusRuntimeException e) {
+      throw new IOException(e);
+    }
   }
 
   private ImmutableSet<Digest> getMissingDigests(Iterable<Digest> digests)
@@ -199,49 +221,42 @@ public class GrpcRemoteCache extends AbstractRemoteActionCache {
    * end-point from the executor itself, so the functionality lives here.
    */
   public void ensureInputsPresent(
-      TreeNodeRepository repository, Path execRoot, TreeNode root, Action action, Command command)
+      MerkleTree merkleTree, Map<Digest, Message> additionalInputs, Path execRoot)
       throws IOException, InterruptedException {
-    repository.computeMerkleDigests(root);
-    Digest actionDigest = digestUtil.compute(action);
-    Digest commandDigest = digestUtil.compute(command);
-    // TODO(olaola): avoid querying all the digests, only ask for novel subtrees.
     ImmutableSet<Digest> missingDigests =
-        getMissingDigests(
-            Iterables.concat(
-                repository.getAllDigests(root), ImmutableList.of(actionDigest, commandDigest)));
-
-    List<Chunker> toUpload = new ArrayList<>();
-    // Only upload data that was missing from the cache.
-    Map<Digest, ActionInput> missingActionInputs = new HashMap<>();
-    Map<Digest, Directory> missingTreeNodes = new HashMap<>();
-    HashSet<Digest> missingTreeDigests = new HashSet<>(missingDigests);
-    missingTreeDigests.remove(commandDigest);
-    missingTreeDigests.remove(actionDigest);
-    repository.getDataFromDigests(missingTreeDigests, missingActionInputs, missingTreeNodes);
-
-    if (missingDigests.contains(actionDigest)) {
-      toUpload.add(
-          Chunker.builder(digestUtil).setInput(actionDigest, action.toByteArray()).build());
-    }
-    if (missingDigests.contains(commandDigest)) {
-      toUpload.add(
-          Chunker.builder(digestUtil).setInput(commandDigest, command.toByteArray()).build());
-    }
-    if (!missingTreeNodes.isEmpty()) {
-      for (Map.Entry<Digest, Directory> entry : missingTreeNodes.entrySet()) {
-        Digest digest = entry.getKey();
-        Directory d = entry.getValue();
-        toUpload.add(Chunker.builder(digestUtil).setInput(digest, d.toByteArray()).build());
+        getMissingDigests(Iterables.concat(merkleTree.getAllDigests(), additionalInputs.keySet()));
+    Map<HashCode, Chunker> inputsToUpload = Maps.newHashMapWithExpectedSize(missingDigests.size());
+    for (Digest missingDigest : missingDigests) {
+      Directory node = merkleTree.getDirectoryByDigest(missingDigest);
+      HashCode hash = HashCode.fromString(missingDigest.getHash());
+      if (node != null) {
+        Chunker c = Chunker.builder().setInput(node.toByteArray()).build();
+        inputsToUpload.put(hash, c);
+        continue;
       }
-    }
-    if (!missingActionInputs.isEmpty()) {
-      for (Map.Entry<Digest, ActionInput> entry : missingActionInputs.entrySet()) {
-        Digest digest = entry.getKey();
-        ActionInput actionInput = entry.getValue();
-        toUpload.add(Chunker.builder(digestUtil).setInput(digest, actionInput, execRoot).build());
+
+      ActionInput file = merkleTree.getInputByDigest(missingDigest);
+      if (file != null) {
+        Chunker c =
+            Chunker.builder().setInput(missingDigest.getSizeBytes(), file, execRoot).build();
+        inputsToUpload.put(hash, c);
+        continue;
       }
+
+      Message message = additionalInputs.get(missingDigest);
+      if (message != null) {
+        Chunker c = Chunker.builder().setInput(message.toByteArray()).build();
+        inputsToUpload.put(hash, c);
+        continue;
+      }
+
+      throw new IOException(
+          format(
+              "getMissingDigests returned a missing digest that has not been requested: %s",
+              missingDigest));
     }
-    uploader.uploadBlobs(toUpload, true);
+
+    uploader.uploadBlobs(inputsToUpload, /* forceUpload= */ true);
   }
 
   @Override
@@ -255,50 +270,110 @@ public class GrpcRemoteCache extends AbstractRemoteActionCache {
     }
     resourceName += "blobs/" + digestUtil.toString(digest);
 
-    @Nullable
-    HashingOutputStream hashOut =
-        options.remoteVerifyDownloads ? digestUtil.newHashingOutputStream(out) : null;
+    @Nullable Supplier<HashCode> hashSupplier = null;
+    if (options.remoteVerifyDownloads) {
+      HashingOutputStream hashOut = digestUtil.newHashingOutputStream(out);
+      hashSupplier = hashOut::hash;
+      out = hashOut;
+    }
+
     SettableFuture<Void> outerF = SettableFuture.create();
+    Futures.addCallback(
+        downloadBlob(resourceName, digest, out, hashSupplier),
+        new FutureCallback<Void>() {
+          @Override
+          public void onSuccess(Void result) {
+            outerF.set(null);
+          }
+
+          @Override
+          public void onFailure(Throwable t) {
+            if (t instanceof StatusRuntimeException) {
+              t = new IOException(t);
+            }
+            outerF.setException(t);
+          }
+        },
+        Context.current().fixedContextExecutor(MoreExecutors.directExecutor()));
+    return outerF;
+  }
+
+  private ListenableFuture<Void> downloadBlob(
+      String resourceName,
+      Digest digest,
+      OutputStream out,
+      @Nullable Supplier<HashCode> hashSupplier) {
+    Context ctx = Context.current();
+    AtomicLong offset = new AtomicLong(0);
+    ProgressiveBackoff progressiveBackoff = new ProgressiveBackoff(retrier::newBackoff);
+    return Futures.catchingAsync(
+        retrier.executeAsync(
+            () ->
+                ctx.call(
+                    () ->
+                        requestRead(
+                            resourceName, offset, progressiveBackoff, digest, out, hashSupplier)),
+            progressiveBackoff),
+        StatusRuntimeException.class,
+        (e) -> Futures.immediateFailedFuture(new IOException(e)),
+        MoreExecutors.directExecutor());
+  }
+
+  private ListenableFuture<Void> requestRead(
+      String resourceName,
+      AtomicLong offset,
+      ProgressiveBackoff progressiveBackoff,
+      Digest digest,
+      OutputStream out,
+      @Nullable Supplier<HashCode> hashSupplier) {
+    SettableFuture<Void> future = SettableFuture.create();
     bsAsyncStub()
         .read(
-            ReadRequest.newBuilder().setResourceName(resourceName).build(),
+            ReadRequest.newBuilder()
+                .setResourceName(resourceName)
+                .setReadOffset(offset.get())
+                .build(),
             new StreamObserver<ReadResponse>() {
               @Override
               public void onNext(ReadResponse readResponse) {
+                ByteString data = readResponse.getData();
                 try {
-                  readResponse.getData().writeTo(hashOut != null ? hashOut : out);
+                  data.writeTo(out);
+                  offset.addAndGet(data.size());
                 } catch (IOException e) {
-                  outerF.setException(e);
+                  future.setException(e);
                   // Cancel the call.
                   throw new RuntimeException(e);
                 }
+                // reset the stall backoff because we've made progress or been kept alive
+                progressiveBackoff.reset();
               }
 
               @Override
               public void onError(Throwable t) {
-                if (t instanceof StatusRuntimeException
-                    && ((StatusRuntimeException) t).getStatus().getCode()
-                        == Status.NOT_FOUND.getCode()) {
-                  outerF.setException(new CacheNotFoundException(digest, digestUtil));
+                Status status = Status.fromThrowable(t);
+                if (status.getCode() == Status.Code.NOT_FOUND) {
+                  future.setException(new CacheNotFoundException(digest, digestUtil));
                 } else {
-                  outerF.setException(t);
+                  future.setException(t);
                 }
               }
 
               @Override
               public void onCompleted() {
                 try {
-                  if (hashOut != null) {
-                    verifyContents(digest, hashOut);
+                  if (hashSupplier != null) {
+                    verifyContents(
+                        digest.getHash(), DigestUtil.hashCodeToString(hashSupplier.get()));
                   }
                   out.flush();
-                  outerF.set(null);
+                  future.set(null);
                 } catch (IOException e) {
-                  outerF.setException(e);
+                  future.setException(e);
                 }
               }
             });
-    return outerF;
+    return future;
   }
 
   @Override
@@ -346,7 +421,7 @@ public class GrpcRemoteCache extends AbstractRemoteActionCache {
     manifest.addFiles(files);
     manifest.addAction(actionKey, action, command);
 
-    List<Chunker> filesToUpload = new ArrayList<>();
+    Map<HashCode, Chunker> filesToUpload = Maps.newHashMap();
 
     Map<Digest, Path> digestToFile = manifest.getDigestToFile();
     Map<Digest, Chunker> digestToChunkers = manifest.getDigestToChunkers();
@@ -359,7 +434,7 @@ public class GrpcRemoteCache extends AbstractRemoteActionCache {
       Chunker chunker;
       Path file = digestToFile.get(digest);
       if (file != null) {
-        chunker = Chunker.builder(digestUtil).setInput(digest, file).build();
+        chunker = Chunker.builder().setInput(digest.getSizeBytes(), file).build();
       } else {
         chunker = digestToChunkers.get(digest);
         if (chunker == null) {
@@ -367,7 +442,7 @@ public class GrpcRemoteCache extends AbstractRemoteActionCache {
           throw new IOException(message);
         }
       }
-      filesToUpload.add(chunker);
+      filesToUpload.put(HashCode.fromString(digest.getHash()), chunker);
     }
 
     if (!filesToUpload.isEmpty()) {
@@ -395,20 +470,14 @@ public class GrpcRemoteCache extends AbstractRemoteActionCache {
     Digest digest = digestUtil.compute(file);
     ImmutableSet<Digest> missing = getMissingDigests(ImmutableList.of(digest));
     if (!missing.isEmpty()) {
-      uploader.uploadBlob(Chunker.builder(digestUtil).setInput(digest, file).build(), true);
+      uploader.uploadBlob(
+          HashCode.fromString(digest.getHash()),
+          Chunker.builder().setInput(digest.getSizeBytes(), file).build(),
+          /* forceUpload=*/ true);
     }
     return digest;
   }
-
-  Digest uploadBlob(byte[] blob) throws IOException, InterruptedException {
-    Digest digest = digestUtil.compute(blob);
-    ImmutableSet<Digest> missing = getMissingDigests(ImmutableList.of(digest));
-    if (!missing.isEmpty()) {
-      uploader.uploadBlob(Chunker.builder(digestUtil).setInput(digest, blob).build(), true);
-    }
-    return digest;
-  }
-
+  
   // Execution Cache API
 
   @Override

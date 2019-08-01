@@ -194,7 +194,7 @@ def _skylark_breaks1_impl(ctx):
 skylark_breaks1 = rule(
   _skylark_breaks1_impl,
   attrs = {
-    "input": attr.label(mandatory=True, allow_files=True, single_file=True),
+    "input": attr.label(mandatory=True, allow_single_file=True),
     "output": attr.output(mandatory=True),
     "action_tags": attr.string_list(),
   },
@@ -223,19 +223,6 @@ function test_sandboxed_genrule_with_tools() {
     || fail "Hermetic genrule failed: examples/genrule:tools_work"
   [ -f "${BAZEL_GENFILES_DIR}/examples/genrule/tools.txt" ] \
     || fail "Genrule did not produce output: examples/genrule:tools_work"
-}
-
-# Make sure that sandboxed execution doesn't accumulate files in the
-# sandbox directory.
-function test_sandbox_cleanup() {
-  bazel --batch clean &> $TEST_log \
-    || fail "bazel clean failed"
-  bazel build examples/genrule:tools_work &> $TEST_log \
-    || fail "Hermetic genrule failed: examples/genrule:tools_work"
-  bazel shutdown &> $TEST_log || fail "bazel shutdown failed"
-  if [[ -n "$(ls -A "$(bazel info output_base)/sandbox")" ]]; then
-    fail "Build left files around afterwards"
-  fi
 }
 
 # Test for #400: Linux sandboxing and relative symbolic links.
@@ -611,7 +598,7 @@ EOF
 }
 
 function test_experimental_symlinked_sandbox_uses_expanded_tree_artifacts_in_runfiles_tree() {
-  touch WORKSPACE
+  create_workspace_with_default_repos WORKSPACE
 
   cat > def.bzl <<'EOF'
 def _mkdata_impl(ctx):
@@ -670,7 +657,7 @@ EOF
 
 # regression test for https://github.com/bazelbuild/bazel/issues/6262
 function test_create_tree_artifact_inputs() {
-  touch WORKSPACE
+  create_workspace_with_default_repos WORKSPACE
 
   cat > def.bzl <<'EOF'
 def _r(ctx):

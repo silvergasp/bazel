@@ -78,12 +78,6 @@ public class ResourceProcessorBusyBox {
         RClassGeneratorAction.main(args);
       }
     },
-    GENERATE_LIBRARY_R() {
-      @Override
-      void call(String[] args) throws Exception {
-        LibraryRClassGeneratorAction.main(args);
-      }
-    },
     GENERATE_ROBOLECTRIC_R() {
       @Override
       void call(String[] args) throws Exception {
@@ -166,6 +160,7 @@ public class ResourceProcessorBusyBox {
     abstract void call(String[] args) throws Exception;
   }
 
+  public static final String PROPERTY_KEY_PREFIX = "rpbb.";
   private static final Logger logger = Logger.getLogger(ResourceProcessorBusyBox.class.getName());
 
   /** Converter for the Tool enum. */
@@ -187,7 +182,7 @@ public class ResourceProcessorBusyBox {
         effectTags = {OptionEffectTag.UNKNOWN},
         help =
             "The processing tool to execute. "
-                + "Valid tools: PACKAGE, VALIDATE, GENERATE_BINARY_R, GENERATE_LIBRARY_R, PARSE, "
+                + "Valid tools: PACKAGE, VALIDATE, GENERATE_BINARY_R, PARSE, "
                 + "MERGE, GENERATE_AAR, SHRINK, MERGE_MANIFEST, COMPILE_LIBRARY_RESOURCES, "
                 + "LINK_STATIC_LIBRARY, AAPT2_PACKAGE, SHRINK_AAPT2, MERGE_COMPILED.")
     public Tool tool;
@@ -229,10 +224,12 @@ public class ResourceProcessorBusyBox {
   }
 
   private static int processRequest(List<String> args) throws Exception {
-    OptionsParser optionsParser = OptionsParser.newOptionsParser(Options.class);
-    optionsParser.setAllowResidue(true);
-    optionsParser.enableParamsFileSupport(
-        new ShellQuotedParamsFilePreProcessor(FileSystems.getDefault()));
+    OptionsParser optionsParser =
+        OptionsParser.builder()
+            .optionsClasses(Options.class)
+            .allowResidue(true)
+            .argsPreProcessor(new ShellQuotedParamsFilePreProcessor(FileSystems.getDefault()))
+            .build();
     Options options;
     try {
       optionsParser.parse(args);

@@ -1,4 +1,4 @@
-#! /usr/bin/env bash
+#!/usr/bin/env bash
 #
 # Copyright 2015 The Bazel Authors. All rights reserved.
 #
@@ -27,7 +27,7 @@
 # infrastructure.
 # https://mike-bland.com/2012/10/01/tools.html#tools-tap-sponge
 #
-# "Every single change submitted to Google’s Perforce depot is built and
+# "Every single change submitted to Google's Perforce depot is built and
 # tested, and only those targets affected by a particular change are
 # built and tested"
 #

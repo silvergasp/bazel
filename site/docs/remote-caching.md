@@ -14,7 +14,7 @@ make builds significantly faster.
 
 * [Remote caching overview](#remote-caching-overview)
 * [How a build uses remote caching](#how-a-build-uses-remote-caching)
-* [Setting up a server as the cache’s backend](#setting-up-a-server-as-the-caches-backend)
+* [Setting up a server as the cache's backend](#setting-up-a-server-as-the-caches-backend)
     * [nginx](#nginx)
     * [Bazel Remote Cache](#bazel-remote-cache)
     * [Google Cloud Storage](#google-cloud-storage)
@@ -39,11 +39,11 @@ inputs and expected outputs are declared explicitly for each action.
 You can set up a server to be a remote cache for build outputs, which are these
 action outputs. These outputs consist of a list of output file names and the
 hashes of their contents. With a remote cache, you can reuse build outputs
-from another user’s build rather than building each new output locally.
+from another user's build rather than building each new output locally.
 
 To use remote caching:
 
-* Set up a server as the cache’s backend
+* Set up a server as the cache's backend
 * Configure the Bazel build to use the remote cache
 * Use Bazel version 0.10.0 or later
 
@@ -164,8 +164,11 @@ the key securely, as anyone with the key can read and write arbitrary data
 to/from your GCS bucket.
 
 4. Connect to Cloud Storage by adding the following flags to your Bazel command:
-   * Pass the following URL to Bazel by using the flag: `--remote_http_cache=https://storage.googleapis.com/bucket-name` where `bucket-name` is the name of your storage bucket.
-   * Pass the authentication key using the flag: `--google_credentials=/path/to/your/secret-key.json`.
+   * Pass the following URL to Bazel by using the flag:
+       `--remote_http_cache=https://storage.googleapis.com/bucket-name`
+       where `bucket-name` is the name of your storage bucket.
+   * Pass the authentication key using the flag: `--google_credentials=/path/to/your/secret-key.json`, or
+     `--google_default_credentials` to use [Application Default Credentials].
 
 5. You can configure Cloud Storage to automatically delete old files. To do so, see
 [Managing Object Lifecycles](https://cloud.google.com/storage/docs/managing-lifecycles).
@@ -206,7 +209,7 @@ A Bazel request to upload an output file with the SHA256 hash `15e2b0d3...` to
 the CAS will look as follows:
 
 ```http
-PUT /cas/15e2b0d3c33891ebb0f1ef609ec419420c20e320ce94c65fbc8c3312448eb225 HTTP/1.1
+PUT /cache/cas/15e2b0d3c33891ebb0f1ef609ec419420c20e320ce94c65fbc8c3312448eb225 HTTP/1.1
 Host: localhost:8080
 Accept: */*
 Content-Length: 9
@@ -224,12 +227,12 @@ their flags below.
 You may also need configure authentication, which is specific to your
 chosen server.
 
-You may want to add these flags in a `.bazelrc` file so that you don’t
+You may want to add these flags in a `.bazelrc` file so that you don't
 need to specify them every time you run Bazel. Depending on your project and
 team dynamics, you can add flags to a `.bazelrc` file that is:
 
 * On your local machine
-* In your project’s workspace, shared with the team
+* In your project's workspace, shared with the team
 * On the CI system
 
 ### Read from and write to the remote cache
@@ -243,7 +246,7 @@ Use the following flags to:
 * disable sandboxing
 
 ```
-build --remote_http_cache=http://replace-with-your.host:port
+build --remote_cache=http://replace-with-your.host:port
 build --spawn_strategy=standalone
 ```
 
@@ -252,7 +255,7 @@ following flags to read and write from the remote cache with sandboxing
 enabled:
 
 ```
-build --remote_http_cache=http://replace-with-your.host:port
+build --remote_cache=http://replace-with-your.host:port
 ```
 
 ### Read only from the remote cache
@@ -261,7 +264,7 @@ Use the following flags to: read from the remote cache with sandboxing
 disabled.
 
 ```
-build --remote_http_cache=http://replace-with-your.host:port
+build --remote_cache=http://replace-with-your.host:port
 build --remote_upload_local_results=false
 build --spawn_strategy=standalone
 ```
@@ -270,7 +273,7 @@ Using the remote cache with sandboxing enabled is experimental. Use the
 following flags to read from the remote cache with sandboxing enabled:
 
 ```
-build --remote_http_cache=http://replace-with-your.host:port
+build --remote_cache=http://replace-with-your.host:port
 build --remote_upload_local_results=false
 ```
 
@@ -294,7 +297,7 @@ set up as the cache. When deleting outputs, either delete the entire cache,
 or delete old outputs.
 
 The cached outputs are stored as a set of names and hashes. When deleting
-content, there’s no way to distinguish which output belongs to a specific
+content, there's no way to distinguish which output belongs to a specific
 build.
 
 You may want to delete content from the cache to:
@@ -309,7 +312,7 @@ is similar to curl's `--unix-socket` flag. Use the following to configure unix
 domain socket:
 
 ```
-build --remote_http_cache=http://replace-with-your.host:port
+build --remote_cache=http://replace-with-your.host:port
 build --remote_cache_proxy=unix:/replace/with/socket/path
 ```
 
@@ -391,4 +394,4 @@ watch [issue #4558] for updates.
 [Buildfarm]: https://github.com/bazelbuild/bazel-buildfarm
 [BuildGrid]: https://gitlab.com/BuildGrid/buildgrid
 [issue #4558]: https://github.com/bazelbuild/bazel/issues/4558
-
+[Application Default Credentials]: https://cloud.google.com/docs/authentication/production

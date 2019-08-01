@@ -37,7 +37,6 @@ import com.google.devtools.build.lib.skylarkbuildapi.java.JavaToolchainSkylarkAp
 import com.google.devtools.build.lib.syntax.SkylarkList;
 import com.google.devtools.build.lib.syntax.SkylarkNestedSet;
 import java.util.Iterator;
-import java.util.List;
 import javax.annotation.Nullable;
 
 /** Information about the JDK used by the <code>java_*</code> rules. */
@@ -73,11 +72,11 @@ public class JavaToolchainProvider extends ToolchainInfo
       Label label,
       ImmutableList<String> javacOptions,
       ImmutableList<String> jvmOptions,
+      ImmutableList<String> javabuilderJvmOptions,
       boolean javacSupportsWorkers,
       NestedSet<Artifact> bootclasspath,
       NestedSet<Artifact> extclasspath,
-      List<String> defaultJavacFlags,
-      Artifact javac,
+      @Nullable Artifact javac,
       NestedSet<Artifact> tools,
       FilesToRunProvider javaBuilder,
       @Nullable FilesToRunProvider headerCompiler,
@@ -92,6 +91,7 @@ public class JavaToolchainProvider extends ToolchainInfo
       FilesToRunProvider ijar,
       ImmutableListMultimap<String, String> compatibleJavacOptions,
       ImmutableList<JavaPackageConfigurationProvider> packageConfiguration,
+      FilesToRunProvider jacocoRunner,
       JavaSemantics javaSemantics) {
     return new JavaToolchainProvider(
         label,
@@ -111,19 +111,19 @@ public class JavaToolchainProvider extends ToolchainInfo
         timezoneData,
         ijar,
         compatibleJavacOptions,
-        // merges the defaultJavacFlags from
-        // {@link JavaConfiguration} with the flags from the {@code java_toolchain} rule.
-        ImmutableList.<String>builder().addAll(javacOptions).addAll(defaultJavacFlags).build(),
+        javacOptions,
         jvmOptions,
+        javabuilderJvmOptions,
         javacSupportsWorkers,
         packageConfiguration,
+        jacocoRunner,
         javaSemantics);
   }
 
   private final Label label;
   private final NestedSet<Artifact> bootclasspath;
   private final NestedSet<Artifact> extclasspath;
-  private final Artifact javac;
+  @Nullable private final Artifact javac;
   private final NestedSet<Artifact> tools;
   private final FilesToRunProvider javaBuilder;
   @Nullable private final FilesToRunProvider headerCompiler;
@@ -139,8 +139,10 @@ public class JavaToolchainProvider extends ToolchainInfo
   private final ImmutableListMultimap<String, String> compatibleJavacOptions;
   private final ImmutableList<String> javacOptions;
   private final ImmutableList<String> jvmOptions;
+  private final ImmutableList<String> javabuilderJvmOptions;
   private final boolean javacSupportsWorkers;
   private final ImmutableList<JavaPackageConfigurationProvider> packageConfiguration;
+  private final FilesToRunProvider jacocoRunner;
   private final JavaSemantics javaSemantics;
 
   @VisibleForSerialization
@@ -148,7 +150,7 @@ public class JavaToolchainProvider extends ToolchainInfo
       Label label,
       NestedSet<Artifact> bootclasspath,
       NestedSet<Artifact> extclasspath,
-      Artifact javac,
+      @Nullable Artifact javac,
       NestedSet<Artifact> tools,
       FilesToRunProvider javaBuilder,
       @Nullable FilesToRunProvider headerCompiler,
@@ -164,8 +166,10 @@ public class JavaToolchainProvider extends ToolchainInfo
       ImmutableListMultimap<String, String> compatibleJavacOptions,
       ImmutableList<String> javacOptions,
       ImmutableList<String> jvmOptions,
+      ImmutableList<String> javabuilderJvmOptions,
       boolean javacSupportsWorkers,
       ImmutableList<JavaPackageConfigurationProvider> packageConfiguration,
+      FilesToRunProvider jacocoRunner,
       JavaSemantics javaSemantics) {
     super(ImmutableMap.of(), Location.BUILTIN);
 
@@ -188,8 +192,10 @@ public class JavaToolchainProvider extends ToolchainInfo
     this.compatibleJavacOptions = compatibleJavacOptions;
     this.javacOptions = javacOptions;
     this.jvmOptions = jvmOptions;
+    this.javabuilderJvmOptions = javabuilderJvmOptions;
     this.javacSupportsWorkers = javacSupportsWorkers;
     this.packageConfiguration = packageConfiguration;
+    this.jacocoRunner = jacocoRunner;
     this.javaSemantics = javaSemantics;
   }
 
@@ -209,6 +215,7 @@ public class JavaToolchainProvider extends ToolchainInfo
   }
 
   /** Returns the {@link Artifact} of the javac jar */
+  @Nullable
   public Artifact getJavac() {
     return javac;
   }
@@ -300,8 +307,14 @@ public class JavaToolchainProvider extends ToolchainInfo
   }
 
   /** @return the list of default options for the java compiler */
-  public ImmutableList<String> getJavacOptions() {
-    return javacOptions;
+  public ImmutableList<String> getJavacOptions(RuleContext ruleContext) {
+    ImmutableList.Builder<String> result = ImmutableList.<String>builder().addAll(javacOptions);
+    if (ruleContext != null) {
+      // TODO(b/78512644): require ruleContext to be non-null after java_common.default_javac_opts
+      // is turned down
+      result.addAll(ruleContext.getFragment(JavaConfiguration.class).getDefaultJavacFlags());
+    }
+    return result.build();
   }
 
   /**
@@ -309,6 +322,11 @@ public class JavaToolchainProvider extends ToolchainInfo
    */
   public ImmutableList<String> getJvmOptions() {
     return jvmOptions;
+  }
+
+  /** Returns the list of JVM options for running JavaBuilder. */
+  public ImmutableList<String> getJavabuilderJvmOptions() {
+    return javabuilderJvmOptions;
   }
 
   /** @return whether JavaBuilders supports running as a persistent worker or not */
@@ -321,6 +339,10 @@ public class JavaToolchainProvider extends ToolchainInfo
     return packageConfiguration;
   }
 
+  public FilesToRunProvider getJacocoRunner() {
+    return jacocoRunner;
+  }
+
   public JavaSemantics getJavaSemantics() {
     return javaSemantics;
   }
@@ -329,7 +351,7 @@ public class JavaToolchainProvider extends ToolchainInfo
   // TODO(cushon): remove this API; it bakes a deprecated detail of the javac API into Bazel
   @Override
   public String getSourceVersion() {
-    Iterator<String> it = getJavacOptions().iterator();
+    Iterator<String> it = javacOptions.iterator();
     while (it.hasNext()) {
       if (it.next().equals("-source") && it.hasNext()) {
         return it.next();
@@ -342,7 +364,7 @@ public class JavaToolchainProvider extends ToolchainInfo
   // TODO(cushon): remove this API; it bakes a deprecated detail of the javac API into Bazel
   @Override
   public String getTargetVersion() {
-    Iterator<String> it = getJavacOptions().iterator();
+    Iterator<String> it = javacOptions.iterator();
     while (it.hasNext()) {
       if (it.next().equals("-target") && it.hasNext()) {
         return it.next();
@@ -352,6 +374,7 @@ public class JavaToolchainProvider extends ToolchainInfo
   }
 
   @Override
+  @Nullable
   public FileApi getJavacJar() {
     return getJavac();
   }
@@ -371,3 +394,5 @@ public class JavaToolchainProvider extends ToolchainInfo
     return SkylarkNestedSet.of(Artifact.class, getTools());
   }
 }
+
+

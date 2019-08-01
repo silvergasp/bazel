@@ -46,8 +46,6 @@ import com.google.devtools.build.lib.skylarkinterface.SkylarkValue;
             + "    build_setting = config.int(flag = True),\n"
             + "    ...\n"
             + "  )</pre>")
-// TODO(juliexxia): Create formal documentation for starlark build configuration efforts
-// (b/112545834)
 public interface StarlarkConfigApi extends SkylarkValue {
 
   static final String FLAG_ARG = "flag";
@@ -110,38 +108,10 @@ public interface StarlarkConfigApi extends SkylarkValue {
       })
   BuildSettingApi stringListSetting(Boolean flag);
 
-  @SkylarkCallable(
-      name = "label",
-      doc = "A label typed build setting",
-      parameters = {
-        @Param(
-            name = FLAG_ARG,
-            type = Boolean.class,
-            defaultValue = "False",
-            doc = FLAG_ARG_DOC,
-            named = true,
-            positional = false)
-      })
-  BuildSettingApi labelSetting(Boolean flag);
-
-  @SkylarkCallable(
-      name = "label_list",
-      doc = "A label list-typed build setting",
-      parameters = {
-        @Param(
-            name = FLAG_ARG,
-            type = Boolean.class,
-            defaultValue = "False",
-            doc = FLAG_ARG_DOC,
-            named = true,
-            positional = false)
-      })
-  BuildSettingApi labelListSetting(Boolean flag);
-
   /** The API for build setting descriptors. */
   @SkylarkModule(
       name = "BuildSetting",
-      category = SkylarkModuleCategory.NONE,
+      category = SkylarkModuleCategory.BUILTIN,
       doc =
           "The descriptor for a single piece of configuration information. If configuration is a "
               + "key-value map of settings like {'cpu': 'ppc', 'copt': '-DFoo'}, this describes a "

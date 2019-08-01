@@ -15,9 +15,13 @@ filegroup(
 
 java_test(
     name = "RepositoryTests",
-    srcs = glob([
-        "**/*.java",
-    ]),
+    srcs = glob(["*.java"]) + [
+        "skylark/SkylarkRepositoryContextTest.java",
+    ],
+    data = [
+        "test_decompress_archive.tar.gz",
+        "test_decompress_archive.zip",
+    ],
     tags = [
         "rules",
     ],
@@ -30,6 +34,7 @@ java_test(
         "//src/main/java/com/google/devtools/build/lib:os_util",
         "//src/main/java/com/google/devtools/build/lib:packages-internal",
         "//src/main/java/com/google/devtools/build/lib:syntax",
+        "//src/main/java/com/google/devtools/build/lib:unix",
         "//src/main/java/com/google/devtools/build/lib:util",
         "//src/main/java/com/google/devtools/build/lib/analysis/platform",
         "//src/main/java/com/google/devtools/build/lib/analysis/platform:utils",
@@ -48,6 +53,7 @@ java_test(
         "//src/test/java/com/google/devtools/build/lib:packages_testutil",
         "//src/test/java/com/google/devtools/build/lib:test_runner",
         "//src/test/java/com/google/devtools/build/lib:testutil",
+        "//third_party:diffutils",
         "//third_party:guava",
         "//third_party:guava-testlib",
         "//third_party:jsr305",
@@ -55,6 +61,7 @@ java_test(
         "//third_party:maven",
         "//third_party:mockito",
         "//third_party:truth",
+        "@bazel_tools//tools/java/runfiles",
     ],
 )
 
